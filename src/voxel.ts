@@ -61,6 +61,8 @@ export type ProjectState = {
   instances: SceneInstance[]
   customVoxels: Voxel[]
   customColors?: Record<string, string>
+  entityNames?: Record<string, string>
+  assemblySequence?: number
   assemblies?: SceneAssembly[]
   lockedMemberKeys?: string[]
 }
@@ -481,7 +483,7 @@ export function makeDefaultProject(): ProjectState {
     { id: 'inst-tree-a', assetId: 'tree-basic', x: -9, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
     { id: 'inst-tree-b', assetId: 'tree-basic', x: 8, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
   ]
-  return { version: 1, name: '莫测里·第一街区', voxelSizeMm: 1, sceneSizeCm: 20, materials: MATERIALS, assets, instances, customVoxels: [], customColors: {}, assemblies: [], lockedMemberKeys: [] }
+  return { version: 1, name: '莫测里·第一街区', voxelSizeMm: 1, sceneSizeCm: 20, materials: MATERIALS, assets, instances, customVoxels: [], customColors: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
 }
 
 export function makeStl(asset: VoxelAsset): string {

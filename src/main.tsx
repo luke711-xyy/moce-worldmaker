@@ -79,9 +79,32 @@ type SceneTreeItem = {
 const CURRENT_SCENE_ID = 'scene-main'
 type PersistenceStatus = 'loading' | 'saved' | 'offline'
 
+function scenePartBaseName(project: ProjectState, part: SceneEntityPart): string {
+  if (part.kind === 'custom') return part.label ?? '手动体素实体'
+  const instance = part.instanceId ? project.instances.find((item) => item.id === part.instanceId) : undefined
+  const asset = instance ? project.assets.find((item) => item.id === instance.assetId) : undefined
+  return `${asset?.name ?? '场景实体'}${part.label && part.label !== part.partId ? ` · ${part.label}` : ''}`
+}
+
 function normalizeStoredProject(loaded: ProjectState): ProjectState {
   const defaultAssets = new Map(makeDefaultProject().assets.map((asset) => [asset.id, asset]))
-  return {
+  const rawAssemblies = loaded.assemblies ?? []
+  const usedAssemblyNames = new Set<string>()
+  let nextAssemblyNumber = Math.max(1, loaded.assemblySequence ?? 1)
+  rawAssemblies.forEach((assembly) => {
+    const match = assembly.name?.trim().match(/^装配体 (\d+)$/)
+    if (match) nextAssemblyNumber = Math.max(nextAssemblyNumber, Number(match[1]) + 1)
+  })
+  const assemblies = rawAssemblies.map((assembly) => {
+    let name = assembly.name?.trim()
+    if (!name || usedAssemblyNames.has(name)) {
+      do name = `装配体 ${nextAssemblyNumber++}`
+      while (usedAssemblyNames.has(name))
+    }
+    usedAssemblyNames.add(name)
+    return { ...assembly, name }
+  })
+  const normalized: ProjectState = {
     ...loaded,
     assets: (loaded.assets ?? []).map((asset) => ({
       ...asset,
@@ -90,10 +113,23 @@ function normalizeStoredProject(loaded: ProjectState): ProjectState {
     })),
     customVoxels: (loaded.customVoxels ?? []).map((voxel, index) => ({ ...voxel, entityId: voxel.entityId ?? `legacy-${voxel.x}-${voxel.y}-${voxel.z}-${index}` })),
     customColors: { ...(loaded.customColors ?? {}) },
-    assemblies: loaded.assemblies ?? [],
+    entityNames: { ...(loaded.entityNames ?? {}) },
+    assemblySequence: nextAssemblyNumber,
+    assemblies,
     instances: (loaded.instances ?? []).map((instance) => ({ ...instance, x: snapWorld(instance.x), y: snapWorld(instance.y ?? 0), z: snapWorld(instance.z), overrides: instance.overrides ?? [], partOffsets: instance.partOffsets ?? {} })),
     lockedMemberKeys: [...new Set(loaded.lockedMemberKeys ?? [])],
   }
+  const usedEntityNames = new Set(Object.values(normalized.entityNames ?? {}))
+  for (const part of sceneEntityParts(normalized)) {
+    if (normalized.entityNames?.[part.memberKey]) continue
+    const baseName = scenePartBaseName(normalized, part)
+    let name = baseName
+    let suffix = 2
+    while (usedEntityNames.has(name)) name = `${baseName} ${suffix++}`
+    normalized.entityNames![part.memberKey] = name
+    usedEntityNames.add(name)
+  }
+  return normalized
 }
 
 function scenePartIsLocked(project: ProjectState, part: SceneEntityPart): boolean {
@@ -175,7 +211,7 @@ const styleMaterialVariants: Record<string, { color: string; accent: string }> =
 }
 
 function App() {
-  const [project, setProject] = useState<ProjectState>(() => makeDefaultProject())
+  const [project, setProject] = useState<ProjectState>(() => normalizeStoredProject(makeDefaultProject()))
   const projectRef = useRef(project)
   const historyRef = useRef<{ past: ProjectState[]; future: ProjectState[] }>({ past: [], future: [] })
   const [historyRevision, setHistoryRevision] = useState(0)
@@ -231,6 +267,8 @@ function App() {
   const sceneTreeItems = useMemo<SceneTreeItem[]>(() => {
     const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
     const baseNameForPart = (part: SceneEntityPart) => {
+      const storedName = project.entityNames?.[part.memberKey]
+      if (storedName) return storedName
       if (part.kind === 'custom') return part.label ?? '手动体素实体'
       const instance = part.instanceId ? project.instances.find((item) => item.id === part.instanceId) : undefined
       const asset = instance ? assetMap.get(instance.assetId) : undefined
@@ -299,12 +337,13 @@ function App() {
   }
 
   const commitProject = (next: ProjectState, trackHistory = true) => {
+    const normalizedNext = normalizeStoredProject(next)
     if (trackHistory) {
       historyRef.current.past = [...historyRef.current.past, structuredClone(projectRef.current)].slice(-50)
       historyRef.current.future = []
     }
-    projectRef.current = next
-    setProject(next)
+    projectRef.current = normalizedNext
+    setProject(normalizedNext)
     setHistoryRevision((value) => value + 1)
   }
 
@@ -670,9 +709,8 @@ function App() {
       return
     }
     const assemblyId = `assembly-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
-    const usedAssemblyNames = new Set((nextProject.assemblies ?? []).map((assembly) => assembly.name).filter((name): name is string => Boolean(name)))
-    let assemblyNumber = 1
-    while (usedAssemblyNames.has(`装配体 ${assemblyNumber}`)) assemblyNumber += 1
+    const assemblyNumber = Math.max(1, nextProject.assemblySequence ?? 1)
+    nextProject.assemblySequence = assemblyNumber + 1
     const detachedMembers = new Set(memberKeys)
     nextProject.assemblies = (nextProject.assemblies ?? []).map((assembly) => ({
       ...assembly,
@@ -1047,10 +1085,9 @@ function App() {
             ...structuredClone(sourceAssembly),
             id: assemblyMapForCopy.get(oldId)!,
             name: (() => {
-              const used = new Set((draft.assemblies ?? []).map((assembly) => assembly.name).filter(Boolean))
-              let index = 1
-              while (used.has(`装配体 ${index}`)) index += 1
-              return `装配体 ${index}`
+              const assemblyNumber = Math.max(1, draft.assemblySequence ?? 1)
+              draft.assemblySequence = assemblyNumber + 1
+              return `装配体 ${assemblyNumber}`
             })(),
             memberKeys: sourceAssembly.memberKeys.map(mapMemberKey),
           }]
