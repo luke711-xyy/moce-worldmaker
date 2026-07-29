@@ -53,7 +53,7 @@ button { border: 0; cursor: pointer; color: inherit; }
 .scene-tree-select { min-width: 0; flex: 1; display: flex; align-items: center; gap: 6px; overflow: hidden; padding: 5px 4px; color: inherit; background: transparent; text-align: left; white-space: nowrap; text-overflow: ellipsis; }
 .scene-tree-select .tree-node-mark { width: 7px; height: 7px; flex: 0 0 auto; border: 1px solid #85918e; background: #526d6a; }
 .scene-tree-select .assembly-mark { flex: 0 0 auto; color: #d2a354; }
-.scene-tree-children { margin-left: 14px; border-left: 1px solid #3a4547; }
+.scene-tree-children { margin-left: 7px; border-left: 1px solid #3a4547; }
 .scene-tree-empty { padding: 18px 8px; color: #687475; font-size: 9px; line-height: 1.6; }
 .scene-tree-context-menu { position: fixed; z-index: 30; min-width: 112px; padding: 4px; background: #273033; border: 1px solid #586466; box-shadow: 0 10px 25px rgba(0,0,0,.34); }
 .viewport-scene-tree-overlay .scene-tree-context-menu { pointer-events: auto; }
