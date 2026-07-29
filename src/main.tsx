@@ -1306,52 +1306,32 @@ function exposedVoxelFaces(voxel: Pick<Voxel, 'x' | 'y' | 'z'>, occupied: Set<st
   return voxelFaceDirections.filter(({ neighbor: [dx, dy, dz] }) => !occupied.has(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`)).map(({ key }) => key)
 }
 
-function createVoxelOutlineGeometry(faces: VoxelFaceKey[]) {
+function createVoxelOutlineGeometry() {
   const half = VOXEL_WORLD_SIZE / 2
-  const faceCorners: Record<VoxelFaceKey, Array<[number, number, number]>> = {
-    px: [[half, -half, -half], [half, half, -half], [half, half, half], [half, -half, half]],
-    nx: [[-half, -half, half], [-half, half, half], [-half, half, -half], [-half, -half, -half]],
-    py: [[-half, half, -half], [half, half, -half], [half, half, half], [-half, half, half]],
-    ny: [[-half, -half, half], [half, -half, half], [half, -half, -half], [-half, -half, -half]],
-    pz: [[-half, -half, half], [-half, half, half], [half, half, half], [half, -half, half]],
-    nz: [[half, -half, -half], [half, half, -half], [-half, half, -half], [-half, -half, -half]],
-  }
-  const normals = new Map<VoxelFaceKey, string>(voxelFaceDirections.map(({ key, normal }) => [key, normal.join(',')]))
-  const edges = new Map<string, { a: [number, number, number]; b: [number, number, number]; normalKeys: Set<string> }>()
-  const pointKey = (point: [number, number, number]) => point.map((value) => value.toFixed(4)).join(',')
-  const edgeKey = (a: [number, number, number], b: [number, number, number]) => [pointKey(a), pointKey(b)].sort().join('|')
-  faces.forEach((face) => {
-    const corners = faceCorners[face]
-    for (let index = 0; index < corners.length; index += 1) {
-      const a = corners[index]
-      const b = corners[(index + 1) % corners.length]
-      const key = edgeKey(a, b)
-      const existing = edges.get(key)
-      if (existing) existing.normalKeys.add(normals.get(face)!)
-      else edges.set(key, { a, b, normalKeys: new Set([normals.get(face)!]) })
-    }
-  })
+  const corners: Array<[number, number, number]> = [
+    [-half, -half, -half], [half, -half, -half], [half, half, -half], [-half, half, -half],
+    [-half, -half, half], [half, -half, half], [half, half, half], [-half, half, half],
+  ]
+  const edgePairs: Array<[number, number]> = [
+    [0, 1], [1, 2], [2, 3], [3, 0],
+    [4, 5], [5, 6], [6, 7], [7, 4],
+    [0, 4], [1, 5], [2, 6], [3, 7],
+  ]
   const positions: number[] = []
-  edges.forEach(({ a, b, normalKeys }) => {
-    if (normalKeys.size === 1 && faces.length > 1) return
-    positions.push(...a, ...b)
-  })
+  edgePairs.forEach(([aIndex, bIndex]) => positions.push(...corners[aIndex], ...corners[bIndex]))
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
   return geometry
 }
 
-function addOuterVoxelHighlight(mesh: THREE.Mesh) {
-  if (!mesh.userData.outerVoxel) return
-  const exposedFaces = mesh.userData.exposedFaces as VoxelFaceKey[] | undefined
-  if (!exposedFaces?.length) return
-  const edgeGeometry = createVoxelOutlineGeometry(exposedFaces)
-  const glow = new THREE.LineSegments(edgeGeometry, new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.2, depthTest: false, depthWrite: false }))
+function addVoxelHighlight(mesh: THREE.Mesh) {
+  const edgeGeometry = createVoxelOutlineGeometry()
+  const glow = new THREE.LineSegments(edgeGeometry, new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.2, depthTest: true, depthWrite: false }))
   glow.scale.setScalar(1.055)
   glow.renderOrder = 20
   glow.userData.selectionGlow = true
   glow.raycast = () => {}
-  const edge = new THREE.LineSegments(edgeGeometry, new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.9, depthTest: false, depthWrite: false }))
+  const edge = new THREE.LineSegments(edgeGeometry, new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.9, depthTest: true, depthWrite: false }))
   edge.scale.setScalar(1.012)
   edge.renderOrder = 21
   edge.userData.selectionGlow = true
@@ -1647,7 +1627,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
         if (!(object instanceof THREE.Mesh) || object.userData.selectionGlow) return
         const scenePartId = object.userData.scenePartId as string | undefined
         const highlighted = instance.id === selectedId || Boolean(scenePartId && (selectedScenePartIds.has(scenePartId) || editScenePartIds.has(scenePartId)))
-        if (highlighted) addOuterVoxelHighlight(object)
+        if (highlighted) addVoxelHighlight(object)
       })
       group.add(instanceGroup)
     }
@@ -1666,7 +1646,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
         const exposedFaces = exposedVoxelFaces(voxel, occupied)
         mesh.userData.exposedFaces = exposedFaces
         mesh.userData.outerVoxel = exposedFaces.length > 0
-        if (selectedScenePartIds.has(mesh.userData.scenePartId) || editScenePartIds.has(mesh.userData.scenePartId)) addOuterVoxelHighlight(mesh)
+        if (selectedScenePartIds.has(mesh.userData.scenePartId) || editScenePartIds.has(mesh.userData.scenePartId)) addVoxelHighlight(mesh)
         custom.add(mesh)
         })
       }
