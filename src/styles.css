@@ -139,7 +139,7 @@ button { border: 0; cursor: pointer; color: inherit; }
 .camera-joystick-ring { width: 60px; height: 60px; display: grid; place-items: center; border: 1px solid #586568; border-radius: 50%; background: radial-gradient(circle at 50% 45%, rgba(91,111,112,.42), rgba(21,28,30,.92) 70%); box-shadow: inset 0 0 0 4px rgba(255,255,255,.035), 0 8px 18px rgba(0,0,0,.28); }
 .camera-joystick-knob { width: 30px; height: 30px; display: block; padding: 0; border: 1px solid #d48768; border-radius: 50%; background: #a9523c; box-shadow: 0 3px 10px rgba(0,0,0,.38); cursor: grab; touch-action: none; }
 .camera-joystick-knob:hover { background: #c2694e; }
-.camera-joystick-knob:active { cursor: grabbing; transform: scale(.96); }
+.camera-joystick-knob:active { cursor: grabbing; }
 .camera-cube-button, .camera-reset-button { position: absolute; right: 84px; display: grid; place-items: center; color: #c2cdca; border: 1px solid #526063; background: rgba(28,36,38,.95); box-shadow: 0 5px 14px rgba(0,0,0,.25); }
 .camera-cube-button { top: 3px; width: 34px; height: 34px; }
 .camera-reset-button { top: 44px; width: 28px; height: 28px; color: #aab6b3; }

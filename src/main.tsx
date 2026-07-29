@@ -1347,6 +1347,7 @@ const cameraViewOptions: Array<{ id: Exclude<CameraView, 'default'>; label: stri
 
 function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true, showActions = true }: { onRotate: (deltaX: number, deltaY: number) => void; onView: (view: Exclude<CameraView, 'default'>) => void; onReset: () => void; showJoystick?: boolean; showActions?: boolean }) {
   const [expanded, setExpanded] = useState(false)
+  const [joystickOffset, setJoystickOffset] = useState({ x: 0, y: 0 })
   const joystickRef = useRef<{ pointerId: number; lastX: number; lastY: number } | null>(null)
   const stopControlPointer = (event: React.SyntheticEvent) => event.stopPropagation()
   const startJoystick = (event: React.PointerEvent<HTMLButtonElement>) => {
@@ -1358,13 +1359,28 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   const moveJoystick = (event: React.PointerEvent<HTMLButtonElement>) => {
     const gesture = joystickRef.current
     if (!gesture || gesture.pointerId !== event.pointerId) return
+    const ring = event.currentTarget.parentElement?.getBoundingClientRect()
+    const knob = event.currentTarget.getBoundingClientRect()
+    if (ring) {
+      const maxOffset = Math.max(0, ring.width / 2 - knob.width / 2 - 1)
+      const centerX = ring.left + ring.width / 2
+      const centerY = ring.top + ring.height / 2
+      const rawX = event.clientX - centerX
+      const rawY = event.clientY - centerY
+      const distance = Math.hypot(rawX, rawY)
+      const scale = distance > maxOffset && distance > 0 ? maxOffset / distance : 1
+      setJoystickOffset({ x: rawX * scale, y: rawY * scale })
+    }
     onRotate(event.clientX - gesture.lastX, event.clientY - gesture.lastY)
     gesture.lastX = event.clientX
     gesture.lastY = event.clientY
   }
   const endJoystick = (event: React.PointerEvent<HTMLButtonElement>) => {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
-    if (joystickRef.current?.pointerId === event.pointerId) joystickRef.current = null
+    if (joystickRef.current?.pointerId === event.pointerId) {
+      joystickRef.current = null
+      setJoystickOffset({ x: 0, y: 0 })
+    }
   }
   return <div className="viewport-camera-controls" onPointerDown={stopControlPointer} onPointerMove={stopControlPointer} onPointerUp={stopControlPointer} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}>
     {showActions && <>
@@ -1372,7 +1388,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
       <button className="camera-cube-button" aria-label="展开六个标准视角" aria-expanded={expanded} title="六个标准视角" onClick={() => setExpanded((value) => !value)}><Box size={22} /><ChevronUp size={11} className={expanded ? 'camera-menu-chevron expanded' : 'camera-menu-chevron'} /></button>
       <button className="camera-reset-button" aria-label="视角回中" title="视角回中" onClick={onReset}><RotateCcw size={14} /></button>
     </>}
-    {showJoystick && <div className="camera-joystick" aria-label="按住拖动旋转视角"><div className="camera-joystick-ring"><button className="camera-joystick-knob" aria-label="拖动摇杆旋转视角" onPointerDown={startJoystick} onPointerMove={moveJoystick} onPointerUp={endJoystick} onPointerCancel={endJoystick} /></div></div>}
+    {showJoystick && <div className="camera-joystick" aria-label="按住拖动旋转视角"><div className="camera-joystick-ring"><button className="camera-joystick-knob" style={{ transform: `translate(${joystickOffset.x}px, ${joystickOffset.y}px)` }} aria-label="拖动摇杆旋转视角" onPointerDown={startJoystick} onPointerMove={moveJoystick} onPointerUp={endJoystick} onPointerCancel={endJoystick} /></div></div>}
   </div>
 }
 
