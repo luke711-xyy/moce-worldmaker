@@ -22,13 +22,10 @@ type SelectGesture = {
   parts: SceneEntityPart[]
   startX: number
   startY: number
-  offsetX: number
-  offsetZ: number
   startGroundX: number
-  startGroundZ: number
-  startInstanceY: number
-  startVerticalY: number
-  verticalPlane: { normalX: number; normalZ: number; constant: number }
+  startGroundY: number
+  startVerticalZ: number
+  verticalPlane: { normalX: number; normalY: number; constant: number }
   lastDeltaX: number
   lastDeltaY: number
   lastDeltaZ: number
@@ -1055,7 +1052,7 @@ function App() {
             <div className="footer-separator" />
             <button className={`footer-control ${showGrid ? 'active' : ''}`} onClick={() => { setShowGrid((value) => !value); setNotice(showGrid ? '已隐藏网格' : '已显示网格') }}><Grid3X3 size={16} /> 网格</button>
             <button className={`footer-control ${showGround ? 'active' : ''}`} onClick={() => { setShowGround((value) => !value); setNotice(showGround ? '已隐藏地面' : '已显示地面') }}><Layers3 size={16} /> 地面 <ChevronDown size={13} /></button>
-            <div className="drag-axis-control" aria-label="拖动方向"><Move3d size={14} /><span>拖动</span><button className={dragAxis === 'horizontal' ? 'active' : ''} onClick={() => { setDragAxis('horizontal'); setNotice('拖动方向 · 水平（X/Z）') }}>水平 X/Z</button><button className={dragAxis === 'vertical' ? 'active' : ''} onClick={() => { setDragAxis('vertical'); setNotice('拖动方向 · 竖直（Y）') }}>竖直 Y</button></div>
+            <div className="drag-axis-control" aria-label="拖动方向"><Move3d size={14} /><span>拖动</span><button className={dragAxis === 'horizontal' ? 'active' : ''} onClick={() => { setDragAxis('horizontal'); setNotice('拖动方向 · 水平（X/Y）') }}>水平 X/Y</button><button className={dragAxis === 'vertical' ? 'active' : ''} onClick={() => { setDragAxis('vertical'); setNotice('拖动方向 · 竖直（Z）') }}>竖直 Z</button></div>
             <div className="footer-status"><span className={`status-dot ${persistenceStatus === 'offline' ? 'offline' : ''}`} /> {notice}</div>
             {cameraControlApi && <ViewportCameraControls showJoystick={false} onRotate={cameraControlApi.rotate} onView={(view) => { cameraControlApi.view(view); setNotice(`已切换视角 · ${cameraViewOptions.find((item) => item.id === view)?.label ?? view}`) }} onReset={() => { cameraControlApi.reset(); setNotice('视角已回中') }} />}
             <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { setZoomLevel((value) => Math.max(50, value - 10)); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${Math.max(0, Math.min(100, ((zoomLevel - 50) / 150) * 100))}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { setZoomLevel((value) => Math.min(200, value + 10)); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{zoomLevel}%</span></div>
@@ -1196,8 +1193,8 @@ function Inspector({ selectedAsset, selectedInstance, selectedPart, selectedPart
   const previewVoxels = selectedParts.flatMap((part) => part.voxels)
   const customOrigin = selectedPart?.voxels[0]
   const position = selectedInstance
-    ? [selectedInstance.x, selectedInstance.y ?? 0, selectedInstance.z]
-    : customOrigin ? [voxelToWorld(customOrigin.x), voxelCenterToWorld(customOrigin.y), voxelToWorld(customOrigin.z)] : [0, 0, 0]
+    ? [selectedInstance.x, selectedInstance.z, selectedInstance.y ?? 0]
+    : customOrigin ? [voxelToWorld(customOrigin.x), voxelToWorld(customOrigin.z), voxelCenterToWorld(customOrigin.y)] : [0, 0, 0]
   const isAssembly = selectedParts.length > 1 && selectedParts.some((part) => part.assemblyId)
   const entityName = isAssembly ? `装配体 · ${selectedParts.length} 个子实体` : selectedAsset?.name ?? selectedPart?.label ?? (selectedPart ? '手动体素实体' : '未选择')
   const entityId = selectedInstance?.id ?? selectedPart?.id ?? '—'
@@ -1397,6 +1394,9 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
   const [sceneSelectionBox, setSceneSelectionBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
   const [sceneContextMenu, setSceneContextMenu] = useState<{ partIds: string[]; x: number; y: number } | null>(null)
   const [ready, setReady] = useState(false)
+  // Keep persisted asset coordinates backward-compatible while presenting the scene
+  // in the editor's conventional XY ground plane with Z as the vertical axis.
+  const toSceneWorld = (x: number, y: number, z: number) => new THREE.Vector3(x, z, y)
 
   const materialMap = useMemo(() => new Map(project.materials.map((material) => [material.id, new THREE.MeshStandardMaterial({ color: material.color, roughness: 0.72, metalness: 0.03 })])), [project.materials])
 
@@ -1433,17 +1433,17 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
     const ambient = new THREE.HemisphereLight('#f4f0e8', '#263238', 2.4)
     scene.add(ambient)
     const key = new THREE.DirectionalLight('#fff0d8', 3.5)
-    key.position.set(10, 22, 10)
+    key.position.set(10, 10, 22)
     key.castShadow = true
     scene.add(key)
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(22, 22), new THREE.MeshStandardMaterial({ color: '#11181b', roughness: 0.95 }))
-    floor.rotation.x = -Math.PI / 2
-    floor.position.y = 0
+    floor.position.z = 0
     floor.name = 'editing-floor'
     floor.receiveShadow = true
     scene.add(floor)
     const grid = new THREE.GridHelper(20, 20, '#34464c', '#203036')
-    grid.position.y = -0.004
+    grid.rotation.x = Math.PI / 2
+    grid.position.z = -0.004
     grid.name = 'editing-grid'
     scene.add(grid)
     const group = new THREE.Group()
@@ -1485,7 +1485,9 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
         { key: 'z', vector: new THREE.Vector3(0, 0, 1), color: '#7b9ed0' },
       ]
       axes.forEach(({ key, vector, color }) => {
-        const point = vector.applyMatrix4(currentCamera.matrixWorldInverse)
+        // Transform a direction, not a point: camera panning must never change
+        // the length or angle of the axis indicator.
+        const point = vector.clone().transformDirection(currentCamera.matrixWorldInverse)
         const endX = center + point.x * length
         const endY = center - point.y * length
         const line = svg.querySelector<SVGLineElement>(`[data-axis-line="${key}"]`)
@@ -1558,18 +1560,18 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
     const target = new THREE.Vector3(0, 0, 0)
     const distance = 28
     let position = new THREE.Vector3(16, 18, 18)
-    let up = new THREE.Vector3(0, 1, 0)
-    if (view === 'front') position = new THREE.Vector3(0, 0, distance)
-    if (view === 'back') position = new THREE.Vector3(0, 0, -distance)
+    let up = new THREE.Vector3(0, 0, 1)
+    if (view === 'front') position = new THREE.Vector3(0, distance, 0)
+    if (view === 'back') position = new THREE.Vector3(0, -distance, 0)
     if (view === 'left') position = new THREE.Vector3(-distance, 0, 0)
     if (view === 'right') position = new THREE.Vector3(distance, 0, 0)
     if (view === 'top') {
-      position = new THREE.Vector3(0, distance, 0)
-      up = new THREE.Vector3(0, 0, -1)
+      position = new THREE.Vector3(0, 0, distance)
+      up = new THREE.Vector3(0, 1, 0)
     }
     if (view === 'bottom') {
-      position = new THREE.Vector3(0, -distance, 0)
-      up = new THREE.Vector3(0, 0, 1)
+      position = new THREE.Vector3(0, 0, -distance)
+      up = new THREE.Vector3(0, -1, 0)
     }
     cameras.orthographic.position.copy(position)
     cameras.perspective.position.copy(position)
@@ -1616,8 +1618,8 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
       const variant = styleMaterialVariants[instance.style]
       const renderAsset = variant ? { ...asset, color: variant.color, accent: variant.accent } : asset
       const instanceGroup = buildAssetGroup(renderAsset, materialMap, instance.overrides, instance.partOffsets, instance.rotation)
-      instanceGroup.position.set(instance.x, instance.y ?? 0, instance.z)
-      instanceGroup.rotation.y = instance.rotation * Math.PI / 180
+      instanceGroup.position.copy(toSceneWorld(instance.x, instance.y ?? 0, instance.z))
+      instanceGroup.rotation.z = instance.rotation * Math.PI / 180
       instanceGroup.userData.instanceId = instance.id
       instanceGroup.traverse((object) => {
         object.userData.instanceId = instance.id
@@ -1639,7 +1641,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
         component.forEach((voxel) => {
         const material = materialMap.get(voxel.materialId) ?? materialMap.get('terracotta')!
         const mesh = new THREE.Mesh(new THREE.BoxGeometry(VOXEL_WORLD_SIZE, VOXEL_WORLD_SIZE, VOXEL_WORLD_SIZE), material.clone())
-        mesh.position.set(voxelToWorld(voxel.x), voxelCenterToWorld(voxel.y), voxelToWorld(voxel.z))
+        mesh.position.copy(toSceneWorld(voxelToWorld(voxel.x), voxelCenterToWorld(voxel.y), voxelToWorld(voxel.z)))
         mesh.userData.customVoxel = voxel
         mesh.userData.customComponentId = voxelComponentId(component)
         mesh.userData.scenePartId = `custom:${voxelEntityId(voxel)}`
@@ -1656,7 +1658,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
       const variant = styleMaterialVariants[placementAsset.style]
       const renderAsset = variant ? { ...placementAsset, color: variant.color, accent: variant.accent } : placementAsset
       const preview = buildAssetGroup(renderAsset, materialMap)
-      preview.position.set(placementPreview.x, placementPreview.y, placementPreview.z)
+      preview.position.copy(toSceneWorld(placementPreview.x, placementPreview.y, placementPreview.z))
       preview.userData.placementPreview = true
       preview.traverse((object) => {
         object.userData.placementPreview = true
@@ -1692,14 +1694,14 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
     const camera = cameraRef.current
     const viewDirection = new THREE.Vector3(0, 0, 1)
     camera?.getWorldDirection(viewDirection)
-    viewDirection.y = 0
+    viewDirection.z = 0
     if (viewDirection.lengthSq() < 0.0001) viewDirection.set(0, 0, 1)
     viewDirection.normalize()
-    return { normalX: viewDirection.x, normalZ: viewDirection.z, constant: -(viewDirection.x * anchor.x + viewDirection.z * anchor.z) }
+    return { normalX: viewDirection.x, normalY: viewDirection.y, constant: -(viewDirection.x * anchor.x + viewDirection.y * anchor.y) }
   }
 
   const getVerticalPoint = (planeData: SelectGesture['verticalPlane']) => {
-    const plane = new THREE.Plane(new THREE.Vector3(planeData.normalX, 0, planeData.normalZ), planeData.constant)
+    const plane = new THREE.Plane(new THREE.Vector3(planeData.normalX, planeData.normalY, 0), planeData.constant)
     return raycasterRef.current.ray.intersectPlane(plane, new THREE.Vector3())
   }
 
@@ -1715,7 +1717,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
     const selected = new Set<string>()
     for (const part of sceneEntityParts(project)) {
       if (part.voxels.some((voxel) => {
-        const point = new THREE.Vector3(voxelCenterToWorld(voxel.x), voxelCenterToWorld(voxel.y), voxelCenterToWorld(voxel.z)).project(camera)
+        const point = toSceneWorld(voxelCenterToWorld(voxel.x), voxelCenterToWorld(voxel.y), voxelCenterToWorld(voxel.z)).project(camera)
         const screenX = rect.left + (point.x + 1) * 0.5 * rect.width
         const screenY = rect.top + (1 - point.y) * 0.5 * rect.height
         return screenX >= minX && screenX <= maxX && screenY >= minY && screenY <= maxY
@@ -1755,7 +1757,8 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
       const hitVoxel = instanceHit.object.userData.instanceVoxel as Voxel
       if (tool === 'brush') {
         if (!instanceHit.face) return
-        onEditInstanceVoxel(instanceId, adjacentVoxel(hitVoxel, instanceHit.face.normal, activeMaterial), 'add')
+        const displayNormal = instanceHit.face.normal.clone().transformDirection(instanceHit.object.matrixWorld)
+        onEditInstanceVoxel(instanceId, adjacentVoxel(hitVoxel, { x: displayNormal.x, y: displayNormal.z, z: displayNormal.y }, activeMaterial), 'add')
       } else {
         onEditInstanceVoxel(instanceId, hitVoxel, 'remove')
       }
@@ -1766,14 +1769,14 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
       const hitVoxel = customHit.object.userData.customVoxel as Voxel
       if (tool === 'brush') {
         if (!customHit.face) return
-        const normal = customHit.face.normal.clone().transformDirection(customHit.object.matrixWorld)
-        onAddVoxel(adjacentVoxel(hitVoxel, normal, activeMaterial))
+        const displayNormal = customHit.face.normal.clone().transformDirection(customHit.object.matrixWorld)
+        onAddVoxel(adjacentVoxel(hitVoxel, { x: displayNormal.x, y: displayNormal.z, z: displayNormal.y }, activeMaterial))
       } else onRemoveVoxel(hitVoxel)
       return
     }
     if (!floorPoint) return
     const x = worldToVoxel(floorPoint.x)
-    const z = worldToVoxel(floorPoint.z)
+    const z = worldToVoxel(floorPoint.y)
     const sceneVoxel = { x, y: 0, z, materialId: activeMaterial }
     const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
     const occupiedAsset = project.instances.find((instance) => {
@@ -1840,8 +1843,8 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
         const movableParts = selectedParts.filter((part) => !lockedPartIds.has(part.id))
         const anchorVoxel = hitPart.voxels[0]
         const anchor = instance
-          ? new THREE.Vector3(instance.x, instance.y ?? 0, instance.z)
-          : new THREE.Vector3(voxelToWorld(anchorVoxel?.x ?? 0), voxelCenterToWorld(anchorVoxel?.y ?? 0), voxelToWorld(anchorVoxel?.z ?? 0))
+          ? toSceneWorld(instance.x, instance.y ?? 0, instance.z)
+          : toSceneWorld(voxelToWorld(anchorVoxel?.x ?? 0), voxelCenterToWorld(anchorVoxel?.y ?? 0), voxelToWorld(anchorVoxel?.z ?? 0))
         const selectionLabel = selectedParts.some((part) => part.assemblyId) ? '已选中装配体' : '已选中实体'
         onNotice(`${selectionLabel} · ${selectedParts.length} 个零件`)
         selectGestureRef.current = {
@@ -1850,12 +1853,9 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
           parts: movableParts,
           startX: event.clientX,
           startY: event.clientY,
-          offsetX: 0,
-          offsetZ: 0,
           startGroundX: floorPoint?.x ?? 0,
-          startGroundZ: floorPoint?.z ?? 0,
-          startInstanceY: anchor.y,
-          startVerticalY: getVerticalPoint(makeVerticalPlane(anchor))?.y ?? anchor.y,
+          startGroundY: floorPoint?.y ?? 0,
+          startVerticalZ: getVerticalPoint(makeVerticalPlane(anchor))?.z ?? anchor.z,
           verticalPlane: makeVerticalPlane(anchor),
           lastDeltaX: 0,
           lastDeltaY: 0,
@@ -1878,7 +1878,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
   const handleEditPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     if (placementAsset) {
       const context = getPointerContext(event)
-      if (context?.floorPoint) onPlacementMove(placementAsset.id, context.floorPoint.x, context.floorPoint.z)
+      if (context?.floorPoint) onPlacementMove(placementAsset.id, context.floorPoint.x, context.floorPoint.y)
       return
     }
     const cameraGesture = cameraGestureRef.current
@@ -1919,9 +1919,9 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
       if (dragAxis === 'vertical') {
         const verticalPoint = getVerticalPoint(selectGesture.verticalPlane)
         if (!verticalPoint) return
-        const deltaY = worldToVoxel(verticalPoint.y - selectGesture.startVerticalY)
-        if (deltaY === selectGesture.lastDeltaY) return
-        const moveResult = onMoveSceneParts(parts, 0, deltaY - selectGesture.lastDeltaY, 0, !selectGesture.historyTracked)
+        const deltaZ = worldToVoxel(verticalPoint.z - selectGesture.startVerticalZ)
+        if (deltaZ === selectGesture.lastDeltaY) return
+        const moveResult = onMoveSceneParts(parts, 0, deltaZ - selectGesture.lastDeltaY, 0, !selectGesture.historyTracked)
         if (moveResult.moved) {
           selectGesture.parts = parts.map((part) => ({ ...part, voxels: part.voxels.map((voxel) => ({ ...voxel, y: voxel.y + moveResult.deltaY })) }))
           selectGesture.lastDeltaY += moveResult.deltaY
@@ -1930,7 +1930,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
         return
       }
       const deltaX = worldToVoxel(context.floorPoint!.x - selectGesture.startGroundX)
-      const deltaZ = worldToVoxel(context.floorPoint!.z - selectGesture.startGroundZ)
+      const deltaZ = worldToVoxel(context.floorPoint!.y - selectGesture.startGroundY)
       if (deltaX === selectGesture.lastDeltaX && deltaZ === selectGesture.lastDeltaZ) return
       const stepX = deltaX - selectGesture.lastDeltaX
       const stepZ = deltaZ - selectGesture.lastDeltaZ
@@ -1952,7 +1952,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     if (placementAsset) {
       const context = getPointerContext(event)
-      if (context?.floorPoint) onPlaceAsset(placementAsset.id, context.floorPoint.x, context.floorPoint.z)
+      if (context?.floorPoint) onPlaceAsset(placementAsset.id, context.floorPoint.x, context.floorPoint.y)
       else onNotice('请将资产放置在三维场地内')
       return
     }
@@ -2047,7 +2047,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
     event.preventDefault()
     event.dataTransfer.dropEffect = 'copy'
     const context = getPointerContext(event)
-    if (context?.floorPoint) onPlacementMove(assetId, context.floorPoint.x, context.floorPoint.z)
+    if (context?.floorPoint) onPlacementMove(assetId, context.floorPoint.x, context.floorPoint.y)
   }
 
   const handlePlacementDrop = (event: React.DragEvent<HTMLDivElement>) => {
@@ -2059,11 +2059,11 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
       onNotice('请将资产放置在三维场地内')
       return
     }
-    onPlaceAsset(assetId, context.floorPoint.x, context.floorPoint.z)
+    onPlaceAsset(assetId, context.floorPoint.x, context.floorPoint.y)
   }
 
   const sceneContextLocked = Boolean(sceneContextMenu?.partIds.length && sceneContextMenu.partIds.every((partId) => lockedPartIds.has(partId)))
-  return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onWheel={(event) => { if (event.ctrlKey) event.preventDefault() }} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewOptions.find((item) => item.id === view)?.label ?? view}`) }} onReset={() => { applyCameraView('default'); onNotice('视角已回中') }} /><div className="canvas-hint">{placementAsset ? '拖动资产预览到场地 · 绿色可放置 · 红色表示重叠' : tool === 'brush' ? '点击地面或体素面添加 · 空白处首个体素会新建并进入编辑模式 · 拖动旋转不编辑' : tool === 'erase' ? '点击体素擦除 · 删除后自动按连通性拆分实体' : `拖动实体 · ${dragAxis === 'horizontal' ? '水平（X/Z）' : '竖直（Y）'} · Shift/Command 拖动框选多个实体`}</div></div>
+  return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onWheel={(event) => { if (event.ctrlKey) event.preventDefault() }} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewOptions.find((item) => item.id === view)?.label ?? view}`) }} onReset={() => { applyCameraView('default'); onNotice('视角已回中') }} /><div className="canvas-hint">{placementAsset ? '拖动资产预览到场地 · 绿色可放置 · 红色表示重叠' : tool === 'brush' ? '点击地面或体素面添加 · 空白处首个体素会新建并进入编辑模式 · 拖动旋转不编辑' : tool === 'erase' ? '点击体素擦除 · 删除后自动按连通性拆分实体' : `拖动实体 · ${dragAxis === 'horizontal' ? '水平（X/Y）' : '竖直（Z）'} · Shift/Command 拖动框选多个实体`}</div></div>
 }
 
 function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0) {
@@ -2071,8 +2071,8 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
   const scale = VOXEL_WORLD_SIZE
   const voxels = resolveInstanceVoxels(asset, overrides)
   if (!voxels.length) {
-    const placeholder = new THREE.Mesh(new THREE.BoxGeometry(asset.width * scale, asset.height * scale, asset.depth * scale), new THREE.MeshStandardMaterial({ color: asset.color, roughness: 0.76 }))
-    placeholder.position.y = asset.height * scale / 2
+    const placeholder = new THREE.Mesh(new THREE.BoxGeometry(asset.width * scale, asset.depth * scale, asset.height * scale), new THREE.MeshStandardMaterial({ color: asset.color, roughness: 0.76 }))
+    placeholder.position.z = asset.height * scale / 2
     placeholder.userData.instanceId = asset.id
     group.add(placeholder)
     return group
@@ -2085,7 +2085,7 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
     const occupied = new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
     const partGroup = new THREE.Group()
     const offset = partOffsets?.[partId] ?? { x: 0, y: 0, z: 0 }
-    partGroup.position.set(cos * offset.x - sin * offset.z, offset.y, sin * offset.x + cos * offset.z)
+    partGroup.position.set(cos * offset.x - sin * offset.z, sin * offset.x + cos * offset.z, offset.y)
     partGroup.userData.instancePartId = partId
     for (const voxel of component) {
       const material = voxel.materialId === 'primary'
@@ -2094,7 +2094,7 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
           ? new THREE.MeshStandardMaterial({ color: asset.accent, roughness: 0.72, metalness: 0.03 })
           : materialMap.get(voxel.materialId) ?? new THREE.MeshStandardMaterial({ color: voxel.materialId.startsWith('#') ? voxel.materialId : asset.color, roughness: 0.72, metalness: 0.03 })
       const mesh = new THREE.Mesh(new THREE.BoxGeometry(scale, scale, scale), material.clone())
-      mesh.position.set((voxel.x + 0.5 - asset.width / 2) * scale, (voxel.y + 0.5) * scale, (voxel.z + 0.5 - asset.depth / 2) * scale)
+      mesh.position.set((voxel.x + 0.5 - asset.width / 2) * scale, (voxel.z + 0.5 - asset.depth / 2) * scale, (voxel.y + 0.5) * scale)
       mesh.userData.instanceVoxel = { ...voxel }
       mesh.userData.instancePartId = partId
       const exposedFaces = exposedVoxelFaces(voxel, occupied)
