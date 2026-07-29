@@ -133,7 +133,6 @@ button { border: 0; cursor: pointer; color: inherit; }
 .viewport-color-picker { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid #566265; color: #d7d0c8; background: #222a2d; cursor: pointer; }
 .viewport-color-picker:hover { color: #f1c4a2; border-color: #b5654a; }
 .hidden-color-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-.canvas-hint { position: absolute; left: 16px; bottom: 14px; color: #728081; font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: .04em; pointer-events: none; }
 .axis-gizmo { position: absolute; right: 18px; top: 14px; width: 64px; height: 64px; z-index: 3; pointer-events: none; overflow: visible; font: 600 10px 'DM Mono', monospace; }
 .axis-gizmo line { stroke-width: 2.2; stroke-linecap: round; filter: drop-shadow(0 1px 2px rgba(0,0,0,.65)); }
 .axis-gizmo text { dominant-baseline: middle; text-anchor: middle; font: 600 10px 'DM Mono', monospace; paint-order: stroke; stroke: #161b1e; stroke-width: 3px; stroke-linejoin: round; }

@@ -202,7 +202,7 @@ function App() {
   const [recentMaterialIds, setRecentMaterialIds] = useState(() => MATERIALS.slice(0, 8).map((material) => material.id))
   const [notice, setNotice] = useState('就绪 · 本地工程未保存')
   const [query, setQuery] = useState('')
-  const [viewMode, setViewMode] = useState<'视图' | '正交' | '透视'>('视图')
+  const [viewMode, setViewMode] = useState<'正交' | '透视'>('正交')
   const [showGrid, setShowGrid] = useState(true)
   const [showGround, setShowGround] = useState(true)
   const [dragAxis, setDragAxis] = useState<'horizontal' | 'vertical'>('horizontal')
@@ -1395,6 +1395,11 @@ function App() {
   }
 
   const selectTreeItem = (id: string, additive = false) => {
+    if (editEntityId && id !== editEntityId) {
+      setTreeContextMenu(null)
+      setNotice('编辑模式下只能操作当前编辑实体')
+      return
+    }
     const removing = additive && checkedTreePartIds.includes(id)
     setCheckedTreePartIds((current) => {
       if (!additive) return [id]
@@ -1409,6 +1414,11 @@ function App() {
   }
 
   const toggleTreeChecked = (id: string) => {
+    if (editEntityId && id !== editEntityId) {
+      setTreeContextMenu(null)
+      setNotice('编辑模式下只能操作当前编辑实体')
+      return
+    }
     const removing = checkedTreePartIds.includes(id)
     setCheckedTreePartIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
     setSelectedId(removing && selectedId === id ? '' : id)
@@ -1467,13 +1477,13 @@ function App() {
         <AssetSidebar assets={filteredAssets} query={query} setQuery={setQuery} activeStyle={activeStyle} setActiveStyle={setActiveStyle} collapsed={assetSidebarCollapsed} onToggleCollapsed={() => setAssetSidebarCollapsed((value) => !value)} onNotice={setNotice} onBeginPlacement={beginPlacement} onEndPlacement={endPlacement} />
         <section className="viewport-panel">
           <div className="viewport-toolbar">
-            <div className="view-toggle">{(['视图', '正交', '透视'] as const).map((mode) => <button key={mode} className={viewMode === mode ? 'active' : ''} onClick={() => { setViewMode(mode); setNotice(`已切换视图 · ${mode}`) }}>{mode}</button>)}</div>
+            <div className="view-toggle">{(['正交', '透视'] as const).map((mode) => <button key={mode} className={viewMode === mode ? 'active' : ''} onClick={() => { setViewMode(mode); setNotice(`已切换视图 · ${mode}`) }}>{mode}</button>)}</div>
             <div className="toolbar-spacer" />
             <button className="micro-control" onClick={() => setNotice('当前体素单位 · 1 mm')}><Grid3X3 size={14} /> 1 mm体素 <ChevronDown size={13} /></button>
             <button className="micro-control" onClick={() => setNotice('边界设置面板尚未接入')}><SlidersHorizontal size={14} /> 边界 <ChevronDown size={13} /></button>
           </div>
           <VoxelViewport project={project} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} tool={tool} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={project.assets.find((asset) => asset.id === placementAssetId) ?? null} placementPreview={placementPreview} viewMode={viewMode} showGrid={showGrid} showGround={showGround} zoomLevel={zoomLevel} onCameraApiChange={setCameraControlApi} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onEditInstanceVoxel={editInstanceVoxel} onMoveSceneParts={moveSceneParts} onPlacementMove={updatePlacementPreview} onPlaceAsset={placeAssetAt} onNotice={setNotice} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
-            <SceneTreePanel items={sceneTreeItems} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} expandedAssemblies={expandedAssemblies} contextMenu={treeContextMenu} onToggleExpanded={(assemblyId) => setExpandedAssemblies((current) => ({ ...current, [assemblyId]: !(current[assemblyId] ?? true) }))} onSelect={selectTreeItem} onToggleChecked={toggleTreeChecked} onAssemble={assembleCheckedTreeParts} onDissolve={dissolveSceneAssembly} onEnterEdit={enterEditMode} onRename={renameSceneEntity} onDelete={deleteSceneTreeEntity} onToggleLock={toggleTreeLock} onContextMenu={(targetId, x, y, assemblyId) => setTreeContextMenu({ targetId, assemblyId, x, y })} />
+            <SceneTreePanel items={sceneTreeItems} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} expandedAssemblies={expandedAssemblies} contextMenu={treeContextMenu} onToggleExpanded={(assemblyId) => setExpandedAssemblies((current) => ({ ...current, [assemblyId]: !(current[assemblyId] ?? true) }))} onSelect={selectTreeItem} onToggleChecked={toggleTreeChecked} onAssemble={assembleCheckedTreeParts} onDissolve={dissolveSceneAssembly} onEnterEdit={enterEditMode} onRename={renameSceneEntity} onDelete={deleteSceneTreeEntity} onToggleLock={toggleTreeLock} onContextMenu={(targetId, x, y, assemblyId) => { if (!editEntityId || targetId === editEntityId) setTreeContextMenu({ targetId, assemblyId, x, y }) }} />
           </VoxelViewport>
           <div className="viewport-footer">
             <div className="tool-group">
@@ -1486,7 +1496,7 @@ function App() {
             <button className={`footer-control ${showGround ? 'active' : ''}`} onClick={() => { setShowGround((value) => !value); setNotice(showGround ? '已隐藏地面' : '已显示地面') }}><Layers3 size={16} /> 地面 <ChevronDown size={13} /></button>
             <div className="drag-axis-control" aria-label="拖动方向"><Move3d size={14} /><span>拖动</span><button className={dragAxis === 'horizontal' ? 'active' : ''} onClick={() => { setDragAxis('horizontal'); setNotice('拖动方向 · 水平（X/Y）') }}>水平 X/Y</button><button className={dragAxis === 'vertical' ? 'active' : ''} onClick={() => { setDragAxis('vertical'); setNotice('拖动方向 · 竖直（Z）') }}>竖直 Z</button></div>
             <div className="footer-status"><span className={`status-dot ${persistenceStatus === 'offline' ? 'offline' : ''}`} /> {notice}</div>
-            {cameraControlApi && <ViewportCameraControls showJoystick={false} onRotate={cameraControlApi.rotate} onView={(view) => { cameraControlApi.view(view); setNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { cameraControlApi.reset(); setNotice('视角已回中') }} />}
+            {cameraControlApi && <ViewportCameraControls showJoystick={false} onRotate={cameraControlApi.rotate} onView={(view) => { cameraControlApi.view(view); setNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { cameraControlApi.reset(); setZoomLevel(100); setNotice('视角已回中 · 缩放已恢复 100%') }} />}
             <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { setZoomLevel((value) => Math.max(50, value - 10)); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${Math.max(0, Math.min(100, ((zoomLevel - 50) / 150) * 100))}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { setZoomLevel((value) => Math.min(200, value + 10)); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{zoomLevel}%</span></div>
           </div>
         </section>
@@ -1970,7 +1980,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   </div>
 }
 
-function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, tool, activeMaterial, materials, dragAxis, placementAsset, placementPreview, viewMode, showGrid, showGround, zoomLevel, onCameraApiChange, onSelect, onSelectMultiple, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onEditInstanceVoxel, onMoveSceneParts, onPlacementMove, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; tool: Tool; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; placementPreview: PlacementPreview | null; viewMode: '视图' | '正交' | '透视'; showGrid: boolean; showGround: boolean; zoomLevel: number; onCameraApiChange: (api: CameraControlApi | null) => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onMoveSceneParts: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number, trackHistory?: boolean) => GridMoveResult; onPlacementMove: (assetId: string, x: number, z: number) => void; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
+function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, tool, activeMaterial, materials, dragAxis, placementAsset, placementPreview, viewMode, showGrid, showGround, zoomLevel, onCameraApiChange, onSelect, onSelectMultiple, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onEditInstanceVoxel, onMoveSceneParts, onPlacementMove, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; tool: Tool; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; placementPreview: PlacementPreview | null; viewMode: '正交' | '透视'; showGrid: boolean; showGround: boolean; zoomLevel: number; onCameraApiChange: (api: CameraControlApi | null) => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onMoveSceneParts: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number, trackHistory?: boolean) => GridMoveResult; onPlacementMove: (assetId: string, x: number, z: number) => void; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.Camera | null>(null)
@@ -1981,6 +1991,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   const raycasterRef = useRef(new THREE.Raycaster())
   const pointerRef = useRef(new THREE.Vector2())
   const controlsRef = useRef<OrbitControls | null>(null)
+  const editRenderStateRef = useRef<{ active: boolean; partIds: Set<string> }>({ active: false, partIds: new Set() })
   const editGestureRef = useRef<{ pointerId: number; x: number; y: number; moved: boolean } | null>(null)
   const selectGestureRef = useRef<SelectGesture | null>(null)
   const boxSelectGestureRef = useRef<BoxSelectGesture | null>(null)
@@ -2012,6 +2023,11 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.shadowMap.enabled = true
     renderer.shadowMap.type = THREE.PCFShadowMap
+    const dimScene = new THREE.Scene()
+    const dimCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+    const dimPlane = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshBasicMaterial({ color: '#000000', transparent: true, opacity: 0.44, depthTest: false, depthWrite: false }))
+    dimPlane.renderOrder = 1000
+    dimScene.add(dimPlane)
     mount.appendChild(renderer.domElement)
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enabled = true
@@ -2023,6 +2039,8 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     controls.mouseButtons.RIGHT = THREE.MOUSE.PAN
     controls.touches.ONE = THREE.TOUCH.ROTATE
     controls.rotateSpeed = 0.72
+    // A higher damping factor makes release feel immediate while retaining a small amount of smoothing.
+    controls.dampingFactor = 0.18
     controls.panSpeed = 0.8
     controls.zoomSpeed = 0.85
     controls.target.set(0, 0, 0)
@@ -2108,7 +2126,48 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       frame = requestAnimationFrame(animate)
       controls.update()
       updateAxisGizmo()
-      renderer.render(scene, cameraRef.current ?? camera)
+      const currentCamera = cameraRef.current ?? camera
+      renderer.render(scene, currentCamera)
+      const editState = editRenderStateRef.current
+      if (editState.active && group.children.length) {
+        const hidden: Array<{ object: THREE.Object3D; visible: boolean }> = []
+        const previousBackground = scene.background
+        const floorObject = scene.getObjectByName('editing-floor')
+        const gridObject = scene.getObjectByName('editing-grid')
+        const subtreeContainsEditPart = (object: THREE.Object3D): boolean => {
+          const scenePartId = object.userData.scenePartId as string | undefined
+          if (scenePartId) return editState.partIds.has(scenePartId)
+          return object.children.some(subtreeContainsEditPart)
+        }
+        const hideOutsideEditPart = (object: THREE.Object3D) => {
+          const scenePartId = object.userData.scenePartId as string | undefined
+          if (scenePartId) {
+            if (!editState.partIds.has(scenePartId)) {
+              hidden.push({ object, visible: object.visible })
+              object.visible = false
+            }
+            return
+          }
+          if (!subtreeContainsEditPart(object)) {
+            hidden.push({ object, visible: object.visible })
+            object.visible = false
+            return
+          }
+          object.children.forEach(hideOutsideEditPart)
+        }
+        group.children.forEach(hideOutsideEditPart)
+        if (floorObject) { hidden.push({ object: floorObject, visible: floorObject.visible }); floorObject.visible = false }
+        if (gridObject) { hidden.push({ object: gridObject, visible: gridObject.visible }); gridObject.visible = false }
+        renderer.autoClear = false
+        renderer.clearDepth()
+        renderer.render(dimScene, dimCamera)
+        renderer.clearDepth()
+        scene.background = null
+        renderer.render(scene, currentCamera)
+        scene.background = previousBackground
+        renderer.autoClear = true
+        hidden.reverse().forEach(({ object, visible }) => { object.visible = visible })
+      }
     }
     animate()
     setReady(true)
@@ -2117,6 +2176,8 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       observer.disconnect()
       controls.dispose()
       renderer.dispose()
+      dimPlane.geometry.dispose()
+      dimPlane.material.dispose()
       mount.removeChild(renderer.domElement)
     }
   }, [])
@@ -2153,6 +2214,12 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     const cameras = camerasRef.current
     const controls = controlsRef.current
     if (!cameras || !controls) return
+    // OrbitControls stores its release velocity internally. Disable damping for one
+    // update so reset/view changes never inherit the previous fling.
+    const dampingEnabled = controls.enableDamping
+    controls.enableDamping = false
+    controls.update()
+    controls.enableDamping = dampingEnabled
     const target = new THREE.Vector3(0, 0, 0)
     const distance = 28
     let position = new THREE.Vector3(16, 18, 18)
@@ -2204,6 +2271,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     const selectedScenePartIds = new Set(selectedPartIds)
     const editAssemblyId = editEntityId?.startsWith('assembly:') ? editEntityId.slice('assembly:'.length) : undefined
     const editScenePartIds = new Set(currentSceneParts.filter((part) => editEntityId === part.id || (editAssemblyId && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(editAssemblyId))).map((part) => part.id))
+    editRenderStateRef.current = { active: Boolean(editEntityId), partIds: editScenePartIds }
     for (const instance of project.instances) {
       if (!instance.visible) continue
       const asset = assetMap.get(instance.assetId)
@@ -2222,6 +2290,13 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         const scenePartId = object.userData.scenePartId as string | undefined
         const highlighted = Boolean(scenePartId && (selectedScenePartIds.has(scenePartId) || editScenePartIds.has(scenePartId)))
         if (highlighted) addVoxelHighlight(object)
+        if (editEntityId && scenePartId && !editScenePartIds.has(scenePartId)) {
+          const meshMaterial = object.material as THREE.MeshStandardMaterial
+          meshMaterial.transparent = true
+          meshMaterial.opacity = 0.08
+          meshMaterial.depthWrite = false
+          if (object.userData.outerVoxel) addVoxelHighlight(object)
+        }
       })
       group.add(instanceGroup)
     }
@@ -2244,6 +2319,12 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         mesh.userData.exposedFaces = exposedFaces
         mesh.userData.outerVoxel = exposedFaces.length > 0
         if (selectedScenePartIds.has(mesh.userData.scenePartId) || editScenePartIds.has(mesh.userData.scenePartId)) addVoxelHighlight(mesh)
+        if (editEntityId && !editScenePartIds.has(mesh.userData.scenePartId)) {
+          meshMaterial.transparent = true
+          meshMaterial.opacity = 0.08
+          meshMaterial.depthWrite = false
+          if (mesh.userData.outerVoxel) addVoxelHighlight(mesh)
+        }
         custom.add(mesh)
         })
       }
@@ -2279,7 +2360,8 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     pointerRef.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
     pointerRef.current.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
     raycasterRef.current.setFromCamera(pointerRef.current, camera)
-    const hits = groupRef.current ? raycasterRef.current.intersectObject(groupRef.current, true) : []
+    const rawHits = groupRef.current ? raycasterRef.current.intersectObject(groupRef.current, true) : []
+    const hits = editEntityId ? rawHits.filter((item) => belongsToEditEntity(item.object)) : rawHits
     const floor = scene.getObjectByName('editing-floor')
     const floorHit = floor ? raycasterRef.current.intersectObject(floor, false)[0] : undefined
     return { hits, floorPoint: floorHit?.point ?? null }
@@ -2301,7 +2383,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   }
 
   const handleEntityDoubleClick = (event: { clientX: number; clientY: number }) => {
-    if (tool !== 'select' || placementAsset) return
+    if (tool !== 'select' || placementAsset || editEntityId) return
     const context = getPointerContext(event)
     const hit = context?.hits.find((item) => item.object.userData.scenePartId)
     const hitPart = hit?.object.userData.scenePartId ? sceneEntityParts(project).find((part) => part.id === hit.object.userData.scenePartId) : undefined
@@ -2357,7 +2439,8 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     if (!context) return
     const { hits, floorPoint } = context
     const hit = hits[0]
-    if (tool === 'select' && hit?.object.userData.scenePartId) {
+    if (tool === 'select' && editEntityId) return
+    if (tool === 'select' && hit?.object.userData.scenePartId && belongsToEditEntity(hit.object)) {
       onSelect(hit.object.userData.scenePartId)
       return
     }
@@ -2420,7 +2503,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       const hit = context?.hits.find((item) => item.object.userData.scenePartId)
       const hitPart = hit?.object.userData.scenePartId ? sceneEntityParts(project).find((part) => part.id === hit.object.userData.scenePartId) : undefined
       const explicitMultiSelection = selectedPartIds.length > 1 && (checkedPartIds.length > 1 || (checkedPartIds.length === 1 && !checkedPartIds[0].startsWith('assembly:')))
-      const targetPartIds = hitPart
+      const targetPartIds = !editEntityId && hitPart
         ? explicitMultiSelection && selectedPartIds.includes(hitPart.id) ? selectedPartIds : hitSelectionPartIds(hitPart)
         : []
       cameraGestureRef.current = { pointerId: event.pointerId, button: 'right', lastX: event.clientX, lastY: event.clientY, moved: false, contextPartIds: targetPartIds }
@@ -2429,6 +2512,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     }
     if (event.button !== 0) return
     if (placementAsset) return
+    if (editEntityId && tool === 'select') return
     if (tool === 'select') {
       const context = getPointerContext(event)
       const customHit = context?.hits.find((item) => item.object.userData.customVoxel)
@@ -2678,7 +2762,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   const sceneContextLocked = Boolean(sceneContextMenu?.partIds.length && sceneContextMenu.partIds.every((partId) => lockedPartIds.has(partId)))
   const sceneContextEditTargetId = sceneContextMenu?.partIds.length === 1 ? sceneContextMenu.partIds[0] : ''
   const sceneContextRenameTargetId = sceneContextMenu?.partIds.length === 1 ? sceneContextMenu.partIds[0] : ''
-  return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onWheel={(event) => { if (event.ctrlKey) event.preventDefault() }} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextRenameTargetId && <button onClick={() => { onRename(sceneContextRenameTargetId); setSceneContextMenu(null) }}>重命名</button>}{sceneContextEditTargetId && <button onClick={() => { onEnterEditMode(sceneContextEditTargetId); setSceneContextMenu(null) }}>进入编辑修改模式</button>}{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { applyCameraView('default'); onNotice('视角已回中') }} /><div className="canvas-hint">{placementAsset ? '拖动资产预览到场地 · 绿色可放置 · 红色表示重叠' : tool === 'brush' ? '点击地面或体素面添加 · 空白处首个体素会新建并进入编辑模式 · 拖动旋转不编辑' : tool === 'erase' ? '点击体素擦除 · 删除后自动按连通性拆分实体' : `拖动实体 · ${dragAxis === 'horizontal' ? '水平（X/Y）' : '竖直（Z）'} · Shift/Command 拖动框选多个实体`}</div></div>
+  return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onWheel={(event) => { if (event.ctrlKey) event.preventDefault() }} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextRenameTargetId && <button onClick={() => { onRename(sceneContextRenameTargetId); setSceneContextMenu(null) }}>重命名</button>}{sceneContextEditTargetId && <button onClick={() => { onEnterEditMode(sceneContextEditTargetId); setSceneContextMenu(null) }}>进入编辑修改模式</button>}{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { applyCameraView('default'); onNotice('视角已回中') }} /></div>
 }
 
 function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0, colorOverride?: string, mirror: SceneInstance['mirror'] = undefined, rotationX = 0, rotationY = 0, rotationZ = 0) {
