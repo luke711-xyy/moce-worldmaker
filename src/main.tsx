@@ -260,7 +260,7 @@ function App() {
     }
     const partItem = (part: SceneEntityPart): SceneTreeItem => {
       const uniqueName = uniqueLabel(baseNameForPart(part))
-      const displayLabel = part.kind === 'custom' ? `${uniqueName} · ${part.voxels.length} 方块` : uniqueName
+      const displayLabel = uniqueName
       return { id: part.id, kind: 'part', part: { ...part, displayLabel }, label: displayLabel }
     }
     const renderAssembly = (assemblyId: string, seen = new Set<string>()): SceneTreeItem | null => {
