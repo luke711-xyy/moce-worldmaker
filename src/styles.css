@@ -135,9 +135,9 @@ button { border: 0; cursor: pointer; color: inherit; }
 .axis-gizmo line { stroke-width: 2.2; stroke-linecap: round; filter: drop-shadow(0 1px 2px rgba(0,0,0,.65)); }
 .axis-gizmo text { dominant-baseline: middle; text-anchor: middle; font: 600 10px 'DM Mono', monospace; paint-order: stroke; stroke: #161b1e; stroke-width: 3px; stroke-linejoin: round; }
 .viewport-camera-controls { position: absolute; right: 16px; bottom: 16px; z-index: 8; width: 120px; height: 116px; pointer-events: auto; }
-.camera-joystick { position: absolute; right: 0; bottom: 0; width: 78px; height: 78px; display: grid; place-items: center; }
-.camera-joystick-ring { width: 72px; height: 72px; display: grid; place-items: center; border: 1px solid #586568; border-radius: 50%; background: radial-gradient(circle at 50% 45%, rgba(91,111,112,.42), rgba(21,28,30,.92) 70%); box-shadow: inset 0 0 0 5px rgba(255,255,255,.035), 0 8px 20px rgba(0,0,0,.28); }
-.camera-joystick-knob { width: 38px; height: 38px; display: grid; place-items: center; color: #f3d7c1; border: 1px solid #d48768; border-radius: 50%; background: #a9523c; box-shadow: 0 3px 10px rgba(0,0,0,.38); cursor: grab; touch-action: none; }
+.camera-joystick { position: absolute; right: 0; bottom: 0; width: 64px; height: 64px; display: grid; place-items: center; }
+.camera-joystick-ring { width: 60px; height: 60px; display: grid; place-items: center; border: 1px solid #586568; border-radius: 50%; background: radial-gradient(circle at 50% 45%, rgba(91,111,112,.42), rgba(21,28,30,.92) 70%); box-shadow: inset 0 0 0 4px rgba(255,255,255,.035), 0 8px 18px rgba(0,0,0,.28); }
+.camera-joystick-knob { width: 30px; height: 30px; display: block; padding: 0; border: 1px solid #d48768; border-radius: 50%; background: #a9523c; box-shadow: 0 3px 10px rgba(0,0,0,.38); cursor: grab; touch-action: none; }
 .camera-joystick-knob:hover { background: #c2694e; }
 .camera-joystick-knob:active { cursor: grabbing; transform: scale(.96); }
 .camera-cube-button, .camera-reset-button { position: absolute; right: 84px; display: grid; place-items: center; color: #c2cdca; border: 1px solid #526063; background: rgba(28,36,38,.95); box-shadow: 0 5px 14px rgba(0,0,0,.25); }
@@ -149,6 +149,11 @@ button { border: 0; cursor: pointer; color: inherit; }
 .camera-view-menu { position: absolute; right: 84px; bottom: 76px; width: 116px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 3px; padding: 5px; border: 1px solid #526063; background: rgba(28,36,38,.97); box-shadow: 0 10px 25px rgba(0,0,0,.34); }
 .camera-view-menu button { height: 25px; color: #aeb8b5; background: transparent; font-size: 9px; }
 .camera-view-menu button:hover { color: #fff0df; background: #a9523c; }
+.viewport-canvas > .viewport-camera-controls { width: 68px; height: 68px; }
+.viewport-footer > .viewport-camera-controls { position: relative; right: auto; bottom: auto; width: 65px; height: 34px; flex: 0 0 65px; display: flex; align-items: center; gap: 5px; pointer-events: auto; }
+.viewport-footer > .viewport-camera-controls .camera-cube-button,
+.viewport-footer > .viewport-camera-controls .camera-reset-button { position: static; right: auto; top: auto; width: 30px; height: 30px; flex: 0 0 30px; }
+.viewport-footer > .viewport-camera-controls .camera-view-menu { right: 0; bottom: 38px; }
 .viewport-footer { height: 50px; flex: 0 0 50px; display: flex; align-items: center; gap: 9px; padding: 0 13px; border-top: 1px solid #2c3538; background: #1b2225; }
 .tool-group { display: flex; gap: 2px; }
 .tool-button { position: relative; width: 30px; height: 29px; display: grid; place-items: center; color: #7f8b8a; background: transparent; border: 1px solid transparent; }
@@ -173,7 +178,6 @@ button { border: 0; cursor: pointer; color: inherit; }
 .zoom-step:hover { color: #f0b192; }
 .zoom-track { width: 72px; height: 3px; background: #394447; position: relative; }
 .zoom-value { width: 42px; height: 3px; background: #c26b4e; }
-.zoom-value::after { content: ''; position: absolute; left: calc(100% - 5px); top: -4px; width: 11px; height: 11px; border-radius: 50%; background: #db8865; border: 2px solid #4c2f28; }
 .zoom-percent { min-width: 34px; color: #aeb7b4; font: 9px 'DM Mono', monospace; text-align: right; }
 .inspector-heading { border-bottom: 1px solid #30383a; }
 .edit-mode-exit { width: 28px; height: 28px; display: grid; place-items: center; color: #ffd7ca; background: #9f392d; border: 1px solid #d25e4c; border-radius: 3px; }
