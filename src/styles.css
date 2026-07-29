@@ -144,9 +144,20 @@ button { border: 0; cursor: pointer; color: inherit; }
 .camera-cube-button { top: 3px; width: 34px; height: 34px; }
 .camera-reset-button { top: 44px; width: 28px; height: 28px; color: #aab6b3; }
 .camera-cube-button:hover, .camera-reset-button:hover { color: #fff0df; border-color: #b8684d; background: #2c2523; }
-.camera-view-menu { position: absolute; right: 84px; bottom: 76px; width: 116px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 3px; padding: 5px; border: 1px solid #526063; background: rgba(28,36,38,.97); box-shadow: 0 10px 25px rgba(0,0,0,.34); }
-.camera-view-menu button { height: 25px; color: #aeb8b5; background: transparent; font-size: 9px; }
-.camera-view-menu button:hover { color: #fff0df; background: #a9523c; }
+.camera-view-menu { position: absolute; right: 0; bottom: 38px; width: 166px; height: 166px; display: grid; place-items: center; border: 1px solid #526063; background: rgba(28,36,38,.97); box-shadow: 0 10px 25px rgba(0,0,0,.34); }
+.view-cube-svg { width: 144px; height: 154px; overflow: visible; filter: drop-shadow(0 7px 9px rgba(0,0,0,.32)); }
+.view-cube-face polygon { stroke: #7c8b8b; stroke-width: 1.2; vector-effect: non-scaling-stroke; cursor: pointer; transition: fill .12s ease, stroke .12s ease; }
+.view-cube-face-top polygon { fill: #627879; }
+.view-cube-face-front polygon { fill: #405456; }
+.view-cube-face-right polygon { fill: #536868; }
+.view-cube-face:hover polygon { fill: #a9523c; stroke: #f0b192; }
+.view-cube-target { outline: none; cursor: pointer; }
+.view-cube-target:focus-visible polygon, .view-cube-target:focus-visible line, .view-cube-target:focus-visible circle { stroke: #f0b192; }
+.view-cube-edge line { fill: none; stroke: transparent; stroke-width: 13; stroke-linecap: round; vector-effect: non-scaling-stroke; transition: stroke .12s ease; }
+.view-cube-edge:hover line { stroke: rgba(240,177,146,.78); }
+.view-cube-corner circle { fill: transparent; stroke: transparent; stroke-width: 2; vector-effect: non-scaling-stroke; transition: fill .12s ease, stroke .12s ease; }
+.view-cube-corner:hover circle { fill: #a9523c; stroke: #f0b192; }
+.view-cube-outline { fill: none; stroke: rgba(224,232,226,.72); stroke-width: 1.2; stroke-linejoin: round; vector-effect: non-scaling-stroke; pointer-events: none; }
 .viewport-canvas > .viewport-camera-controls { width: 68px; height: 68px; }
 .viewport-footer > .viewport-camera-controls { position: relative; right: auto; bottom: auto; width: 65px; height: 34px; flex: 0 0 65px; display: flex; align-items: center; gap: 5px; pointer-events: auto; }
 .viewport-footer > .viewport-camera-controls .camera-cube-button,

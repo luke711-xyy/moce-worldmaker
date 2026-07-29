@@ -9,10 +9,11 @@ import { LibraryResponse, loadAsset, loadLibrary, loadScene, saveAsset, saveScen
 import './styles.css'
 
 type Tool = 'select' | 'brush' | 'erase'
-type CameraView = 'default' | 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom'
+type CameraViewId = 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom' | 'front-top' | 'front-bottom' | 'back-top' | 'back-bottom' | 'front-left' | 'front-right' | 'back-left' | 'back-right' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'front-top-left' | 'front-top-right' | 'front-bottom-left' | 'front-bottom-right' | 'back-top-left' | 'back-top-right' | 'back-bottom-left' | 'back-bottom-right'
+type CameraView = 'default' | CameraViewId
 type CameraControlApi = {
   rotate: (deltaX: number, deltaY: number) => void
-  view: (view: Exclude<CameraView, 'default'>) => void
+  view: (view: CameraViewId) => void
   reset: () => void
 }
 
@@ -1054,7 +1055,7 @@ function App() {
             <button className={`footer-control ${showGround ? 'active' : ''}`} onClick={() => { setShowGround((value) => !value); setNotice(showGround ? '已隐藏地面' : '已显示地面') }}><Layers3 size={16} /> 地面 <ChevronDown size={13} /></button>
             <div className="drag-axis-control" aria-label="拖动方向"><Move3d size={14} /><span>拖动</span><button className={dragAxis === 'horizontal' ? 'active' : ''} onClick={() => { setDragAxis('horizontal'); setNotice('拖动方向 · 水平（X/Y）') }}>水平 X/Y</button><button className={dragAxis === 'vertical' ? 'active' : ''} onClick={() => { setDragAxis('vertical'); setNotice('拖动方向 · 竖直（Z）') }}>竖直 Z</button></div>
             <div className="footer-status"><span className={`status-dot ${persistenceStatus === 'offline' ? 'offline' : ''}`} /> {notice}</div>
-            {cameraControlApi && <ViewportCameraControls showJoystick={false} onRotate={cameraControlApi.rotate} onView={(view) => { cameraControlApi.view(view); setNotice(`已切换视角 · ${cameraViewOptions.find((item) => item.id === view)?.label ?? view}`) }} onReset={() => { cameraControlApi.reset(); setNotice('视角已回中') }} />}
+            {cameraControlApi && <ViewportCameraControls showJoystick={false} onRotate={cameraControlApi.rotate} onView={(view) => { cameraControlApi.view(view); setNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { cameraControlApi.reset(); setNotice('视角已回中') }} />}
             <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { setZoomLevel((value) => Math.max(50, value - 10)); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${Math.max(0, Math.min(100, ((zoomLevel - 50) / 150) * 100))}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { setZoomLevel((value) => Math.min(200, value + 10)); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{zoomLevel}%</span></div>
           </div>
         </section>
@@ -1336,16 +1337,81 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
   mesh.add(glow, edge)
 }
 
-const cameraViewOptions: Array<{ id: Exclude<CameraView, 'default'>; label: string }> = [
-  { id: 'front', label: '前视' },
-  { id: 'back', label: '后视' },
-  { id: 'left', label: '左视' },
-  { id: 'right', label: '右视' },
-  { id: 'top', label: '俯视' },
-  { id: 'bottom', label: '仰视' },
+type CameraViewOption = { id: CameraViewId; label: string; direction: [number, number, number]; kind: 'face' | 'edge' | 'corner' }
+
+const cameraViewOptions: CameraViewOption[] = [
+  { id: 'front', label: '前视', direction: [0, 1, 0], kind: 'face' },
+  { id: 'back', label: '后视', direction: [0, -1, 0], kind: 'face' },
+  { id: 'left', label: '左视', direction: [-1, 0, 0], kind: 'face' },
+  { id: 'right', label: '右视', direction: [1, 0, 0], kind: 'face' },
+  { id: 'top', label: '俯视', direction: [0, 0, 1], kind: 'face' },
+  { id: 'bottom', label: '仰视', direction: [0, 0, -1], kind: 'face' },
+  { id: 'front-top', label: '前上视', direction: [0, 1, 1], kind: 'edge' },
+  { id: 'front-bottom', label: '前下视', direction: [0, 1, -1], kind: 'edge' },
+  { id: 'back-top', label: '后上视', direction: [0, -1, 1], kind: 'edge' },
+  { id: 'back-bottom', label: '后下视', direction: [0, -1, -1], kind: 'edge' },
+  { id: 'front-left', label: '左前视', direction: [-1, 1, 0], kind: 'edge' },
+  { id: 'front-right', label: '右前视', direction: [1, 1, 0], kind: 'edge' },
+  { id: 'back-left', label: '左后视', direction: [-1, -1, 0], kind: 'edge' },
+  { id: 'back-right', label: '右后视', direction: [1, -1, 0], kind: 'edge' },
+  { id: 'top-left', label: '左上视', direction: [-1, 0, 1], kind: 'edge' },
+  { id: 'top-right', label: '右上视', direction: [1, 0, 1], kind: 'edge' },
+  { id: 'bottom-left', label: '左下视', direction: [-1, 0, -1], kind: 'edge' },
+  { id: 'bottom-right', label: '右下视', direction: [1, 0, -1], kind: 'edge' },
+  { id: 'front-top-left', label: '左前上视', direction: [-1, 1, 1], kind: 'corner' },
+  { id: 'front-top-right', label: '右前上视', direction: [1, 1, 1], kind: 'corner' },
+  { id: 'front-bottom-left', label: '左前下视', direction: [-1, 1, -1], kind: 'corner' },
+  { id: 'front-bottom-right', label: '右前下视', direction: [1, 1, -1], kind: 'corner' },
+  { id: 'back-top-left', label: '左后上视', direction: [-1, -1, 1], kind: 'corner' },
+  { id: 'back-top-right', label: '右后上视', direction: [1, -1, 1], kind: 'corner' },
+  { id: 'back-bottom-left', label: '左后下视', direction: [-1, -1, -1], kind: 'corner' },
+  { id: 'back-bottom-right', label: '右后下视', direction: [1, -1, -1], kind: 'corner' },
 ]
 
-function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true, showActions = true }: { onRotate: (deltaX: number, deltaY: number) => void; onView: (view: Exclude<CameraView, 'default'>) => void; onReset: () => void; showJoystick?: boolean; showActions?: boolean }) {
+function cameraViewLabel(view: CameraViewId): string {
+  return cameraViewOptions.find((item) => item.id === view)?.label ?? view
+}
+
+function ViewCubeTarget({ id, className, children, onView }: { id: CameraViewId; className: string; children: React.ReactNode; onView: (view: CameraViewId) => void }) {
+  const option = cameraViewOptions.find((item) => item.id === id)
+  const activate = () => onView(id)
+  const onKeyDown = (event: React.KeyboardEvent<SVGGElement>) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      activate()
+    }
+  }
+  return <g className={`view-cube-target ${className}`} role="menuitem" tabIndex={0} aria-label={`选择${option?.label ?? id}`} onClick={activate} onKeyDown={onKeyDown}>{children}</g>
+}
+
+function ViewCubeSelector({ onView }: { onView: (view: CameraViewId) => void }) {
+  return <div className="camera-view-menu" role="menu" aria-label="交互式视角立方体">
+    <svg className="view-cube-svg" viewBox="0 0 136 146" aria-hidden="false">
+      <g className="view-cube-faces">
+        <ViewCubeTarget id="top" className="view-cube-face view-cube-face-top" onView={onView}><polygon points="44,14 122,39 83,62 5,37" /></ViewCubeTarget>
+        <ViewCubeTarget id="front" className="view-cube-face view-cube-face-front" onView={onView}><polygon points="5,37 83,62 83,132 5,107" /></ViewCubeTarget>
+        <ViewCubeTarget id="right" className="view-cube-face view-cube-face-right" onView={onView}><polygon points="83,62 122,39 122,109 83,132" /></ViewCubeTarget>
+      </g>
+      <g className="view-cube-edges">
+        <ViewCubeTarget id="front-top" className="view-cube-edge view-cube-edge-front-top" onView={onView}><line x1="5" y1="37" x2="83" y2="62" /></ViewCubeTarget>
+        <ViewCubeTarget id="top-right" className="view-cube-edge view-cube-edge-top-right" onView={onView}><line x1="83" y1="62" x2="122" y2="39" /></ViewCubeTarget>
+        <ViewCubeTarget id="front-right" className="view-cube-edge view-cube-edge-front-right" onView={onView}><line x1="83" y1="62" x2="83" y2="132" /></ViewCubeTarget>
+      </g>
+      <g className="view-cube-corners">
+        <ViewCubeTarget id="front-top-left" className="view-cube-corner view-cube-corner-top-left" onView={onView}><circle cx="5" cy="37" r="9" /></ViewCubeTarget>
+        <ViewCubeTarget id="back-top-left" className="view-cube-corner view-cube-corner-top-back" onView={onView}><circle cx="44" cy="14" r="9" /></ViewCubeTarget>
+        <ViewCubeTarget id="back-top-right" className="view-cube-corner view-cube-corner-top-right" onView={onView}><circle cx="122" cy="39" r="9" /></ViewCubeTarget>
+        <ViewCubeTarget id="front-top-right" className="view-cube-corner view-cube-corner-top-front-right" onView={onView}><circle cx="83" cy="62" r="10" /></ViewCubeTarget>
+        <ViewCubeTarget id="front-bottom-left" className="view-cube-corner view-cube-corner-bottom-left" onView={onView}><circle cx="5" cy="107" r="9" /></ViewCubeTarget>
+        <ViewCubeTarget id="front-bottom-right" className="view-cube-corner view-cube-corner-bottom-right" onView={onView}><circle cx="83" cy="132" r="10" /></ViewCubeTarget>
+        <ViewCubeTarget id="back-bottom-right" className="view-cube-corner view-cube-corner-bottom-back-right" onView={onView}><circle cx="122" cy="109" r="9" /></ViewCubeTarget>
+      </g>
+      <path className="view-cube-outline" d="M44 14 L122 39 L122 109 L83 132 L5 107 L5 37 Z M5 37 L83 62 L122 39 M83 62 L83 132" />
+    </svg>
+  </div>
+}
+
+function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true, showActions = true }: { onRotate: (deltaX: number, deltaY: number) => void; onView: (view: CameraViewId) => void; onReset: () => void; showJoystick?: boolean; showActions?: boolean }) {
   const [expanded, setExpanded] = useState(false)
   const [joystickOffset, setJoystickOffset] = useState({ x: 0, y: 0 })
   const joystickRef = useRef<{ pointerId: number; lastX: number; lastY: number } | null>(null)
@@ -1384,7 +1450,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   }
   return <div className="viewport-camera-controls" onPointerDown={stopControlPointer} onPointerMove={stopControlPointer} onPointerUp={stopControlPointer} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}>
     {showActions && <>
-      {expanded && <div className="camera-view-menu" role="menu" aria-label="六个标准视角">{cameraViewOptions.map((view) => <button key={view.id} role="menuitem" onClick={() => { onView(view.id); setExpanded(false) }}>{view.label}</button>)}</div>}
+      {expanded && <ViewCubeSelector onView={(view) => { onView(view); setExpanded(false) }} />}
       <button className="camera-cube-button" aria-label="展开六个标准视角" aria-expanded={expanded} title="六个标准视角" onClick={() => setExpanded((value) => !value)}><Box size={18} strokeWidth={1.8} /></button>
       <button className="camera-reset-button" aria-label="视角回中" title="视角回中" onClick={onReset}><RotateCcw size={14} /></button>
     </>}
@@ -1579,16 +1645,13 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
     const distance = 28
     let position = new THREE.Vector3(16, 18, 18)
     let up = new THREE.Vector3(0, 0, 1)
-    if (view === 'front') position = new THREE.Vector3(0, distance, 0)
-    if (view === 'back') position = new THREE.Vector3(0, -distance, 0)
-    if (view === 'left') position = new THREE.Vector3(-distance, 0, 0)
-    if (view === 'right') position = new THREE.Vector3(distance, 0, 0)
-    if (view === 'top') {
-      position = new THREE.Vector3(0, 0, distance)
-      up = new THREE.Vector3(0, 1, 0)
+    if (view !== 'default') {
+      const option = cameraViewOptions.find((item) => item.id === view)
+      if (option) position = new THREE.Vector3(...option.direction).normalize().multiplyScalar(distance)
     }
-    if (view === 'bottom') {
-      position = new THREE.Vector3(0, 0, -distance)
+    if (view === 'top') {
+      up = new THREE.Vector3(0, 1, 0)
+    } else if (view === 'bottom') {
       up = new THREE.Vector3(0, -1, 0)
     }
     cameras.orthographic.position.copy(position)
@@ -2099,7 +2162,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
   }
 
   const sceneContextLocked = Boolean(sceneContextMenu?.partIds.length && sceneContextMenu.partIds.every((partId) => lockedPartIds.has(partId)))
-  return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onWheel={(event) => { if (event.ctrlKey) event.preventDefault() }} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewOptions.find((item) => item.id === view)?.label ?? view}`) }} onReset={() => { applyCameraView('default'); onNotice('视角已回中') }} /><div className="canvas-hint">{placementAsset ? '拖动资产预览到场地 · 绿色可放置 · 红色表示重叠' : tool === 'brush' ? '点击地面或体素面添加 · 空白处首个体素会新建并进入编辑模式 · 拖动旋转不编辑' : tool === 'erase' ? '点击体素擦除 · 删除后自动按连通性拆分实体' : `拖动实体 · ${dragAxis === 'horizontal' ? '水平（X/Y）' : '竖直（Z）'} · Shift/Command 拖动框选多个实体`}</div></div>
+  return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onWheel={(event) => { if (event.ctrlKey) event.preventDefault() }} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { applyCameraView('default'); onNotice('视角已回中') }} /><div className="canvas-hint">{placementAsset ? '拖动资产预览到场地 · 绿色可放置 · 红色表示重叠' : tool === 'brush' ? '点击地面或体素面添加 · 空白处首个体素会新建并进入编辑模式 · 拖动旋转不编辑' : tool === 'erase' ? '点击体素擦除 · 删除后自动按连通性拆分实体' : `拖动实体 · ${dragAxis === 'horizontal' ? '水平（X/Y）' : '竖直（Z）'} · Shift/Command 拖动框选多个实体`}</div></div>
 }
 
 function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0) {
