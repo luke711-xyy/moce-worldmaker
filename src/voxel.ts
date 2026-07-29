@@ -73,7 +73,14 @@ export type ProjectState = {
   customVoxels: Voxel[]
   customColors?: Record<string, string>
   entityNames?: Record<string, string>
+  entityNameModes?: Record<string, 'auto' | 'custom'>
+  entityNameSequences?: Record<string, number>
+  entityNameParents?: Record<string, string>
+  entitySequenceCounters?: Record<string, number>
   assemblySequence?: number
+  assemblyChildSequence?: Record<string, number>
+  /** Shared sibling counter for both child entities and child assemblies. */
+  childSequenceCounters?: Record<string, number>
   assemblies?: SceneAssembly[]
   lockedMemberKeys?: string[]
 }
@@ -82,6 +89,11 @@ export type SceneAssembly = {
   id: string
   name?: string
   memberKeys: string[]
+  /** Persistent sibling number used by hierarchical names. */
+  sequence?: number
+  /** Parent assembly ID when this node is nested. */
+  parentAssemblyId?: string
+  nameMode?: 'auto' | 'custom'
 }
 
 export type SceneEntityPart = {
@@ -403,6 +415,178 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
     parts.push({ id: `custom:${entityId}`, kind: 'custom', partId: entityId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label: '手动体素实体', colorOverride: project.customColors?.[entityId], voxels })
   }
   return parts
+}
+
+function automaticAssemblyName(name: string | undefined): boolean {
+  const value = name?.trim() ?? ''
+  return !value || /^装配体\s+\d+$/.test(value) || /^子装配体\s+\d+(?:-\d+)*$/.test(value)
+}
+
+function lastHierarchicalNumber(name: string | undefined): number | undefined {
+  const match = name?.trim().match(/(?:^|\s)(\d+(?:-\d+)*)$/)
+  if (!match) return undefined
+  const last = match[1].split('-').pop()
+  const value = Number(last)
+  return Number.isInteger(value) && value > 0 ? value : undefined
+}
+
+function rootAssemblyNumber(name: string | undefined): number | undefined {
+  const match = name?.trim().match(/^装配体\s+(\d+)$/)
+  if (!match) return undefined
+  const value = Number(match[1])
+  return Number.isInteger(value) && value > 0 ? value : undefined
+}
+
+/**
+ * Persist and normalize the naming scheme used by the scene tree.
+ *
+ * Root assemblies use `装配体 N`. Their direct children use the root path,
+ * e.g. `手动体素实体 N-1` and `子装配体 N-1`; deeper levels append another
+ * sibling number. Sibling numbers live in persistent counters so deleting a
+ * node never causes a later node to be renumbered.
+ */
+export function normalizeProjectNaming(project: ProjectState): ProjectState {
+  const next = structuredClone(project)
+  const assemblies = next.assemblies ?? []
+  const assemblyMap = new Map(assemblies.map((assembly) => [assembly.id, assembly]))
+  const parentByAssembly = new Map<string, string | undefined>()
+  assemblies.forEach((parent) => parent.memberKeys.forEach((memberKey) => {
+    if (!memberKey.startsWith('assembly:')) return
+    const childId = memberKey.slice('assembly:'.length)
+    if (assemblyMap.has(childId) && !parentByAssembly.has(childId)) parentByAssembly.set(childId, parent.id)
+  }))
+
+  const usedRootSequences = new Set<number>()
+  const usedChildSequences = new Map<string, Set<number>>()
+  const childCounters = { ...(next.childSequenceCounters ?? {}) }
+  Object.entries(next.assemblyChildSequence ?? {}).forEach(([parentId, counter]) => {
+    const key = `assembly:${parentId}`
+    childCounters[key] = Math.max(childCounters[key] ?? 1, counter)
+  })
+  Object.entries(next.entitySequenceCounters ?? {}).forEach(([scope, counter]) => {
+    if (scope.startsWith('assembly:')) childCounters[scope] = Math.max(childCounters[scope] ?? 1, counter)
+  })
+  const pathNumbers = new Map<string, number[]>()
+  let nextRootSequence = Math.max(1, next.assemblySequence ?? 1)
+  assemblies.forEach((assembly) => {
+    const parentId = parentByAssembly.get(assembly.id)
+    const scope = parentId ?? 'root'
+    const used = parentId ? (usedChildSequences.get(parentId) ?? new Set<number>()) : usedRootSequences
+    if (parentId) usedChildSequences.set(parentId, used)
+    const priorParent = assembly.parentAssemblyId
+    const auto = assembly.nameMode !== 'custom' && (assembly.nameMode === 'auto' || automaticAssemblyName(assembly.name))
+    let sequence = Number.isInteger(assembly.sequence) && (assembly.sequence ?? 0) > 0 ? assembly.sequence : undefined
+    if (!sequence && auto) sequence = parentId ? lastHierarchicalNumber(assembly.name) : rootAssemblyNumber(assembly.name)
+    const parentChanged = priorParent !== parentId
+    if (parentChanged && priorParent !== undefined && parentId === undefined) sequence = undefined
+    if (parentChanged && priorParent === undefined && parentId !== undefined) {
+      sequence = /^子装配体\s+\d+(?:-\d+)*$/.test(assembly.name?.trim() ?? '') ? lastHierarchicalNumber(assembly.name) : undefined
+    }
+    if (!sequence || used.has(sequence)) {
+      if (parentId) {
+        const counterKey = `assembly:${parentId}`
+        const nextSequence = Math.max(1, childCounters[counterKey] ?? 1, ...used, 0)
+        sequence = nextSequence
+        childCounters[counterKey] = nextSequence + 1
+      } else {
+        sequence = Math.max(1, nextRootSequence, ...usedRootSequences, 0)
+        nextRootSequence = sequence + 1
+      }
+    }
+    used.add(sequence)
+    if (parentId) {
+      const counterKey = `assembly:${parentId}`
+      childCounters[counterKey] = Math.max(childCounters[counterKey] ?? 1, sequence + 1)
+    }
+    else nextRootSequence = Math.max(nextRootSequence, sequence + 1)
+    assembly.sequence = sequence
+    assembly.parentAssemblyId = parentId
+    assembly.nameMode = auto ? 'auto' : 'custom'
+    const parentPath = parentId ? (pathNumbers.get(parentId) ?? []) : []
+    pathNumbers.set(assembly.id, [...parentPath, sequence])
+  })
+
+  const unresolved = new Set(assemblies.map((assembly) => assembly.id))
+  const visitAssembly = (assemblyId: string, trail = new Set<string>()) => {
+    if (!unresolved.has(assemblyId) || trail.has(assemblyId)) return
+    const assembly = assemblyMap.get(assemblyId)
+    if (!assembly) return
+    const parentId = parentByAssembly.get(assemblyId)
+    if (parentId && unresolved.has(parentId)) visitAssembly(parentId, new Set([...trail, assemblyId]))
+    const path = [...(parentId ? (pathNumbers.get(parentId) ?? []) : []), assembly.sequence ?? 1]
+    pathNumbers.set(assemblyId, path)
+    if (assembly.nameMode === 'auto') assembly.name = parentId ? `子装配体 ${path.join('-')}` : `装配体 ${path[0]}`
+    unresolved.delete(assemblyId)
+    assembly.memberKeys.filter((key) => key.startsWith('assembly:')).forEach((key) => visitAssembly(key.slice('assembly:'.length), new Set([...trail, assemblyId])))
+  }
+  assemblies.forEach((assembly) => visitAssembly(assembly.id))
+  next.assemblySequence = nextRootSequence
+  next.assemblyChildSequence = Object.fromEntries(Object.entries(childCounters)
+    .filter(([scope]) => scope.startsWith('assembly:'))
+    .map(([scope, counter]) => [scope.slice('assembly:'.length), counter]))
+  next.childSequenceCounters = childCounters
+
+  const parts = sceneEntityParts(next)
+  const names = { ...(next.entityNames ?? {}) }
+  const modes = { ...(next.entityNameModes ?? {}) }
+  const sequences = { ...(next.entityNameSequences ?? {}) }
+  const parents = { ...(next.entityNameParents ?? {}) }
+  const entityCounters = { ...childCounters, ...(next.entitySequenceCounters ?? {}) }
+  const usedEntitySequences = new Map<string, Set<number>>()
+  const usedStandaloneNames = new Set<string>()
+  const assetMap = new Map(next.assets.map((asset) => [asset.id, asset]))
+  const scopeForParent = (parentId?: string) => parentId ? `assembly:${parentId}` : 'root'
+  const partBaseName = (part: SceneEntityPart) => {
+    if (part.kind === 'custom') return '手动体素实体'
+    const instance = part.instanceId ? next.instances.find((item) => item.id === part.instanceId) : undefined
+    const asset = instance ? assetMap.get(instance.assetId) : undefined
+    const sourceName = asset?.name?.trim() ?? ''
+    return /^装配体\s+\d+$/.test(sourceName) || /^子装配体\s+\d+(?:-\d+)*$/.test(sourceName) ? '子实体' : (sourceName || '子实体')
+  }
+  const directParentOf = (part: SceneEntityPart) => part.assemblyIds?.[0] ?? part.assemblyId
+  parts.forEach((part) => {
+    const parentId = directParentOf(part)
+    const scope = scopeForParent(parentId)
+    if (!parentId) {
+      const current = names[part.memberKey]
+      if (!current) {
+        const base = partBaseName(part)
+        let candidate = base
+        let suffix = 2
+        while (usedStandaloneNames.has(candidate)) candidate = `${base} ${suffix++}`
+        names[part.memberKey] = candidate
+      }
+      usedStandaloneNames.add(names[part.memberKey])
+      parents[part.memberKey] = ''
+      if (!modes[part.memberKey]) modes[part.memberKey] = 'auto'
+      return
+    }
+    parents[part.memberKey] = parentId
+    if (modes[part.memberKey] === 'custom') return
+    modes[part.memberKey] = 'auto'
+    const used = usedEntitySequences.get(scope) ?? new Set<number>()
+    usedEntitySequences.set(scope, used)
+    let sequence = Number.isInteger(sequences[part.memberKey]) && (sequences[part.memberKey] ?? 0) > 0 ? sequences[part.memberKey] : undefined
+    const previousParent = next.entityNameParents?.[part.memberKey]
+    if (previousParent !== parentId) sequence = lastHierarchicalNumber(names[part.memberKey])
+    if (!sequence || used.has(sequence)) {
+      const nextSequence = Math.max(1, childCounters[scope] ?? 1, entityCounters[scope] ?? 1, ...used, 0)
+      sequence = nextSequence
+      childCounters[scope] = nextSequence + 1
+    }
+    used.add(sequence)
+    childCounters[scope] = Math.max(childCounters[scope] ?? 1, entityCounters[scope] ?? 1, sequence + 1)
+    sequences[part.memberKey] = sequence
+    const path = pathNumbers.get(parentId) ?? [assemblyMap.get(parentId)?.sequence ?? 1]
+    names[part.memberKey] = `${partBaseName(part)} ${path.join('-')}-${sequence}`
+  })
+  next.entityNames = names
+  next.entityNameModes = modes
+  next.entityNameSequences = sequences
+  next.entityNameParents = parents
+  next.entitySequenceCounters = { ...entityCounters, ...childCounters }
+  next.childSequenceCounters = childCounters
+  return next
 }
 
 export function sceneAssemblies(parts: SceneEntityPart[], options: { includeContacts?: boolean } = {}): SceneEntityPart[][] {

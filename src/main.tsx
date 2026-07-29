@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, CircleUserRound, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, SquareDashedMousePointer, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, MATERIALS, Material, ProjectState, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, findInstanceVoxelAtSceneVoxel, highestVoxelAt, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneEntityParts, snapWorld, uniqueAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel } from './voxel'
+import { AssetAssembly, MATERIALS, Material, ProjectState, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, findInstanceVoxelAtSceneVoxel, highestVoxelAt, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneEntityParts, snapWorld, uniqueAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel } from './voxel'
 import { importModelAsVoxelAsset } from './model-import'
 import { LibraryResponse, loadAsset, loadLibrary, loadScene, saveAsset, saveScene } from './persistence'
 import './styles.css'
@@ -88,22 +88,6 @@ function scenePartBaseName(project: ProjectState, part: SceneEntityPart): string
 
 function normalizeStoredProject(loaded: ProjectState): ProjectState {
   const defaultAssets = new Map(makeDefaultProject().assets.map((asset) => [asset.id, asset]))
-  const rawAssemblies = loaded.assemblies ?? []
-  const usedAssemblyNames = new Set<string>()
-  let nextAssemblyNumber = Math.max(1, loaded.assemblySequence ?? 1)
-  rawAssemblies.forEach((assembly) => {
-    const match = assembly.name?.trim().match(/^装配体 (\d+)$/)
-    if (match) nextAssemblyNumber = Math.max(nextAssemblyNumber, Number(match[1]) + 1)
-  })
-  const assemblies = rawAssemblies.map((assembly) => {
-    let name = assembly.name?.trim()
-    if (!name || usedAssemblyNames.has(name)) {
-      do name = `装配体 ${nextAssemblyNumber++}`
-      while (usedAssemblyNames.has(name))
-    }
-    usedAssemblyNames.add(name)
-    return { ...assembly, name }
-  })
   const normalized: ProjectState = {
     ...loaded,
     assets: (loaded.assets ?? []).map((asset) => ({
@@ -114,22 +98,18 @@ function normalizeStoredProject(loaded: ProjectState): ProjectState {
     customVoxels: (loaded.customVoxels ?? []).map((voxel, index) => ({ ...voxel, entityId: voxel.entityId ?? `legacy-${voxel.x}-${voxel.y}-${voxel.z}-${index}` })),
     customColors: { ...(loaded.customColors ?? {}) },
     entityNames: { ...(loaded.entityNames ?? {}) },
-    assemblySequence: nextAssemblyNumber,
-    assemblies,
+    entityNameModes: { ...(loaded.entityNameModes ?? {}) },
+    entityNameSequences: { ...(loaded.entityNameSequences ?? {}) },
+    entityNameParents: { ...(loaded.entityNameParents ?? {}) },
+    entitySequenceCounters: { ...(loaded.entitySequenceCounters ?? {}) },
+    assemblySequence: Math.max(1, loaded.assemblySequence ?? 1),
+    assemblyChildSequence: { ...(loaded.assemblyChildSequence ?? {}) },
+    childSequenceCounters: { ...(loaded.childSequenceCounters ?? {}) },
+    assemblies: (loaded.assemblies ?? []).map((assembly) => ({ ...assembly, memberKeys: [...assembly.memberKeys] })),
     instances: (loaded.instances ?? []).map((instance) => ({ ...instance, x: snapWorld(instance.x), y: snapWorld(instance.y ?? 0), z: snapWorld(instance.z), overrides: instance.overrides ?? [], partOffsets: instance.partOffsets ?? {} })),
     lockedMemberKeys: [...new Set(loaded.lockedMemberKeys ?? [])],
   }
-  const usedEntityNames = new Set(Object.values(normalized.entityNames ?? {}))
-  for (const part of sceneEntityParts(normalized)) {
-    if (normalized.entityNames?.[part.memberKey]) continue
-    const baseName = scenePartBaseName(normalized, part)
-    let name = baseName
-    let suffix = 2
-    while (usedEntityNames.has(name)) name = `${baseName} ${suffix++}`
-    normalized.entityNames![part.memberKey] = name
-    usedEntityNames.add(name)
-  }
-  return normalized
+  return normalizeProjectNaming(normalized)
 }
 
 function scenePartIsLocked(project: ProjectState, part: SceneEntityPart): boolean {
@@ -273,35 +253,15 @@ function App() {
     const assemblies = project.assemblies ?? []
     const assemblyMap = new Map(assemblies.map((assembly) => [assembly.id, assembly]))
     const partMatchesMemberKey = (part: SceneEntityPart, memberKey: string) => part.memberKey === memberKey || (memberKey.startsWith('asset:') && part.memberKey.startsWith(`${memberKey}:`))
-    const labels = new Map<string, number>()
-    const assemblyLabels = new Map<string, string>()
-    const usedAssemblyLabels = new Set<string>()
-    let fallbackAssemblyNumber = 1
-    assemblies.forEach((assembly) => {
-      let label = assembly.name?.trim()
-      if (!label || usedAssemblyLabels.has(label)) {
-        while (usedAssemblyLabels.has(`装配体 ${fallbackAssemblyNumber}`)) fallbackAssemblyNumber += 1
-        label = `装配体 ${fallbackAssemblyNumber}`
-        fallbackAssemblyNumber += 1
-      }
-      usedAssemblyLabels.add(label)
-      assemblyLabels.set(assembly.id, label)
-    })
-    const uniqueLabel = (base: string) => {
-      const next = (labels.get(base) ?? 0) + 1
-      labels.set(base, next)
-      return next === 1 ? base : `${base} ${next}`
-    }
     const partItem = (part: SceneEntityPart): SceneTreeItem => {
-      const uniqueName = uniqueLabel(baseNameForPart(part))
-      const displayLabel = uniqueName
+      const displayLabel = baseNameForPart(part)
       return { id: part.id, kind: 'part', part: { ...part, displayLabel }, label: displayLabel }
     }
     const renderAssembly = (assemblyId: string, seen = new Set<string>()): SceneTreeItem | null => {
       const assembly = assemblyMap.get(assemblyId)
       if (!assembly || seen.has(assemblyId)) return null
       const nextSeen = new Set([...seen, assemblyId])
-      const displayLabel = assemblyLabels.get(assemblyId) ?? '装配体'
+      const displayLabel = assembly.name?.trim() || '装配体'
       const children: SceneTreeItem[] = []
       for (const memberKey of assembly.memberKeys) {
         if (memberKey.startsWith('assembly:')) {
@@ -363,6 +323,7 @@ function App() {
       setSelectedId(normalized.instances[0]?.id ?? sceneEntityParts(normalized)[0]?.id ?? '')
       persistenceReadyRef.current = true
       setPersistenceStatus('saved')
+      void saveScene(CURRENT_SCENE_ID, normalized).catch(() => setPersistenceStatus('offline'))
       setNotice(`已加载后端场景 · ${normalized.name}`)
     }).catch(async (error: unknown) => {
       if (cancelled) return
@@ -744,7 +705,7 @@ function App() {
       ...assembly,
       memberKeys: assembly.memberKeys.filter((memberKey) => !detachedMembers.has(memberKey)),
     })).filter((assembly) => assembly.memberKeys.length > 0)
-    nextProject.assemblies.push({ id: assemblyId, name: `装配体 ${assemblyNumber}`, memberKeys })
+    nextProject.assemblies.push({ id: assemblyId, name: `装配体 ${assemblyNumber}`, nameMode: 'auto', sequence: assemblyNumber, memberKeys })
     commitProject(nextProject)
     setCheckedTreePartIds([])
     setSelectedId(`assembly:${assemblyId}`)
@@ -815,9 +776,13 @@ function App() {
     updateProject((draft) => {
       if (targetAssemblyId) {
         const target = (draft.assemblies ?? []).find((item) => item.id === targetAssemblyId)
-        if (target) target.name = nextName
+        if (target) {
+          target.name = nextName
+          target.nameMode = 'custom'
+        }
       } else if (part) {
         draft.entityNames = { ...(draft.entityNames ?? {}), [part.memberKey]: nextName }
+        draft.entityNameModes = { ...(draft.entityNameModes ?? {}), [part.memberKey]: 'custom' }
       }
     })
     setTreeContextMenu(null)
@@ -1214,6 +1179,9 @@ function App() {
           draft.assemblies = [...(draft.assemblies ?? []), {
             ...structuredClone(sourceAssembly),
             id: assemblyMapForCopy.get(oldId)!,
+            nameMode: 'auto',
+            sequence: undefined,
+            parentAssemblyId: undefined,
             name: (() => {
               const assemblyNumber = Math.max(1, draft.assemblySequence ?? 1)
               draft.assemblySequence = assemblyNumber + 1

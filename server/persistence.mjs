@@ -65,7 +65,17 @@ function sceneFromProject(project, id) {
     assetIds: (project.assets ?? []).map((asset) => asset.id),
     instances: project.instances ?? [],
     customVoxels: project.customVoxels ?? [],
+    customColors: project.customColors ?? {},
+    entityNames: project.entityNames ?? {},
+    entityNameModes: project.entityNameModes ?? {},
+    entityNameSequences: project.entityNameSequences ?? {},
+    entityNameParents: project.entityNameParents ?? {},
+    entitySequenceCounters: project.entitySequenceCounters ?? {},
+    assemblySequence: project.assemblySequence ?? 1,
+    assemblyChildSequence: project.assemblyChildSequence ?? {},
+    childSequenceCounters: project.childSequenceCounters ?? {},
     assemblies: project.assemblies ?? [],
+    lockedMemberKeys: project.lockedMemberKeys ?? [],
     updatedAt: new Date().toISOString(),
   }
 }
@@ -83,7 +93,17 @@ function projectFromScene(database, scene) {
     assets,
     instances: scene.instances ?? [],
     customVoxels: scene.customVoxels ?? [],
+    customColors: scene.customColors ?? {},
+    entityNames: scene.entityNames ?? {},
+    entityNameModes: scene.entityNameModes ?? {},
+    entityNameSequences: scene.entityNameSequences ?? {},
+    entityNameParents: scene.entityNameParents ?? {},
+    entitySequenceCounters: scene.entitySequenceCounters ?? {},
+    assemblySequence: scene.assemblySequence ?? 1,
+    assemblyChildSequence: scene.assemblyChildSequence ?? {},
+    childSequenceCounters: scene.childSequenceCounters ?? {},
     assemblies: scene.assemblies ?? [],
+    lockedMemberKeys: scene.lockedMemberKeys ?? [],
   }
 }
 

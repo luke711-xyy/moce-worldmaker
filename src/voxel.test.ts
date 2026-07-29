@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, nextVoxelY, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneEntityParts, snapWorld, uniqueAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel } from './voxel'
+import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneEntityParts, snapWorld, uniqueAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
@@ -156,6 +156,46 @@ describe('莫测造境体素核心数据', () => {
     expect(parts.find((part) => part.partId === 'c')?.assemblyIds).toEqual(['assembly-parent'])
     expect(sceneAssemblies(parts, { includeContacts: false })).toHaveLength(1)
     expect(sceneAssemblies(parts, { includeContacts: false })[0]).toHaveLength(3)
+  })
+
+  it('gives assemblies and all child types stable hierarchical names', () => {
+    const project = makeDefaultProject()
+    project.customVoxels = [
+      { x: 0, y: 0, z: 0, materialId: 'stone', entityId: 'a' },
+      { x: 3, y: 0, z: 0, materialId: 'jade', entityId: 'b' },
+      { x: 6, y: 0, z: 0, materialId: 'gold', entityId: 'c' },
+    ]
+    project.assemblies = [
+      { id: 'assembly-root', name: '装配体 23', memberKeys: ['assembly:assembly-child', 'voxel:c'] },
+      { id: 'assembly-child', memberKeys: ['voxel:a', 'voxel:b'] },
+    ]
+    const normalized = normalizeProjectNaming(project)
+    const names = normalized.entityNames!
+    expect(normalized.assemblies?.find((item) => item.id === 'assembly-root')?.name).toBe('装配体 23')
+    expect(normalized.assemblies?.find((item) => item.id === 'assembly-child')?.name).toBe('子装配体 23-1')
+    expect(names['voxel:a']).toBe('手动体素实体 23-1-1')
+    expect(names['voxel:b']).toBe('手动体素实体 23-1-2')
+    expect(names['voxel:c']).toBe('手动体素实体 23-2')
+  })
+
+  it('does not reuse hierarchical sibling numbers after deletion', () => {
+    const project = makeDefaultProject()
+    project.customVoxels = [
+      { x: 0, y: 0, z: 0, materialId: 'stone', entityId: 'a' },
+      { x: 3, y: 0, z: 0, materialId: 'jade', entityId: 'b' },
+    ]
+    project.assemblies = [{ id: 'assembly-root', name: '装配体 23', memberKeys: ['voxel:a', 'voxel:b'] }]
+    const first = normalizeProjectNaming(project)
+    const firstNames = { ...first.entityNames }
+    first.customVoxels = first.customVoxels.filter((voxel) => voxel.entityId !== 'a')
+    first.assemblies![0].memberKeys = ['voxel:b']
+    const afterDelete = normalizeProjectNaming(first)
+    expect(afterDelete.entityNames?.['voxel:b']).toBe(firstNames['voxel:b'])
+    const c = { x: 6, y: 0, z: 0, materialId: 'gold', entityId: 'c' }
+    afterDelete.customVoxels.push(c)
+    afterDelete.assemblies![0].memberKeys.push('voxel:c')
+    const afterAdd = normalizeProjectNaming(afterDelete)
+    expect(afterAdd.entityNames?.['voxel:c']).toBe('手动体素实体 23-3')
   })
 
   it('creates a normalized reusable asset from selected scene parts with a unique name', () => {
