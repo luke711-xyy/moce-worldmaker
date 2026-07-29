@@ -238,12 +238,13 @@ button { border: 0; cursor: pointer; color: inherit; }
 .entity-actions { display: grid; gap: 6px; }
 .entity-actions button { min-height: 31px; display: flex; align-items: center; justify-content: center; gap: 5px; color: #b8c1bd; background: #1b2224; border: 1px solid #3b4749; font-size: 9px; }
 .entity-actions button:hover { color: #fff0df; border-color: #ae5b44; background: #2c2523; }
-.copy-entity-row { display: flex; align-items: center; gap: 0; min-height: 31px; }
-.copy-entity-label { flex: 1; color: #b8c1bd; font-size: 9px; }
-.copy-entity-row > button, .copy-entity-count { height: 27px; min-width: 27px; display: grid; place-items: center; color: #a8b0ad; background: #1a2022; border: 1px solid #384244; font-size: 9px; }
-.copy-entity-count { border-left: 0; border-right: 0; font: 9px 'DM Mono', monospace; }
-.copy-entity-row > button:hover { color: #fff0df; background: #2c2523; }
-.copy-entity-row .copy-confirm { min-width: 42px; margin-left: 6px; color: #fff0df; background: #a9523c; border-color: #c46b50; }
+.copy-entity-row { display: flex; align-items: center; gap: 5px; min-height: 31px; }
+.copy-entity-label { min-width: 49px; color: #b8c1bd; font-size: 9px; }
+.copy-count-choice { display: flex; gap: 2px; }
+.copy-count-choice button, .copy-entity-count { min-height: 25px; min-width: 25px; padding: 0 5px; display: grid; place-items: center; color: #8f9b98; background: #1a2022; border: 1px solid #384244; font: 8px 'DM Mono', monospace; }
+.copy-entity-count { color: #b8c1bd; }
+.copy-count-choice button:hover { color: #fff0df; background: #2c2523; border-color: #ae5b44; }
+.copy-entity-row .copy-confirm { min-height: 25px; min-width: 31px; margin-left: 0; padding: 0 5px; color: #fff0df; background: #a9523c; border-color: #c46b50; font-size: 8px; }
 .copy-entity-row .copy-confirm:hover { background: #c66c50; }
 .entity-transform-operation { display: flex; align-items: center; gap: 5px; min-height: 31px; color: #b8c1bd; font-size: 9px; }
 .entity-transform-operation > span { min-width: 49px; }

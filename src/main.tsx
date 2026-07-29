@@ -1350,6 +1350,40 @@ function App() {
   type SceneTransformAxis = 'x' | 'y' | 'z'
   const sceneAxisToVoxelAxis = (axis: SceneTransformAxis): 'x' | 'y' | 'z' => axis === 'x' ? 'x' : axis === 'y' ? 'z' : 'y'
 
+  const transformedEntitiesWithinSceneBoundary = (mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90) => {
+    const boundary = Math.max(1, projectRef.current.sceneSizeCm / 2)
+    const withinBoundary = (voxels: Voxel[]) => voxels.every((voxel) => {
+      const halfVoxel = VOXEL_WORLD_SIZE / 2
+      return Math.abs(voxelToWorld(voxel.x)) + halfVoxel <= boundary && Math.abs(voxelToWorld(voxel.z)) + halfVoxel <= boundary
+    })
+    const voxelAxis = sceneAxisToVoxelAxis(axis)
+    const customIds = new Set<string>()
+    for (const part of selectedEntityParts) {
+      if (part.kind !== 'custom' || customIds.has(part.partId)) continue
+      customIds.add(part.partId)
+      const source = projectRef.current.customVoxels.filter((voxel) => voxelEntityId(voxel) === part.partId)
+      const transformed = mode === 'mirror' ? mirrorVoxels(source, voxelAxis) : rotateVoxels(source, voxelAxis, degrees)
+      if (!withinBoundary(transformed)) return false
+    }
+    const assetMap = new Map(projectRef.current.assets.map((asset) => [asset.id, asset]))
+    const instanceIds = new Set<string>()
+    for (const part of selectedEntityParts) {
+      if (!part.instanceId || instanceIds.has(part.instanceId)) continue
+      instanceIds.add(part.instanceId)
+      const instance = projectRef.current.instances.find((candidate) => candidate.id === part.instanceId)
+      const asset = instance ? assetMap.get(instance.assetId) : undefined
+      if (!instance || !asset) continue
+      const simulated = structuredClone(instance)
+      if (mode === 'mirror') simulated.mirror = { x: simulated.mirror?.x ?? false, y: simulated.mirror?.y ?? false, z: simulated.mirror?.z ?? false, [axis]: !(simulated.mirror?.[axis] ?? false) }
+      else {
+        const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationY' : 'rotationZ'
+        simulated[key] = ((simulated[key] ?? 0) + degrees) % 360
+      }
+      if (!withinBoundary(resolveInstanceSceneVoxels(simulated, asset))) return false
+    }
+    return true
+  }
+
   const applyCustomVoxelTransform = (parts: SceneEntityPart[], transform: (voxels: Voxel[]) => Voxel[]) => {
     const selectedCustomIds = new Set(parts.filter((part) => part.kind === 'custom').map((part) => part.partId))
     if (!selectedCustomIds.size) return false
@@ -1370,6 +1404,10 @@ function App() {
       setNotice('请先选择要镜像的实体')
       return
     }
+    if (!transformedEntitiesWithinSceneBoundary('mirror', axis)) {
+      setNotice('当前操作会使实体超出场景范围，请先移动后再操作。')
+      return
+    }
     const voxelAxis = sceneAxisToVoxelAxis(axis)
     const customChanged = applyCustomVoxelTransform(selectedEntityParts, (voxels) => mirrorVoxels(voxels, voxelAxis))
     const instanceIds = new Set(selectedEntityParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
@@ -1387,6 +1425,10 @@ function App() {
   const rotateSelectedEntities = (axis: SceneTransformAxis, degrees: 90 | 180 | 270) => {
     if (!selectedEntityParts.length) {
       setNotice('请先选择要旋转的实体')
+      return
+    }
+    if (!transformedEntitiesWithinSceneBoundary('rotate', axis, degrees)) {
+      setNotice('当前操作会使实体超出场景范围，请先移动后再操作。')
       return
     }
     const voxelAxis = sceneAxisToVoxelAxis(axis)
@@ -1541,7 +1583,7 @@ function App() {
             <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { setZoomLevel((value) => Math.max(50, value - 10)); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${Math.max(0, Math.min(100, ((zoomLevel - 50) / 150) * 100))}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { setZoomLevel((value) => Math.min(200, value + 10)); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{zoomLevel}%</span></div>
           </div>
         </section>
-        <Inspector selectedAsset={selectedAsset} selectedInstance={selectedInstance} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onDuplicate={duplicateSelected} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} />
+        <Inspector selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onDuplicate={duplicateSelected} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} />
       </main>
       {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} onClose={() => setLibraryOpen(false)} onRefresh={refreshLibrary} onSaveScene={saveCurrentSceneAsNew} onLoadScene={loadStoredScene} onLoadAsset={loadStoredAsset} />}
     </div>
@@ -1691,7 +1733,7 @@ function ToolButton({ icon, label, description, active, onClick }: { icon: React
   return <button className={`tool-button ${active ? 'active' : ''}`} data-tooltip={description} aria-label={label} onClick={onClick} title={description}>{icon}</button>
 }
 
-function Inspector({ selectedAsset, selectedInstance, selectedPart, selectedParts, editEntityId, position, transformEditable, selectedColor, onChangeTransform, onChangeColor, onMirror, onRotate, onExport, onDuplicate, onDelete, onResetTransform, onSaveAsAsset }: { selectedAsset?: VoxelAsset; selectedInstance?: SceneInstance; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; editEntityId: string | null; position: number[]; transformEditable: boolean; selectedColor: string; onChangeTransform: (axis: number, value: number) => void; onChangeColor: (color: string) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onExport: () => void; onDuplicate: (count: number) => void; onDelete: () => void; onResetTransform: () => void; onSaveAsAsset: () => void }) {
+function Inspector({ selectedAsset, selectedPart, selectedParts, editEntityId, position, transformEditable, selectedColor, onChangeTransform, onChangeColor, onMirror, onRotate, onExport, onDuplicate, onDelete, onResetTransform, onSaveAsAsset }: { selectedAsset?: VoxelAsset; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; editEntityId: string | null; position: number[]; transformEditable: boolean; selectedColor: string; onChangeTransform: (axis: number, value: number) => void; onChangeColor: (color: string) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onExport: () => void; onDuplicate: (count: number) => void; onDelete: () => void; onResetTransform: () => void; onSaveAsAsset: () => void }) {
   const [copyCount, setCopyCount] = useState(1)
   const [mirrorAxis, setMirrorAxis] = useState<'x' | 'y' | 'z'>('x')
   const [rotateAxis, setRotateAxis] = useState<'x' | 'y' | 'z'>('z')
@@ -1699,13 +1741,11 @@ function Inspector({ selectedAsset, selectedInstance, selectedPart, selectedPart
   const previewVoxels = selectedParts.flatMap((part) => part.voxels)
   const isAssembly = selectedParts.length > 1 && selectedParts.some((part) => part.assemblyId || part.assemblyIds?.length)
   const entityName = isAssembly ? `装配体 · ${selectedParts.length} 个子实体` : selectedAsset?.name ?? selectedPart?.label ?? (selectedPart ? '手动体素实体' : '未选择')
-  const entityId = selectedInstance?.id ?? selectedPart?.id ?? '—'
   const source = isAssembly ? '当前场景 · 装配体实体' : selectedAsset ? (selectedAsset.source ?? '莫测标准组件') : (selectedPart ? '当前场景 · 用户实体' : '莫测标准组件')
   return <aside className="inspector">
     <div className="inspector-heading"><div><h2>属性</h2><p>选中对象的编辑参数</p></div><ChevronRight size={18} className="muted-icon" /></div>
     <div className="inspector-section entity-summary-section">
       <div className="field-label">选中实体</div><div className="select-field">{entityName} <ChevronDown size={14} /></div>
-      <div className="field-label">实体 ID</div><div className="input-field">{entityId}</div>
       <div className="field-label">来源</div><div className="input-field muted-field">{source}</div>
       <div className="entity-preview"><VoxelMiniPreview voxels={previewVoxels} asset={selectedAsset} /></div>
     </div>
@@ -1721,7 +1761,7 @@ function Inspector({ selectedAsset, selectedInstance, selectedPart, selectedPart
     <div className="inspector-section entity-actions-section">
       <div className="section-heading"><span>实体操作</span><span className="instance-label">{selectedParts.length} 个实体</span></div>
       <div className="entity-actions">
-        <div className="copy-entity-row"><span className="copy-entity-label">复制实体</span><button onClick={() => setCopyCount((value) => Math.max(1, value - 1))} title="减少复制数量"><Minus size={13} /></button><span className="copy-entity-count">{copyCount}</span><button onClick={() => setCopyCount((value) => Math.min(99, value + 1))} title="增加复制数量"><Plus size={13} /></button><button className="copy-confirm" onClick={() => onDuplicate(copyCount)}>确定</button></div>
+        <div className="entity-transform-operation copy-entity-row"><span className="copy-entity-label">复制实体</span><div className="copy-count-choice"><button onClick={() => setCopyCount((value) => Math.max(1, value - 1))} title="减少复制数量">−</button><span className="copy-entity-count">{copyCount}</span><button onClick={() => setCopyCount((value) => Math.min(99, value + 1))} title="增加复制数量">＋</button></div><button className="operation-confirm copy-confirm" onClick={() => onDuplicate(copyCount)}>确定</button></div>
         <div className="entity-transform-operation"><span>镜像实体</span><div className="axis-choice">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={mirrorAxis === axis ? 'active' : ''} onClick={() => setMirrorAxis(axis)}>{axis.toUpperCase()}</button>)}</div><button className="operation-confirm" onClick={() => onMirror(mirrorAxis)}>执行</button></div>
         <div className="entity-transform-operation"><span>旋转实体</span><div className="axis-choice">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={rotateAxis === axis ? 'active' : ''} onClick={() => setRotateAxis(axis)}>{axis.toUpperCase()}</button>)}</div><div className="degree-choice">{([90, 180, 270] as const).map((degrees) => <button key={degrees} className={rotateDegrees === degrees ? 'active' : ''} onClick={() => setRotateDegrees(degrees)}>{degrees}°</button>)}</div><button className="operation-confirm" onClick={() => onRotate(rotateAxis, rotateDegrees)}>执行</button></div>
         <button onClick={onSaveAsAsset}><Save size={14} /> 保存为模板实体</button>
