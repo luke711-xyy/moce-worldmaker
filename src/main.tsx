@@ -684,6 +684,14 @@ function App() {
     setNotice('已退出编辑修改模式')
   }
 
+  const changeTool = (nextTool: Tool) => {
+    setTool(nextTool)
+    setSelectedId('')
+    setCheckedTreePartIds([])
+    setEditEntityId(null)
+    setTreeContextMenu(null)
+  }
+
   const saveProject = async () => {
     let persisted = true
     try {
@@ -1046,9 +1054,9 @@ function App() {
           </VoxelViewport>
           <div className="viewport-footer">
             <div className="tool-group">
-              <ToolButton icon={<SquareDashedMousePointer size={17} />} label="选择" description="实体移动" active={tool === 'select'} onClick={() => setTool('select')} />
-              <ToolButton icon={<Paintbrush size={17} />} label="体素笔刷" description="绘制实体" active={tool === 'brush'} onClick={() => setTool('brush')} />
-              <ToolButton icon={<Eraser size={17} />} label="擦除" description="擦除实体" active={tool === 'erase'} onClick={() => setTool('erase')} />
+              <ToolButton icon={<SquareDashedMousePointer size={17} />} label="选择" description="实体移动" active={tool === 'select'} onClick={() => changeTool('select')} />
+              <ToolButton icon={<Paintbrush size={17} />} label="体素笔刷" description="绘制实体" active={tool === 'brush'} onClick={() => changeTool('brush')} />
+              <ToolButton icon={<Eraser size={17} />} label="擦除" description="擦除实体" active={tool === 'erase'} onClick={() => changeTool('erase')} />
             </div>
             <div className="footer-separator" />
             <button className={`footer-control ${showGrid ? 'active' : ''}`} onClick={() => { setShowGrid((value) => !value); setNotice(showGrid ? '已隐藏网格' : '已显示网格') }}><Grid3X3 size={16} /> 网格</button>
@@ -1125,7 +1133,7 @@ function SceneTreePanel({ items, selectedId, expandedAssemblies, checkedPartIds,
         {expandedAssemblies[item.assemblyId!] !== false && <div className="scene-tree-children">{item.children?.map((part) => renderPart(part, true))}</div>}
       </div> : renderPart(item.part!, false))}
     </div>
-    {contextMenu && <div className="scene-tree-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onClick={(event) => event.stopPropagation()}>{checkedPartIds.length >= 2 && <button onClick={onAssemble}>组装已选实体</button>}<button onClick={() => onToggleLock(contextMenu.targetId, contextMenu.assemblyId)}>{operationLocked ? '取消固定所选实体' : '固定所选实体'}</button><button onClick={() => onEnterEdit(contextMenu.targetId)}>进入编辑修改模式</button>{contextMenu.assemblyId && <button onClick={() => onDissolve(contextMenu.assemblyId!)}>原位解散装配体</button>}<button className="danger" onClick={() => onDelete(contextMenu.targetId, contextMenu.assemblyId)}>删除所选实体</button></div>}
+    {contextMenu && <div className="scene-tree-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}>{checkedPartIds.length >= 2 && <button onClick={onAssemble}>组装已选实体</button>}<button onClick={() => onToggleLock(contextMenu.targetId, contextMenu.assemblyId)}>{operationLocked ? '取消固定所选实体' : '固定所选实体'}</button><button onClick={() => onEnterEdit(contextMenu.targetId)}>进入编辑修改模式</button>{contextMenu.assemblyId && <button onClick={() => onDissolve(contextMenu.assemblyId!)}>原位解散装配体</button>}<button className="danger" onClick={() => onDelete(contextMenu.targetId, contextMenu.assemblyId)}>删除所选实体</button></div>}
   </aside>
 }
 
