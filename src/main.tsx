@@ -531,24 +531,44 @@ function App() {
     setPlacementPreview(null)
   }
 
+  const assetWithinSceneBoundary = (asset: VoxelAsset, x: number, y: number, z: number) => {
+    const boundary = Math.max(1, projectRef.current.sceneSizeCm / 2)
+    const previewInstance: SceneInstance = { id: 'placement-preview', assetId: asset.id, x, y, z, rotation: 0, style: asset.style, visible: true, overrides: [] }
+    return resolveInstanceSceneVoxels(previewInstance, asset).every((voxel) => {
+      const worldX = voxelToWorld(voxel.x)
+      const worldY = voxelCenterToWorld(voxel.y)
+      const worldZ = voxelToWorld(voxel.z)
+      return Math.abs(worldX) <= boundary && Math.abs(worldY) <= boundary && Math.abs(worldZ) <= boundary
+    })
+  }
+
   const updatePlacementPreview = (assetId: string, x: number, z: number) => {
     const asset = projectRef.current.assets.find((item) => item.id === assetId)
     if (!asset) return
     const position = { assetId, x: snapWorld(x), y: 0, z: snapWorld(z) }
-    setPlacementPreview({ ...position, valid: !hasAssetCollisionAt(asset, position.x, position.y, position.z) })
+    setPlacementPreview({ ...position, valid: assetWithinSceneBoundary(asset, position.x, position.y, position.z) && !hasAssetCollisionAt(asset, position.x, position.y, position.z) })
   }
 
   const placeAssetAt = (assetId: string, x: number, z: number) => {
     const asset = projectRef.current.assets.find((item) => item.id === assetId)
     if (!asset) return
     const position = { x: snapWorld(x), y: 0, z: snapWorld(z) }
-    if (hasAssetCollisionAt(asset, position.x, position.y, position.z)) {
-      setNotice(`无法放置资产 · ${asset.name} 与已有实体重叠`)
+    const outsideBoundary = !assetWithinSceneBoundary(asset, position.x, position.y, position.z)
+    if (outsideBoundary || hasAssetCollisionAt(asset, position.x, position.y, position.z)) {
+      setNotice(outsideBoundary ? `无法放置资产 · ${asset.name} 超出场景边界` : `无法放置资产 · ${asset.name} 与已有实体重叠`)
       endPlacement()
       return
     }
     const instanceId = `instance-${asset.id}-${Date.now()}`
     let placedRootAssemblyId = ''
+    let placedMemberKeys: string[] = []
+    let editTargetAfterPlacement = editEntityId ?? ''
+    const editingPart = editEntityId && !editEntityId.startsWith('assembly:')
+      ? sceneEntityParts(projectRef.current).find((part) => part.id === editEntityId)
+      : undefined
+    const existingEditAssemblyId = editEntityId?.startsWith('assembly:')
+      ? editEntityId.slice('assembly:'.length)
+      : editingPart?.assemblyIds?.[0]
     updateProject((draft) => {
       draft.instances.push({ id: instanceId, assetId: asset.id, ...position, rotation: 0, style: asset.style, visible: true, overrides: [] })
       if (asset.assembly) {
@@ -567,9 +587,30 @@ function App() {
           draft.assemblies = [...(draft.assemblies ?? []), { id: sceneAssemblyId, name: node.name || asset.assembly?.name || '装配体', memberKeys }]
         })
         placedRootAssemblyId = nodeIds.get(asset.assembly.rootId) ?? ''
+        placedMemberKeys = placedRootAssemblyId ? [`assembly:${placedRootAssemblyId}`] : []
+      } else {
+        placedMemberKeys = resolveInstanceComponents(asset, []).map(({ partId }) => `asset:${instanceId}:${partId}`)
+      }
+      if (editEntityId && placedMemberKeys.length) {
+        let targetAssemblyId = existingEditAssemblyId
+        if (!targetAssemblyId && editingPart) {
+          const assemblyNumber = Math.max(1, draft.assemblySequence ?? 1)
+          draft.assemblySequence = assemblyNumber + 1
+          targetAssemblyId = `assembly-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+          draft.assemblies = [...(draft.assemblies ?? []), { id: targetAssemblyId, name: `装配体 ${assemblyNumber}`, nameMode: 'auto', sequence: assemblyNumber, memberKeys: [editingPart.memberKey] }]
+        }
+        const targetAssembly = targetAssemblyId ? (draft.assemblies ?? []).find((assembly) => assembly.id === targetAssemblyId) : undefined
+        if (targetAssembly) {
+          targetAssembly.memberKeys = [...new Set([...targetAssembly.memberKeys, ...placedMemberKeys])]
+          editTargetAfterPlacement = `assembly:${targetAssembly.id}`
+        }
       }
     })
-    setSelectedId(placedRootAssemblyId ? `assembly:${placedRootAssemblyId}` : instanceId)
+    if (editTargetAfterPlacement) {
+      setEditEntityId(editTargetAfterPlacement)
+      setCheckedTreePartIds([editTargetAfterPlacement])
+      setSelectedId(editTargetAfterPlacement)
+    } else setSelectedId(placedRootAssemblyId ? `assembly:${placedRootAssemblyId}` : instanceId)
     setNotice(`已放置资产 · ${asset.name}`)
     endPlacement()
   }
@@ -1845,6 +1886,8 @@ function createVoxelOutlineGeometry() {
 }
 
 function addVoxelHighlight(mesh: THREE.Mesh) {
+  const existing = mesh.userData.selectionGlowParts as THREE.Object3D[] | undefined
+  if (existing) return existing
   const edgeGeometry = createVoxelOutlineGeometry()
   const glow = new THREE.LineSegments(edgeGeometry, new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.2, depthTest: true, depthWrite: false }))
   glow.scale.setScalar(1.055)
@@ -1857,6 +1900,9 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
   edge.userData.selectionGlow = true
   edge.raycast = () => {}
   mesh.add(glow, edge)
+  const parts = [glow, edge]
+  mesh.userData.selectionGlowParts = parts
+  return parts
 }
 
 type CameraViewOption = { id: CameraViewId; label: string; direction: [number, number, number]; kind: 'face' | 'edge' | 'corner' }
@@ -2086,6 +2132,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     const observer = new ResizeObserver(resize)
     observer.observe(mount)
     let frame = 0
+    const occlusionRaycaster = new THREE.Raycaster()
     const updateAxisGizmo = () => {
       const svg = axisGizmoRef.current
       const currentCamera = cameraRef.current
@@ -2122,9 +2169,43 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         }
       })
     }
+    const updateEditOcclusion = () => {
+      const editState = editRenderStateRef.current
+      const currentCamera = cameraRef.current
+      if (!editState.active || !currentCamera || !group.children.length) return
+      const occludedPartIds = new Set<string>()
+      const targetMeshes: THREE.Mesh[] = []
+      group.traverse((object) => {
+        if (object instanceof THREE.Mesh && !object.userData.selectionGlow && editState.partIds.has(object.userData.scenePartId as string)) targetMeshes.push(object)
+      })
+      const origin = currentCamera.getWorldPosition(new THREE.Vector3())
+      targetMeshes.forEach((targetMesh) => {
+        const targetPosition = targetMesh.getWorldPosition(new THREE.Vector3())
+        const rayDirection = targetPosition.clone().sub(origin)
+        const targetDistance = rayDirection.length()
+        if (targetDistance <= 0.001) return
+        rayDirection.normalize()
+        occlusionRaycaster.set(origin, rayDirection)
+        occlusionRaycaster.near = 0.001
+        occlusionRaycaster.far = Math.max(0.001, targetDistance - 0.002)
+        const occluder = occlusionRaycaster.intersectObject(group, true).find((hit) => {
+          const scenePartId = hit.object.userData.scenePartId as string | undefined
+          return Boolean(scenePartId && !editState.partIds.has(scenePartId) && !hit.object.userData.selectionGlow)
+        })
+        const scenePartId = occluder?.object.userData.scenePartId as string | undefined
+        if (scenePartId) occludedPartIds.add(scenePartId)
+      })
+      group.traverse((object) => {
+        const scenePartId = object.userData.scenePartId as string | undefined
+        if (!(object instanceof THREE.Mesh) || !scenePartId || editState.partIds.has(scenePartId)) return
+        const glowParts = object.userData.selectionGlowParts as THREE.Object3D[] | undefined
+        glowParts?.forEach((part) => { part.visible = occludedPartIds.has(scenePartId) })
+      })
+    }
     const animate = () => {
       frame = requestAnimationFrame(animate)
       controls.update()
+      updateEditOcclusion()
       updateAxisGizmo()
       const currentCamera = cameraRef.current ?? camera
       renderer.render(scene, currentCamera)
@@ -2135,11 +2216,13 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         const floorObject = scene.getObjectByName('editing-floor')
         const gridObject = scene.getObjectByName('editing-grid')
         const subtreeContainsEditPart = (object: THREE.Object3D): boolean => {
+          if (object.userData.editPlacementPreview) return true
           const scenePartId = object.userData.scenePartId as string | undefined
           if (scenePartId) return editState.partIds.has(scenePartId)
           return object.children.some(subtreeContainsEditPart)
         }
         const hideOutsideEditPart = (object: THREE.Object3D) => {
+          if (object.userData.editPlacementPreview) return
           const scenePartId = object.userData.scenePartId as string | undefined
           if (scenePartId) {
             if (!editState.partIds.has(scenePartId)) {
@@ -2295,7 +2378,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
           meshMaterial.transparent = true
           meshMaterial.opacity = 0.08
           meshMaterial.depthWrite = false
-          if (object.userData.outerVoxel) addVoxelHighlight(object)
+          if (object.userData.outerVoxel) addVoxelHighlight(object).forEach((part) => { part.visible = false })
         }
       })
       group.add(instanceGroup)
@@ -2323,7 +2406,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
           meshMaterial.transparent = true
           meshMaterial.opacity = 0.08
           meshMaterial.depthWrite = false
-          if (mesh.userData.outerVoxel) addVoxelHighlight(mesh)
+          if (mesh.userData.outerVoxel) addVoxelHighlight(mesh).forEach((part) => { part.visible = false })
         }
         custom.add(mesh)
         })
@@ -2336,15 +2419,17 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       const preview = buildAssetGroup(renderAsset, materialMap)
       preview.position.copy(toSceneWorld(placementPreview.x, placementPreview.y, placementPreview.z))
       preview.userData.placementPreview = true
+      preview.userData.editPlacementPreview = Boolean(editEntityId)
       preview.traverse((object) => {
         object.userData.placementPreview = true
         if (!(object instanceof THREE.Mesh) || !(object.material instanceof THREE.MeshStandardMaterial)) return
         const material = object.material.clone()
         material.transparent = true
-        material.opacity = placementPreview.valid ? 0.42 : 0.18
+        material.opacity = editEntityId ? (placementPreview.valid ? 0.86 : 0.66) : (placementPreview.valid ? 0.42 : 0.18)
         material.depthWrite = false
-        material.color.set(placementPreview.valid ? '#a5d6b1' : '#e06b5b')
+        if (!placementPreview.valid) material.color.set('#e06b5b')
         object.material = material
+        if (editEntityId && object.userData.outerVoxel) addVoxelHighlight(object)
       })
       group.add(preview)
     }
