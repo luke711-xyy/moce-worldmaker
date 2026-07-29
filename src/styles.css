@@ -144,8 +144,6 @@ button { border: 0; cursor: pointer; color: inherit; }
 .camera-cube-button { top: 3px; width: 34px; height: 34px; }
 .camera-reset-button { top: 44px; width: 28px; height: 28px; color: #aab6b3; }
 .camera-cube-button:hover, .camera-reset-button:hover { color: #fff0df; border-color: #b8684d; background: #2c2523; }
-.camera-menu-chevron { position: absolute; right: -8px; top: 10px; transition: transform .16s ease; }
-.camera-menu-chevron.expanded { transform: rotate(180deg); }
 .camera-view-menu { position: absolute; right: 84px; bottom: 76px; width: 116px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 3px; padding: 5px; border: 1px solid #526063; background: rgba(28,36,38,.97); box-shadow: 0 10px 25px rgba(0,0,0,.34); }
 .camera-view-menu button { height: 25px; color: #aeb8b5; background: transparent; font-size: 9px; }
 .camera-view-menu button:hover { color: #fff0df; background: #a9523c; }
