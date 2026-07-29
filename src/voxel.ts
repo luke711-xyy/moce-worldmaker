@@ -65,6 +65,7 @@ export type ProjectState = {
 
 export type SceneAssembly = {
   id: string
+  name?: string
   memberKeys: string[]
 }
 
@@ -75,6 +76,8 @@ export type SceneEntityPart = {
   partId: string
   memberKey: string
   assemblyId?: string
+  /** Assembly path from the nearest child assembly to the outermost parent. */
+  assemblyIds?: string[]
   label?: string
   displayLabel?: string
   voxels: Voxel[]
@@ -284,9 +287,20 @@ export function resolveInstanceSceneVoxels(instance: SceneInstance, asset: Voxel
 
 export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
   const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
-  const assemblyByMemberKey = new Map<string, string>()
-  for (const assembly of project.assemblies ?? []) {
-    for (const memberKey of assembly.memberKeys) assemblyByMemberKey.set(memberKey, assembly.id)
+  const assemblies = project.assemblies ?? []
+  const memberKeyMatches = (storedKey: string, candidateKey: string) => storedKey === candidateKey || (storedKey.startsWith('asset:') && candidateKey.startsWith(`${storedKey}:`))
+  const assemblyPathForMemberKey = (memberKey: string): string[] => {
+    let bestPath: string[] = []
+    const visit = (key: string, path: string[], seen: Set<string>) => {
+      assemblies.forEach((assembly) => {
+        if (seen.has(assembly.id) || !assembly.memberKeys.some((storedKey) => memberKeyMatches(storedKey, key))) return
+        const nextPath = [...path, assembly.id]
+        if (nextPath.length > bestPath.length) bestPath = nextPath
+        visit(`assembly:${assembly.id}`, nextPath, new Set([...seen, assembly.id]))
+      })
+    }
+    visit(memberKey, [], new Set())
+    return bestPath
   }
   const parts: SceneEntityPart[] = []
   for (const instance of project.instances) {
@@ -299,9 +313,8 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
       const sceneVoxels = resolveInstanceComponentSceneVoxels(instance, asset, component)
       const label = Object.entries(asset.partVoxels ?? {}).find(([, sourceVoxels]) => sourceVoxels.some((sourceVoxel) => component.some((voxel) => voxelKey(sourceVoxel) === voxelKey(voxel))))?.[0] ?? partId
       const memberKey = `asset:${instance.id}:${partId}`
-      const legacyMemberKey = `asset:${instance.id}`
-      const assemblyId = assemblyByMemberKey.get(memberKey) ?? assemblyByMemberKey.get(legacyMemberKey)
-      parts.push({ id: `asset:${instance.id}:${partId}`, kind: 'asset', instanceId: instance.id, partId, memberKey, assemblyId, label, voxels: sceneVoxels })
+      const assemblyIds = assemblyPathForMemberKey(memberKey)
+      parts.push({ id: `asset:${instance.id}:${partId}`, kind: 'asset', instanceId: instance.id, partId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label, voxels: sceneVoxels })
     }
   }
   const customGroups = new Map<string, Voxel[]>()
@@ -311,7 +324,8 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
   }
   for (const [entityId, voxels] of customGroups) {
     const memberKey = `voxel:${entityId}`
-    parts.push({ id: `custom:${entityId}`, kind: 'custom', partId: entityId, memberKey, assemblyId: assemblyByMemberKey.get(memberKey), label: '手动体素实体', voxels })
+    const assemblyIds = assemblyPathForMemberKey(memberKey)
+    parts.push({ id: `custom:${entityId}`, kind: 'custom', partId: entityId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label: '手动体素实体', voxels })
   }
   return parts
 }
@@ -330,10 +344,11 @@ export function sceneAssemblies(parts: SceneEntityPart[], options: { includeCont
   }
   const firstByAssembly = new Map<string, number>()
   parts.forEach((part, index) => {
-    if (!part.assemblyId) return
-    const first = firstByAssembly.get(part.assemblyId)
-    if (first === undefined) firstByAssembly.set(part.assemblyId, index)
-    else join(first, index)
+    for (const assemblyId of part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])) {
+      const first = firstByAssembly.get(assemblyId)
+      if (first === undefined) firstByAssembly.set(assemblyId, index)
+      else join(first, index)
+    }
   })
   const occupied = new Map<string, number[]>()
   if (options.includeContacts !== false) parts.forEach((part, partIndex) => part.voxels.forEach((voxel) => {

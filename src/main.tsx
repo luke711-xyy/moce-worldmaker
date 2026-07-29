@@ -73,7 +73,7 @@ type SceneTreeItem = {
   kind: 'assembly' | 'part'
   assemblyId?: string
   part?: SceneEntityPart
-  children?: SceneEntityPart[]
+  children?: SceneTreeItem[]
 }
 
 const CURRENT_SCENE_ID = 'scene-main'
@@ -98,9 +98,11 @@ function normalizeStoredProject(loaded: ProjectState): ProjectState {
 function scenePartIsLocked(project: ProjectState, part: SceneEntityPart): boolean {
   const lockedKeys = new Set(project.lockedMemberKeys ?? [])
   if (lockedKeys.has(part.memberKey)) return true
-  if (!part.assemblyId) return false
-  const assembly = project.assemblies?.find((item) => item.id === part.assemblyId)
-  return Boolean(assembly?.memberKeys.some((memberKey) => lockedKeys.has(memberKey)))
+  const assemblyIds = part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])
+  return assemblyIds.some((assemblyId) => {
+    const assembly = project.assemblies?.find((item) => item.id === assemblyId)
+    return Boolean(assembly?.memberKeys.some((memberKey) => lockedKeys.has(memberKey) || memberKey === part.memberKey))
+  })
 }
 
 function resolveGridMove(deltaX: number, deltaY: number, deltaZ: number, canOccupy: (deltaX: number, deltaY: number, deltaZ: number) => boolean): GridMoveResult {
@@ -207,36 +209,69 @@ function App() {
   const sceneParts = useMemo(() => sceneEntityParts(project), [project])
   const lockedPartIds = useMemo(() => new Set(sceneParts.filter((part) => scenePartIsLocked(project, part)).map((part) => part.id)), [project, sceneParts])
   const selectedAssemblyId = selectedId.startsWith('assembly:') ? selectedId.slice('assembly:'.length) : undefined
-  const selectedScenePart = sceneParts.find((part) => part.id === selectedId || part.instanceId === selectedId || (selectedAssemblyId && part.assemblyId === selectedAssemblyId))
+  const selectedScenePart = sceneParts.find((part) => part.id === selectedId || part.instanceId === selectedId || (selectedAssemblyId && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(selectedAssemblyId)))
   const selectedInstance = selectedScenePart?.instanceId ? project.instances.find((instance) => instance.id === selectedScenePart.instanceId) : project.instances.find((instance) => instance.id === selectedId)
   const selectedAsset = selectedInstance ? project.assets.find((asset) => asset.id === selectedInstance.assetId) : undefined
   const selectedEntityParts = useMemo(() => {
     if (!selectedScenePart) return []
-    if (selectedAssemblyId) return sceneAssemblies(sceneParts, { includeContacts: false }).find((group) => group.some((part) => part.assemblyId === selectedAssemblyId)) ?? [selectedScenePart]
+    if (selectedAssemblyId) return sceneAssemblies(sceneParts, { includeContacts: false }).find((group) => group.some((part) => (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(selectedAssemblyId))) ?? [selectedScenePart]
     return [selectedScenePart]
   }, [sceneParts, selectedScenePart, selectedAssemblyId])
   const sceneTreeItems = useMemo<SceneTreeItem[]>(() => {
     const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
-    const labelForPart = (part: SceneEntityPart) => {
-      if (part.kind === 'custom') return `${part.label ?? '手动体素实体'} · ${part.voxels.length} 方块`
+    const baseNameForPart = (part: SceneEntityPart) => {
+      if (part.kind === 'custom') return part.label ?? '手动体素实体'
       const instance = part.instanceId ? project.instances.find((item) => item.id === part.instanceId) : undefined
       const asset = instance ? assetMap.get(instance.assetId) : undefined
       return `${asset?.name ?? '场景实体'}${part.label && part.label !== part.partId ? ` · ${part.label}` : ''}`
     }
-    const items: SceneTreeItem[] = []
-    const emittedAssemblies = new Set<string>()
-    for (const part of sceneParts) {
-      if (part.assemblyId) {
-        if (emittedAssemblies.has(part.assemblyId)) continue
-        emittedAssemblies.add(part.assemblyId)
-        const children = sceneParts.filter((candidate) => candidate.assemblyId === part.assemblyId).map((candidate) => ({ ...candidate, displayLabel: labelForPart(candidate) }))
-        if (children.length >= 2) {
-          items.push({ id: `assembly:${part.assemblyId}`, kind: 'assembly', assemblyId: part.assemblyId, label: `装配体 · ${children.length} 个子实体`, children })
+    const assemblies = project.assemblies ?? []
+    const assemblyMap = new Map(assemblies.map((assembly) => [assembly.id, assembly]))
+    const partMatchesMemberKey = (part: SceneEntityPart, memberKey: string) => part.memberKey === memberKey || (memberKey.startsWith('asset:') && part.memberKey.startsWith(`${memberKey}:`))
+    const labels = new Map<string, number>()
+    const assemblyLabels = new Map<string, string>()
+    const usedAssemblyLabels = new Set<string>()
+    let fallbackAssemblyNumber = 1
+    assemblies.forEach((assembly) => {
+      let label = assembly.name?.trim()
+      if (!label || usedAssemblyLabels.has(label)) {
+        while (usedAssemblyLabels.has(`装配体 ${fallbackAssemblyNumber}`)) fallbackAssemblyNumber += 1
+        label = `装配体 ${fallbackAssemblyNumber}`
+        fallbackAssemblyNumber += 1
+      }
+      usedAssemblyLabels.add(label)
+      assemblyLabels.set(assembly.id, label)
+    })
+    const uniqueLabel = (base: string) => {
+      const next = (labels.get(base) ?? 0) + 1
+      labels.set(base, next)
+      return next === 1 ? base : `${base} ${next}`
+    }
+    const partItem = (part: SceneEntityPart): SceneTreeItem => {
+      const uniqueName = uniqueLabel(baseNameForPart(part))
+      const displayLabel = part.kind === 'custom' ? `${uniqueName} · ${part.voxels.length} 方块` : uniqueName
+      return { id: part.id, kind: 'part', part: { ...part, displayLabel }, label: displayLabel }
+    }
+    const renderAssembly = (assemblyId: string, seen = new Set<string>()): SceneTreeItem | null => {
+      const assembly = assemblyMap.get(assemblyId)
+      if (!assembly || seen.has(assemblyId)) return null
+      const nextSeen = new Set([...seen, assemblyId])
+      const displayLabel = assemblyLabels.get(assemblyId) ?? '装配体'
+      const children: SceneTreeItem[] = []
+      for (const memberKey of assembly.memberKeys) {
+        if (memberKey.startsWith('assembly:')) {
+          const child = renderAssembly(memberKey.slice('assembly:'.length), nextSeen)
+          if (child) children.push(child)
           continue
         }
+        sceneParts.filter((part) => partMatchesMemberKey(part, memberKey)).forEach((part) => children.push(partItem(part)))
       }
-      items.push({ id: part.id, kind: 'part', part: { ...part, displayLabel: labelForPart(part) }, label: labelForPart(part) })
+      return { id: `assembly:${assemblyId}`, kind: 'assembly', assemblyId, label: displayLabel, children }
     }
+    const referencedAssemblies = new Set(assemblies.flatMap((assembly) => assembly.memberKeys.filter((key) => key.startsWith('assembly:')).map((key) => key.slice('assembly:'.length))))
+    const items: SceneTreeItem[] = assemblies.filter((assembly) => !referencedAssemblies.has(assembly.id)).map((assembly) => renderAssembly(assembly.id)).filter((item): item is SceneTreeItem => Boolean(item))
+    const nestedPartIds = new Set(sceneParts.filter((part) => (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).length > 0).map((part) => part.id))
+    sceneParts.filter((part) => !nestedPartIds.has(part.id)).forEach((part) => items.push(partItem(part)))
     return items
   }, [project.assets, project.instances, sceneParts])
   const canUndo = historyRevision >= 0 && historyRef.current.past.length > 0
@@ -342,7 +377,7 @@ function App() {
     const currentProject = projectRef.current
     const currentParts = sceneEntityParts(currentProject)
     const editAssemblyId = editEntityId?.startsWith('assembly:') ? editEntityId.slice('assembly:'.length) : undefined
-    const editingCustomPart = currentParts.find((part) => part.kind === 'custom' && (part.id === editEntityId || (editAssemblyId && part.assemblyId === editAssemblyId)))
+    const editingCustomPart = currentParts.find((part) => part.kind === 'custom' && (part.id === editEntityId || (editAssemblyId && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(editAssemblyId))))
     const editingCustomId = editingCustomPart?.partId
     const neighbors = [
       { x: voxel.x + 1, y: voxel.y, z: voxel.z }, { x: voxel.x - 1, y: voxel.y, z: voxel.z },
@@ -607,37 +642,43 @@ function App() {
     return result
   }
 
-  const assembleSceneParts = (parts: SceneEntityPart[]) => {
+  const assembleSceneParts = (parts: SceneEntityPart[], selectionIds: string[] = []) => {
     const nextProject = structuredClone(projectRef.current)
-    const currentParts = sceneEntityParts(nextProject)
-    const selectedIds = new Set(parts.map((part) => part.id))
-    const selectedParts = currentParts.filter((part) => selectedIds.has(part.id))
-    const memberKeys = [...new Set(selectedParts.flatMap((part) => {
-      if (part.assemblyId) {
-        const assembly = nextProject.assemblies?.find((item) => item.id === part.assemblyId)
-        return assembly?.memberKeys ?? [part.memberKey]
-      }
-      return [part.memberKey]
+    const partsById = new Map(parts.map((part) => [part.id, part]))
+    const explicitAssemblyKeys = selectionIds.filter((id) => id.startsWith('assembly:'))
+    const selectedPartKeys = selectionIds.filter((id) => !id.startsWith('assembly:')).map((id) => partsById.get(id)).filter((part): part is SceneEntityPart => Boolean(part)).map((part) => {
+      const assemblyIds = part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])
+      return assemblyIds.length ? `assembly:${assemblyIds[assemblyIds.length - 1]}` : part.memberKey
+    })
+    const memberKeys = [...new Set(selectionIds.length ? [...explicitAssemblyKeys, ...selectedPartKeys] : parts.map((part) => {
+      const assemblyIds = part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])
+      return assemblyIds.length ? `assembly:${assemblyIds[assemblyIds.length - 1]}` : part.memberKey
     }))]
     if (memberKeys.length < 2) {
-      setNotice('至少选择两个子实体后才能重新组装')
+      setNotice('至少选择两个实体或装配体后才能重新组装')
       return
     }
-    const existingAssembly = nextProject.assemblies?.find((assembly) => assembly.memberKeys.some((memberKey) => memberKeys.includes(memberKey)))
-    const assemblyId = existingAssembly?.id ?? `assembly-${Date.now()}`
-    nextProject.assemblies = (nextProject.assemblies ?? []).filter((assembly) => !assembly.memberKeys.some((memberKey) => memberKeys.includes(memberKey)))
-    nextProject.assemblies.push({ id: assemblyId, memberKeys })
+    const assemblyId = `assembly-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+    const usedAssemblyNames = new Set((nextProject.assemblies ?? []).map((assembly) => assembly.name).filter((name): name is string => Boolean(name)))
+    let assemblyNumber = 1
+    while (usedAssemblyNames.has(`装配体 ${assemblyNumber}`)) assemblyNumber += 1
+    const detachedMembers = new Set(memberKeys)
+    nextProject.assemblies = (nextProject.assemblies ?? []).map((assembly) => ({
+      ...assembly,
+      memberKeys: assembly.memberKeys.filter((memberKey) => !detachedMembers.has(memberKey)),
+    })).filter((assembly) => assembly.memberKeys.length > 0)
+    nextProject.assemblies.push({ id: assemblyId, name: `装配体 ${assemblyNumber}`, memberKeys })
     commitProject(nextProject)
     setCheckedTreePartIds([])
     setSelectedId(`assembly:${assemblyId}`)
-    setNotice(`已重新组装 · ${memberKeys.length} 个子实体`)
+    setNotice(`已重新组装 · ${memberKeys.length} 个成员`)
   }
 
   const resolveOperationParts = (ids: string[], sourceProject = projectRef.current) => {
     const currentParts = sceneEntityParts(sourceProject)
     const selectedIds = new Set(ids)
     const assemblyIds = new Set(ids.filter((id) => id.startsWith('assembly:')).map((id) => id.slice('assembly:'.length)))
-    return currentParts.filter((part) => selectedIds.has(part.id) || (part.assemblyId && assemblyIds.has(part.assemblyId)))
+    return currentParts.filter((part) => selectedIds.has(part.id) || (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).some((assemblyId) => assemblyIds.has(assemblyId)))
   }
 
   const toggleLockedSceneParts = (parts: SceneEntityPart[]) => {
@@ -657,9 +698,16 @@ function App() {
     const assembly = projectRef.current.assemblies?.find((item) => item.id === assemblyId)
     if (!assembly) return
     const firstMember = assembly.memberKeys[0] ?? ''
-    const firstPart = sceneEntityParts(projectRef.current).find((part) => part.memberKey === firstMember || (firstMember.startsWith('asset:') && part.memberKey.startsWith(`${firstMember}:`)) || (firstMember.startsWith('voxel:') && part.memberKey === firstMember))
+    const firstPart = sceneEntityParts(projectRef.current).find((part) => {
+      const assemblyIds = part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])
+      return assemblyIds.includes(assemblyId) || part.memberKey === firstMember || (firstMember.startsWith('asset:') && part.memberKey.startsWith(`${firstMember}:`)) || (firstMember.startsWith('voxel:') && part.memberKey === firstMember)
+    })
     updateProject((draft) => {
-      draft.assemblies = (draft.assemblies ?? []).filter((item) => item.id !== assemblyId)
+      const target = (draft.assemblies ?? []).find((item) => item.id === assemblyId)
+      const replacement = target?.memberKeys ?? []
+      draft.assemblies = (draft.assemblies ?? [])
+        .filter((item) => item.id !== assemblyId)
+        .map((item) => ({ ...item, memberKeys: item.memberKeys.flatMap((memberKey) => memberKey === `assembly:${assemblyId}` ? replacement : [memberKey]) }))
     })
     setCheckedTreePartIds([])
     setSelectedId(firstPart?.id ?? '')
@@ -669,7 +717,7 @@ function App() {
 
   const assembleCheckedTreeParts = () => {
     const parts = resolveOperationParts(checkedTreePartIds)
-    assembleSceneParts(parts)
+    assembleSceneParts(parts, checkedTreePartIds)
   }
 
   const enterEditMode = (entityId: string) => {
@@ -948,8 +996,25 @@ function App() {
       draft.instances = draft.instances.filter((instance) => !removedInstanceIds.has(instance.id))
       draft.assemblies = (draft.assemblies ?? []).filter((assembly) => !assembly.memberKeys.some((memberKey) => removedMemberKeys.has(memberKey) || (memberKey.startsWith('asset:') && removedInstanceIds.has(memberKey.split(':')[1])) || (memberKey.startsWith('voxel:') && removedCustomIds.has(memberKey.slice('voxel:'.length)))))
       draft.lockedMemberKeys = (draft.lockedMemberKeys ?? []).filter((memberKey) => !removedMemberKeys.has(memberKey))
+      const remainingLeafKeys = new Set(sceneEntityParts({ ...draft, assemblies: [] }).map((part) => part.memberKey))
+      const assemblyMap = new Map((draft.assemblies ?? []).map((assembly) => [assembly.id, assembly]))
+      const normalized = new Map<string, string[]>()
+      const isValidAssembly = (assemblyId: string, trail = new Set<string>()): boolean => {
+        if (normalized.has(assemblyId)) return (normalized.get(assemblyId) ?? []).length >= 2
+        if (trail.has(assemblyId)) return false
+        const assembly = assemblyMap.get(assemblyId)
+        if (!assembly) return false
+        const kept = assembly.memberKeys.filter((memberKey) => {
+          if (memberKey.startsWith('assembly:')) return isValidAssembly(memberKey.slice('assembly:'.length), new Set([...trail, assemblyId]))
+          return remainingLeafKeys.has(memberKey) || (memberKey.startsWith('asset:') && [...remainingLeafKeys].some((key) => key.startsWith(`${memberKey}:`)))
+        })
+        normalized.set(assemblyId, kept)
+        return kept.length >= 2
+      }
+      ;(draft.assemblies ?? []).forEach((assembly) => { isValidAssembly(assembly.id) })
+      draft.assemblies = (draft.assemblies ?? []).map((assembly) => ({ ...assembly, memberKeys: normalized.get(assembly.id) ?? [] })).filter((assembly) => assembly.memberKeys.length >= 2)
     })
-    if (requestedIds.includes(editEntityId ?? '') || targetParts.some((part) => part.id === editEntityId || part.assemblyId === editEntityId?.slice('assembly:'.length))) setEditEntityId(null)
+    if (requestedIds.includes(editEntityId ?? '') || targetParts.some((part) => part.id === editEntityId || (editEntityId?.startsWith('assembly:') && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(editEntityId.slice('assembly:'.length))))) setEditEntityId(null)
     setCheckedTreePartIds((ids) => ids.filter((id) => !targetParts.some((part) => part.id === id)))
     setSelectedId('')
     setTreeContextMenu(null)
@@ -957,7 +1022,7 @@ function App() {
   }
 
   const deleteSceneTreeEntity = (targetId: string, assemblyId?: string) => {
-    const selectedIds = checkedTreePartIds.length && (checkedTreePartIds.includes(targetId) || (assemblyId && checkedTreePartIds.some((id) => sceneParts.find((part) => part.id === id)?.assemblyId === assemblyId)))
+    const selectedIds = checkedTreePartIds.length && (checkedTreePartIds.includes(targetId) || (assemblyId && checkedTreePartIds.some((id) => sceneParts.find((part) => part.id === id)?.assemblyIds?.includes(assemblyId))))
       ? checkedTreePartIds
       : [assemblyId ? `assembly:${assemblyId}` : targetId]
     deleteSceneParts(selectedIds)
@@ -974,7 +1039,7 @@ function App() {
   const toggleTreeLock = (targetId: string, assemblyId?: string) => {
     const targetIds = assemblyId ? [`assembly:${assemblyId}`] : [targetId]
     const targetParts = resolveOperationParts(targetIds)
-    const usesChecked = checkedTreePartIds.length > 0 && targetParts.some((part) => checkedTreePartIds.includes(part.id))
+    const usesChecked = checkedTreePartIds.length > 0 && (checkedTreePartIds.includes(targetId) || targetParts.some((part) => checkedTreePartIds.includes(part.id)))
     operateOnSceneSelection(usesChecked ? checkedTreePartIds : targetIds, 'lock')
   }
 
@@ -1107,31 +1172,47 @@ function SceneTreePanel({ items, selectedId, expandedAssemblies, checkedPartIds,
     const list = event.currentTarget.closest('.scene-tree-list')
     if (list) list.scrollTop += event.deltaY
   }
-  const renderPart = (part: SceneEntityPart, child = false) => {
-    const selected = selectedId === part.id
-    const checked = checkedPartIds.includes(part.id)
-    const locked = lockedPartIds.has(part.id)
-    return <div className={`scene-tree-row ${child ? 'child' : ''} ${selected ? 'selected' : ''}`} key={part.id} onWheel={scrollTree} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onContextMenu(part.id, event.clientX, event.clientY) }}>
-      <input type="checkbox" aria-label={`选择子实体 ${part.displayLabel ?? part.label ?? part.partId}`} checked={checkedPartIds.includes(part.id)} onChange={() => onToggleChecked(part.id)} onClick={(event) => event.stopPropagation()} />
-      <button className={`scene-tree-select ${checked ? 'checked' : ''}`} onClick={(event) => onSelect(part.id, event.metaKey || event.shiftKey)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onContextMenu(part.id, event.clientX, event.clientY) }} title="在右侧预览中查看实体"><span className="tree-node-mark" /><TreeLabel text={part.displayLabel ?? (part.kind === 'custom' ? `${part.label ?? '手动体素实体'} · ${part.voxels.length} 方块` : part.label ?? part.partId)} />{locked && <Lock size={11} className="tree-lock" />}</button>
+  const leafPartIds = (item: SceneTreeItem): string[] => item.kind === 'part' ? (item.part ? [item.part.id] : []) : item.children?.flatMap(leafPartIds) ?? []
+  const findItem = (list: SceneTreeItem[], id: string): SceneTreeItem | undefined => {
+    for (const item of list) {
+      if (item.id === id) return item
+      const nested = item.children ? findItem(item.children, id) : undefined
+      if (nested) return nested
+    }
+    return undefined
+  }
+  const renderItem = (item: SceneTreeItem, child = false): React.ReactNode => {
+    if (item.kind === 'part' && item.part) {
+      const part = item.part
+      const selected = selectedId === part.id
+      const checked = checkedPartIds.includes(part.id)
+      const locked = lockedPartIds.has(part.id)
+      return <div className={`scene-tree-row ${child ? 'child' : ''} ${selected ? 'selected' : ''}`} key={part.id} onWheel={scrollTree} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onContextMenu(part.id, event.clientX, event.clientY) }}>
+        <input type="checkbox" aria-label={`选择子实体 ${part.displayLabel ?? part.label ?? part.partId}`} checked={checked} onChange={() => onToggleChecked(part.id)} onClick={(event) => event.stopPropagation()} />
+        <button className={`scene-tree-select ${checked ? 'checked' : ''}`} onClick={(event) => onSelect(part.id, event.metaKey || event.shiftKey)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onContextMenu(part.id, event.clientX, event.clientY) }} title="在右侧预览中查看实体"><span className="tree-node-mark" /><TreeLabel text={part.displayLabel ?? part.label ?? part.partId} />{locked && <Lock size={11} className="tree-lock" />}</button>
+      </div>
+    }
+    const leaves = leafPartIds(item)
+    const checked = checkedPartIds.includes(item.id) || (leaves.length > 0 && leaves.every((id) => checkedPartIds.includes(id)))
+    const locked = leaves.length > 0 && leaves.every((id) => lockedPartIds.has(id))
+    return <div className="scene-tree-assembly" key={item.id}>
+      <div className={`scene-tree-row assembly-row ${selectedId === item.id ? 'selected' : ''}`} onWheel={scrollTree} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onContextMenu(item.id, event.clientX, event.clientY, item.assemblyId) }}>
+        <input type="checkbox" aria-label={`选择装配体 ${item.label}`} checked={checked} onChange={() => onToggleChecked(item.id)} onClick={(event) => event.stopPropagation()} />
+        <button className="tree-expander" aria-label={expandedAssemblies[item.assemblyId!] === false ? '展开装配体' : '折叠装配体'} onClick={() => onToggleExpanded(item.assemblyId!)}>{expandedAssemblies[item.assemblyId!] === false ? <ChevronRight size={13} /> : <ChevronDown size={13} />}</button>
+        <button className={`scene-tree-select ${checked ? 'checked' : ''}`} onClick={(event) => onSelect(item.id, event.metaKey || event.shiftKey)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onContextMenu(item.id, event.clientX, event.clientY, item.assemblyId) }}><Layers3 size={13} className="assembly-mark" /><TreeLabel text={item.label} />{locked && <Lock size={11} className="tree-lock" />}</button>
+      </div>
+      {expandedAssemblies[item.assemblyId!] !== false && <div className="scene-tree-children">{item.children?.map((childItem) => renderItem(childItem, true))}</div>}
     </div>
   }
-  const contextPartIds = contextMenu?.assemblyId
-    ? items.find((item) => item.assemblyId === contextMenu.assemblyId)?.children?.map((part) => part.id) ?? []
-    : contextMenu ? [contextMenu.targetId] : []
-  const operatesOnChecked = checkedPartIds.length >= 1 && contextPartIds.some((id) => checkedPartIds.includes(id))
+  const contextItem = contextMenu ? findItem(items, contextMenu.targetId) : undefined
+  const contextPartIds = contextItem ? leafPartIds(contextItem) : contextMenu ? [contextMenu.targetId] : []
+  const operatesOnChecked = checkedPartIds.length >= 1 && (checkedPartIds.includes(contextMenu?.targetId ?? '') || contextPartIds.some((id) => checkedPartIds.includes(id)))
   const operationPartIds = operatesOnChecked ? checkedPartIds : contextPartIds
   const operationLocked = operationPartIds.length > 0 && operationPartIds.every((id) => lockedPartIds.has(id))
   return <aside className="scene-tree-panel">
     <div className="scene-tree-list">
       {items.length === 0 && <div className="scene-tree-empty">场景中暂无用户实体</div>}
-      {items.map((item) => item.kind === 'assembly' ? <div className="scene-tree-assembly" key={item.id}>
-        <div className={`scene-tree-row assembly-row ${selectedId === item.id ? 'selected' : ''}`} onWheel={scrollTree} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onContextMenu(item.id, event.clientX, event.clientY, item.assemblyId) }}>
-          <button className="tree-expander" aria-label={expandedAssemblies[item.assemblyId!] === false ? '展开装配体' : '折叠装配体'} onClick={() => onToggleExpanded(item.assemblyId!)}>{expandedAssemblies[item.assemblyId!] === false ? <ChevronRight size={13} /> : <ChevronDown size={13} />}</button>
-          <button className={`scene-tree-select ${item.children?.some((part) => checkedPartIds.includes(part.id)) ? 'checked' : ''}`} onClick={(event) => onSelect(item.id, event.metaKey || event.shiftKey)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onContextMenu(item.id, event.clientX, event.clientY, item.assemblyId) }}><Layers3 size={13} className="assembly-mark" /><TreeLabel text={item.label} />{item.children?.every((part) => lockedPartIds.has(part.id)) && <Lock size={11} className="tree-lock" />}</button>
-        </div>
-        {expandedAssemblies[item.assemblyId!] !== false && <div className="scene-tree-children">{item.children?.map((part) => renderPart(part, true))}</div>}
-      </div> : renderPart(item.part!, false))}
+      {items.map((item) => renderItem(item))}
     </div>
     {contextMenu && <div className="scene-tree-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}>{checkedPartIds.length >= 2 && <button onClick={onAssemble}>组装已选实体</button>}<button onClick={() => onToggleLock(contextMenu.targetId, contextMenu.assemblyId)}>{operationLocked ? '取消固定所选实体' : '固定所选实体'}</button><button onClick={() => onEnterEdit(contextMenu.targetId)}>进入编辑修改模式</button>{contextMenu.assemblyId && <button onClick={() => onDissolve(contextMenu.assemblyId!)}>原位解散装配体</button>}<button className="danger" onClick={() => onDelete(contextMenu.targetId, contextMenu.assemblyId)}>删除所选实体</button></div>}
   </aside>
@@ -1204,7 +1285,7 @@ function Inspector({ selectedAsset, selectedInstance, selectedPart, selectedPart
   const position = selectedInstance
     ? [selectedInstance.x, selectedInstance.z, selectedInstance.y ?? 0]
     : customOrigin ? [voxelToWorld(customOrigin.x), voxelToWorld(customOrigin.z), voxelCenterToWorld(customOrigin.y)] : [0, 0, 0]
-  const isAssembly = selectedParts.length > 1 && selectedParts.some((part) => part.assemblyId)
+  const isAssembly = selectedParts.length > 1 && selectedParts.some((part) => part.assemblyId || part.assemblyIds?.length)
   const entityName = isAssembly ? `装配体 · ${selectedParts.length} 个子实体` : selectedAsset?.name ?? selectedPart?.label ?? (selectedPart ? '手动体素实体' : '未选择')
   const entityId = selectedInstance?.id ?? selectedPart?.id ?? '—'
   const source = isAssembly ? '当前场景 · 装配体实体' : selectedAsset ? (selectedAsset.source ?? '莫测标准组件') : (selectedPart ? '当前场景 · 用户实体' : '莫测标准组件')
@@ -1697,9 +1778,10 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
     group.clear()
     const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
     const currentSceneParts = sceneEntityParts(project)
-    const selectedScenePartIds = new Set(currentSceneParts.filter((part) => checkedPartIds.includes(part.id) || selectedId === part.id || (selectedId.startsWith('assembly:') && part.assemblyId === selectedId.slice('assembly:'.length))).map((part) => part.id))
+    const checkedAssemblyIds = new Set(checkedPartIds.filter((id) => id.startsWith('assembly:')).map((id) => id.slice('assembly:'.length)))
+    const selectedScenePartIds = new Set(currentSceneParts.filter((part) => checkedPartIds.includes(part.id) || selectedId === part.id || (selectedId.startsWith('assembly:') && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(selectedId.slice('assembly:'.length))) || (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).some((assemblyId) => checkedAssemblyIds.has(assemblyId))).map((part) => part.id))
     const editAssemblyId = editEntityId?.startsWith('assembly:') ? editEntityId.slice('assembly:'.length) : undefined
-    const editScenePartIds = new Set(currentSceneParts.filter((part) => editEntityId === part.id || (editAssemblyId && part.assemblyId === editAssemblyId)).map((part) => part.id))
+    const editScenePartIds = new Set(currentSceneParts.filter((part) => editEntityId === part.id || (editAssemblyId && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(editAssemblyId))).map((part) => part.id))
     for (const instance of project.instances) {
       if (!instance.visible) continue
       const asset = assetMap.get(instance.assetId)
@@ -1834,7 +1916,10 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
   }
 
   const hitSelectionPartIds = (part: SceneEntityPart) => {
-    if (part.assemblyId) return sceneEntityParts(project).filter((candidate) => candidate.assemblyId === part.assemblyId).map((candidate) => candidate.id)
+    if (part.assemblyId || part.assemblyIds?.length) {
+      const assemblyId = part.assemblyIds?.[0] ?? part.assemblyId
+      return sceneEntityParts(project).filter((candidate) => (candidate.assemblyIds ?? (candidate.assemblyId ? [candidate.assemblyId] : [])).includes(assemblyId!)).map((candidate) => candidate.id)
+    }
     return [part.id]
   }
 
@@ -1845,7 +1930,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
     if (scenePartId === editEntityId) return true
     if (!editEntityId.startsWith('assembly:')) return false
     const assemblyId = editEntityId.slice('assembly:'.length)
-    return sceneEntityParts(project).some((part) => part.id === scenePartId && part.assemblyId === assemblyId)
+    return sceneEntityParts(project).some((part) => part.id === scenePartId && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(assemblyId))
   }
 
   const applyEditAtPointer = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -1952,7 +2037,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
         const anchor = instance
           ? toSceneWorld(instance.x, instance.y ?? 0, instance.z)
           : toSceneWorld(voxelToWorld(anchorVoxel?.x ?? 0), voxelCenterToWorld(anchorVoxel?.y ?? 0), voxelToWorld(anchorVoxel?.z ?? 0))
-        const selectionLabel = selectedParts.some((part) => part.assemblyId) ? '已选中装配体' : '已选中实体'
+        const selectionLabel = selectedParts.some((part) => part.assemblyId || part.assemblyIds?.length) ? '已选中装配体' : '已选中实体'
         onNotice(`${selectionLabel} · ${selectedParts.length} 个零件`)
         selectGestureRef.current = {
           pointerId: event.pointerId,

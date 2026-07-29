@@ -119,6 +119,24 @@ describe('莫测造境体素核心数据', () => {
     expect(sceneAssemblies(assembledParts, { includeContacts: false })[0]).toHaveLength(2)
   })
 
+  it('resolves nested assembly paths and groups parent assemblies as one draggable unit', () => {
+    const project = makeDefaultProject()
+    project.customVoxels = [
+      { x: 0, y: 0, z: 0, materialId: 'stone', entityId: 'a' },
+      { x: 3, y: 0, z: 0, materialId: 'jade', entityId: 'b' },
+      { x: 6, y: 0, z: 0, materialId: 'gold', entityId: 'c' },
+    ]
+    project.assemblies = [
+      { id: 'assembly-child', memberKeys: ['voxel:a', 'voxel:b'] },
+      { id: 'assembly-parent', memberKeys: ['assembly:assembly-child', 'voxel:c'] },
+    ]
+    const parts = sceneEntityParts(project).filter((part) => part.kind === 'custom')
+    expect(parts.find((part) => part.partId === 'a')?.assemblyIds).toEqual(['assembly-child', 'assembly-parent'])
+    expect(parts.find((part) => part.partId === 'c')?.assemblyIds).toEqual(['assembly-parent'])
+    expect(sceneAssemblies(parts, { includeContacts: false })).toHaveLength(1)
+    expect(sceneAssemblies(parts, { includeContacts: false })[0]).toHaveLength(3)
+  })
+
   it('creates a normalized reusable asset from selected scene parts with a unique name', () => {
     const project = makeDefaultProject()
     const parts = sceneEntityParts(project).filter((part) => part.instanceId === 'inst-tree-a')
