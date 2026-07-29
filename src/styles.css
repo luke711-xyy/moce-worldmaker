@@ -101,11 +101,12 @@ button { border: 0; cursor: pointer; color: inherit; }
 .viewport-canvas { position: relative; flex: 1; min-width: 0; min-height: 0; overflow: hidden; touch-action: none; }
 .viewport-canvas canvas { display: block; width: 100%; height: 100%; cursor: grab; }
 .viewport-canvas canvas:active { cursor: grabbing; }
-.viewport-scene-tree-overlay { position: absolute; left: 16px; top: 16px; z-index: 6; width: 238px; height: min(430px, calc(100% - 32px)); pointer-events: none; }
-.viewport-scene-tree-overlay > .scene-tree-panel { width: 100%; height: 100%; margin: 0; pointer-events: auto; background: transparent; border: 0; box-shadow: none; }
+.viewport-scene-tree-overlay { position: absolute; left: 16px; top: 16px; z-index: 6; width: max-content; max-width: 238px; height: min(430px, calc(100% - 32px)); pointer-events: none; }
+.viewport-scene-tree-overlay > .scene-tree-panel { width: max-content; max-width: 238px; height: 100%; margin: 0; pointer-events: none; background: transparent; border: 0; box-shadow: none; }
 .viewport-scene-tree-overlay .scene-tree-heading, .viewport-scene-tree-overlay .scene-tree-actions { display: none; }
-.viewport-scene-tree-overlay .scene-tree-list { height: 100%; padding: 0; overscroll-behavior: contain; background: transparent; }
-.viewport-scene-tree-overlay .scene-tree-row { min-height: 29px; border-color: transparent; background: transparent; text-shadow: 0 1px 5px rgba(0,0,0,.9); }
+.viewport-scene-tree-overlay .scene-tree-list { width: max-content; max-width: 238px; height: 100%; padding: 0; overflow-x: hidden; overscroll-behavior: contain; background: transparent; pointer-events: none; }
+.viewport-scene-tree-overlay .scene-tree-row { width: max-content; max-width: 238px; min-height: 29px; border-color: transparent; background: transparent; text-shadow: 0 1px 5px rgba(0,0,0,.9); pointer-events: auto; }
+.viewport-scene-tree-overlay .scene-tree-children { width: max-content; max-width: 238px; pointer-events: none; }
 .viewport-scene-tree-overlay .scene-tree-row.selected { color: #fff4e8; border-color: transparent; background: transparent; }
 .viewport-scene-tree-overlay .scene-tree-select { flex: 0 0 auto; width: max-content; max-width: 180px; }
 .viewport-scene-tree-overlay .scene-tree-select.checked { color: #fff0d7; }
@@ -122,7 +123,7 @@ button { border: 0; cursor: pointer; color: inherit; }
 .scene-context-menu button:hover { color: #fff0df; background: #a9523c; }
 .scene-context-menu button.danger { color: #ffb3a5; border-top: 1px solid #3d4a4d; margin-top: 3px; }
 .scene-context-menu button.danger:hover { color: #fff; background: #9f392d; }
-.viewport-palette { position: absolute; right: 16px; bottom: 16px; z-index: 4; display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid #384346; background: rgba(23,29,31,.92); box-shadow: 0 8px 22px rgba(0,0,0,.24); }
+.viewport-palette { position: absolute; left: 50%; bottom: 16px; z-index: 4; display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid #384346; background: rgba(23,29,31,.92); box-shadow: 0 8px 22px rgba(0,0,0,.24); transform: translateX(-50%); }
 .viewport-palette-swatches { display: grid; grid-template-columns: repeat(8, 20px); gap: 4px; }
 .viewport-swatch { width: 20px; height: 20px; padding: 0; border: 1px solid rgba(255,255,255,.14); box-shadow: inset 0 0 0 1px rgba(0,0,0,.18); cursor: pointer; }
 .viewport-swatch.active { outline: 2px solid #e7b28e; outline-offset: 2px; }
@@ -130,10 +131,24 @@ button { border: 0; cursor: pointer; color: inherit; }
 .viewport-color-picker:hover { color: #f1c4a2; border-color: #b5654a; }
 .hidden-color-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .canvas-hint { position: absolute; left: 16px; bottom: 14px; color: #728081; font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: .04em; pointer-events: none; }
-.axis-gizmo { position: absolute; right: 20px; top: 18px; width: 44px; height: 44px; pointer-events: none; font: 10px 'DM Mono', monospace; }
-.axis-cube { position: absolute; left: 13px; top: 13px; width: 18px; height: 18px; border: 1px solid #8d9895; transform: rotate(30deg) skew(-10deg, -10deg); }
-.axis-x, .axis-y, .axis-z { position: absolute; font-weight: 600; }
-.axis-x { color: #c3654a; right: 0; top: 20px; }.axis-y { color: #76a877; left: 0; bottom: 1px; }.axis-z { color: #7196c8; left: 18px; top: 0; }
+.axis-gizmo { position: absolute; right: 18px; top: 14px; width: 64px; height: 64px; z-index: 3; pointer-events: none; overflow: visible; font: 600 10px 'DM Mono', monospace; }
+.axis-gizmo line { stroke-width: 2.2; stroke-linecap: round; filter: drop-shadow(0 1px 2px rgba(0,0,0,.65)); }
+.axis-gizmo text { dominant-baseline: middle; text-anchor: middle; font: 600 10px 'DM Mono', monospace; paint-order: stroke; stroke: #161b1e; stroke-width: 3px; stroke-linejoin: round; }
+.viewport-camera-controls { position: absolute; right: 16px; bottom: 16px; z-index: 8; width: 120px; height: 116px; pointer-events: auto; }
+.camera-joystick { position: absolute; right: 0; bottom: 0; width: 78px; height: 78px; display: grid; place-items: center; }
+.camera-joystick-ring { width: 72px; height: 72px; display: grid; place-items: center; border: 1px solid #586568; border-radius: 50%; background: radial-gradient(circle at 50% 45%, rgba(91,111,112,.42), rgba(21,28,30,.92) 70%); box-shadow: inset 0 0 0 5px rgba(255,255,255,.035), 0 8px 20px rgba(0,0,0,.28); }
+.camera-joystick-knob { width: 38px; height: 38px; display: grid; place-items: center; color: #f3d7c1; border: 1px solid #d48768; border-radius: 50%; background: #a9523c; box-shadow: 0 3px 10px rgba(0,0,0,.38); cursor: grab; touch-action: none; }
+.camera-joystick-knob:hover { background: #c2694e; }
+.camera-joystick-knob:active { cursor: grabbing; transform: scale(.96); }
+.camera-cube-button, .camera-reset-button { position: absolute; right: 84px; display: grid; place-items: center; color: #c2cdca; border: 1px solid #526063; background: rgba(28,36,38,.95); box-shadow: 0 5px 14px rgba(0,0,0,.25); }
+.camera-cube-button { top: 3px; width: 34px; height: 34px; }
+.camera-reset-button { top: 44px; width: 28px; height: 28px; color: #aab6b3; }
+.camera-cube-button:hover, .camera-reset-button:hover { color: #fff0df; border-color: #b8684d; background: #2c2523; }
+.camera-menu-chevron { position: absolute; right: -8px; top: 10px; transition: transform .16s ease; }
+.camera-menu-chevron.expanded { transform: rotate(180deg); }
+.camera-view-menu { position: absolute; right: 84px; bottom: 76px; width: 116px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 3px; padding: 5px; border: 1px solid #526063; background: rgba(28,36,38,.97); box-shadow: 0 10px 25px rgba(0,0,0,.34); }
+.camera-view-menu button { height: 25px; color: #aeb8b5; background: transparent; font-size: 9px; }
+.camera-view-menu button:hover { color: #fff0df; background: #a9523c; }
 .viewport-footer { height: 50px; flex: 0 0 50px; display: flex; align-items: center; gap: 9px; padding: 0 13px; border-top: 1px solid #2c3538; background: #1b2225; }
 .tool-group { display: flex; gap: 2px; }
 .tool-button { position: relative; width: 30px; height: 29px; display: grid; place-items: center; color: #7f8b8a; background: transparent; border: 1px solid transparent; }
