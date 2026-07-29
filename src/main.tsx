@@ -2199,7 +2199,12 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         const scenePartId = object.userData.scenePartId as string | undefined
         if (!(object instanceof THREE.Mesh) || !scenePartId || editState.partIds.has(scenePartId)) return
         const glowParts = object.userData.selectionGlowParts as THREE.Object3D[] | undefined
-        glowParts?.forEach((part) => { part.visible = occludedPartIds.has(scenePartId) })
+        const occluded = occludedPartIds.has(scenePartId)
+        const meshMaterial = object.material as THREE.MeshStandardMaterial
+        meshMaterial.transparent = occluded
+        meshMaterial.opacity = occluded ? 0 : 1
+        meshMaterial.depthWrite = !occluded
+        glowParts?.forEach((part) => { part.visible = occluded })
       })
     }
     const animate = () => {
@@ -2375,9 +2380,10 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         if (highlighted) addVoxelHighlight(object)
         if (editEntityId && scenePartId && !editScenePartIds.has(scenePartId)) {
           const meshMaterial = object.material as THREE.MeshStandardMaterial
-          meshMaterial.transparent = true
-          meshMaterial.opacity = 0.08
-          meshMaterial.depthWrite = false
+          meshMaterial.transparent = false
+          meshMaterial.opacity = 1
+          meshMaterial.depthWrite = true
+          meshMaterial.color.multiplyScalar(0.5)
           if (object.userData.outerVoxel) addVoxelHighlight(object).forEach((part) => { part.visible = false })
         }
       })
@@ -2403,9 +2409,10 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         mesh.userData.outerVoxel = exposedFaces.length > 0
         if (selectedScenePartIds.has(mesh.userData.scenePartId) || editScenePartIds.has(mesh.userData.scenePartId)) addVoxelHighlight(mesh)
         if (editEntityId && !editScenePartIds.has(mesh.userData.scenePartId)) {
-          meshMaterial.transparent = true
-          meshMaterial.opacity = 0.08
-          meshMaterial.depthWrite = false
+          meshMaterial.transparent = false
+          meshMaterial.opacity = 1
+          meshMaterial.depthWrite = true
+          meshMaterial.color.multiplyScalar(0.5)
           if (mesh.userData.outerVoxel) addVoxelHighlight(mesh).forEach((part) => { part.visible = false })
         }
         custom.add(mesh)
