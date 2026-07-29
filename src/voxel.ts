@@ -48,6 +48,7 @@ export type SceneInstance = {
   visible: boolean
   overrides: VoxelOverride[]
   partOffsets?: Record<string, { x: number; y: number; z: number }>
+  colorOverride?: string
 }
 
 export type ProjectState = {
@@ -59,6 +60,7 @@ export type ProjectState = {
   assets: VoxelAsset[]
   instances: SceneInstance[]
   customVoxels: Voxel[]
+  customColors?: Record<string, string>
   assemblies?: SceneAssembly[]
   lockedMemberKeys?: string[]
 }
@@ -80,6 +82,7 @@ export type SceneEntityPart = {
   assemblyIds?: string[]
   label?: string
   displayLabel?: string
+  colorOverride?: string
   voxels: Voxel[]
 }
 
@@ -314,7 +317,7 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
       const label = Object.entries(asset.partVoxels ?? {}).find(([, sourceVoxels]) => sourceVoxels.some((sourceVoxel) => component.some((voxel) => voxelKey(sourceVoxel) === voxelKey(voxel))))?.[0] ?? partId
       const memberKey = `asset:${instance.id}:${partId}`
       const assemblyIds = assemblyPathForMemberKey(memberKey)
-      parts.push({ id: `asset:${instance.id}:${partId}`, kind: 'asset', instanceId: instance.id, partId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label, voxels: sceneVoxels })
+      parts.push({ id: `asset:${instance.id}:${partId}`, kind: 'asset', instanceId: instance.id, partId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label, colorOverride: instance.colorOverride, voxels: sceneVoxels })
     }
   }
   const customGroups = new Map<string, Voxel[]>()
@@ -325,7 +328,7 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
   for (const [entityId, voxels] of customGroups) {
     const memberKey = `voxel:${entityId}`
     const assemblyIds = assemblyPathForMemberKey(memberKey)
-    parts.push({ id: `custom:${entityId}`, kind: 'custom', partId: entityId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label: '手动体素实体', voxels })
+    parts.push({ id: `custom:${entityId}`, kind: 'custom', partId: entityId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label: '手动体素实体', colorOverride: project.customColors?.[entityId], voxels })
   }
   return parts
 }
@@ -478,7 +481,7 @@ export function makeDefaultProject(): ProjectState {
     { id: 'inst-tree-a', assetId: 'tree-basic', x: -9, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
     { id: 'inst-tree-b', assetId: 'tree-basic', x: 8, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
   ]
-  return { version: 1, name: '莫测里·第一街区', voxelSizeMm: 1, sceneSizeCm: 20, materials: MATERIALS, assets, instances, customVoxels: [], assemblies: [], lockedMemberKeys: [] }
+  return { version: 1, name: '莫测里·第一街区', voxelSizeMm: 1, sceneSizeCm: 20, materials: MATERIALS, assets, instances, customVoxels: [], customColors: {}, assemblies: [], lockedMemberKeys: [] }
 }
 
 export function makeStl(asset: VoxelAsset): string {

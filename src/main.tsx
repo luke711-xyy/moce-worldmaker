@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { Box, Brush, ChevronDown, ChevronRight, CircleUserRound, Copy, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, SquareDashedMousePointer, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
+import { Box, Brush, ChevronDown, ChevronRight, CircleUserRound, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, SquareDashedMousePointer, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
 import { MATERIALS, Material, ProjectState, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, findInstanceVoxelAtSceneVoxel, highestVoxelAt, makeAssetFromSceneParts, makeDefaultProject, makeStl, resolveInstanceSceneVoxels, resolveInstanceVoxels, sceneAssemblies, sceneEntityParts, snapWorld, uniqueAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel } from './voxel'
 import { importModelAsVoxelAsset } from './model-import'
 import { LibraryResponse, loadAsset, loadLibrary, loadScene, saveAsset, saveScene } from './persistence'
@@ -89,6 +89,7 @@ function normalizeStoredProject(loaded: ProjectState): ProjectState {
       isTemplate: asset.isTemplate ?? (!asset.source || asset.source === '场景实体保存' || (asset.kind !== 'imported' && !asset.source.includes('拆分子实体'))),
     })),
     customVoxels: (loaded.customVoxels ?? []).map((voxel, index) => ({ ...voxel, entityId: voxel.entityId ?? `legacy-${voxel.x}-${voxel.y}-${voxel.z}-${index}` })),
+    customColors: { ...(loaded.customColors ?? {}) },
     assemblies: loaded.assemblies ?? [],
     instances: (loaded.instances ?? []).map((instance) => ({ ...instance, x: snapWorld(instance.x), y: snapWorld(instance.y ?? 0), z: snapWorld(instance.z), overrides: instance.overrides ?? [], partOffsets: instance.partOffsets ?? {} })),
     lockedMemberKeys: [...new Set(loaded.lockedMemberKeys ?? [])],
@@ -213,10 +214,20 @@ function App() {
   const selectedInstance = selectedScenePart?.instanceId ? project.instances.find((instance) => instance.id === selectedScenePart.instanceId) : project.instances.find((instance) => instance.id === selectedId)
   const selectedAsset = selectedInstance ? project.assets.find((asset) => asset.id === selectedInstance.assetId) : undefined
   const selectedEntityParts = useMemo(() => {
-    if (!selectedScenePart) return []
-    if (selectedAssemblyId) return sceneAssemblies(sceneParts, { includeContacts: false }).find((group) => group.some((part) => (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(selectedAssemblyId))) ?? [selectedScenePart]
-    return [selectedScenePart]
-  }, [sceneParts, selectedScenePart, selectedAssemblyId])
+    const checkedPartIds = new Set<string>()
+    const checkedAssemblyIds = new Set<string>()
+    checkedTreePartIds.forEach((id) => {
+      if (id.startsWith('assembly:')) checkedAssemblyIds.add(id.slice('assembly:'.length))
+      else checkedPartIds.add(id)
+    })
+    if (selectedAssemblyId) checkedAssemblyIds.add(selectedAssemblyId)
+    if (selectedScenePart) {
+      (selectedScenePart.assemblyIds ?? (selectedScenePart.assemblyId ? [selectedScenePart.assemblyId] : [])).forEach((id) => checkedAssemblyIds.add(id))
+      checkedPartIds.add(selectedScenePart.id)
+    }
+    if (!checkedPartIds.size && !checkedAssemblyIds.size) return []
+    return sceneParts.filter((part) => checkedPartIds.has(part.id) || (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).some((assemblyId) => checkedAssemblyIds.has(assemblyId)))
+  }, [sceneParts, selectedScenePart, selectedAssemblyId, checkedTreePartIds])
   const sceneTreeItems = useMemo<SceneTreeItem[]>(() => {
     const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
     const baseNameForPart = (part: SceneEntityPart) => {
@@ -782,21 +793,21 @@ function App() {
   }
 
   const exportSelectedPart = () => {
-    if (!selectedAsset) return
-    const exportAsset = {
-      ...selectedAsset,
-      id: `${selectedAsset.id}-${selectedInstance?.id ?? 'asset'}`,
-      voxels: resolveInstanceVoxels(selectedAsset, selectedInstance?.overrides ?? []),
+    if (!selectedEntityParts.length) {
+      setNotice('请先选择要导出的实体')
+      return
     }
+    const exportName = selectedAsset?.name ?? selectedEntityParts[0]?.label ?? '选中实体'
+    const exportAsset = makeAssetFromSceneParts(`export-${Date.now()}`, exportName, selectedEntityParts, selectedAsset?.color ?? '#6c827d', selectedAsset?.accent ?? '#d2a354')
     const stl = makeStl(exportAsset)
     const blob = new Blob([stl], { type: 'model/stl' })
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `${selectedAsset.name}-${selectedInstance?.id ?? 'asset'}-主体.stl`
+    anchor.download = `${exportName}-选中实体.stl`
     anchor.click()
     URL.revokeObjectURL(url)
-    setNotice(`已导出实例部件 · ${selectedAsset.name}-${selectedInstance?.id ?? 'asset'}-主体.stl`)
+    setNotice(`已导出选中实体 · ${exportName} · ${selectedEntityParts.length} 个实体`)
   }
 
   const importModel = async (file: File) => {
@@ -960,26 +971,103 @@ function App() {
     setNotice(hadAssembly ? `已拆分实体 · ${selectedEntityParts.length} 个子实体可分别摆放` : `实体已保持独立 · ${selectedEntityParts.length} 个子实体`)
   }
 
-  const duplicateSelected = () => {
-    if (!selectedInstance) return
-    const duplicateId = `${selectedInstance.id}-copy-${Date.now()}`
+  const duplicateSelected = (requestedCount: number) => {
+    const sourceProject = projectRef.current
+    const sourceParts = selectedEntityParts.map((part) => structuredClone(part))
+    if (!sourceParts.length) {
+      setNotice('请先选择要复制的实体')
+      return
+    }
+    const count = Math.max(1, Math.min(99, Math.round(requestedCount) || 1))
+    const selectedInstanceIds = [...new Set(sourceParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))]
+    const selectedCustomIds = [...new Set(sourceParts.filter((part) => part.kind === 'custom').map((part) => part.partId))]
+    const assemblies = sourceProject.assemblies ?? []
+    const assemblyMap = new Map(assemblies.map((assembly) => [assembly.id, assembly]))
+    const selectedAssemblyIds = new Set(sourceParts.flatMap((part) => part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])))
+    const rootAssemblyIds = [...selectedAssemblyIds].filter((assemblyId) => ![...selectedAssemblyIds].some((candidateId) => assemblyMap.get(candidateId)?.memberKeys.includes(`assembly:${assemblyId}`)))
+    const assemblyTreeIds = new Set<string>()
+    const collectAssemblyTree = (assemblyId: string) => {
+      if (assemblyTreeIds.has(assemblyId)) return
+      assemblyTreeIds.add(assemblyId)
+      assemblyMap.get(assemblyId)?.memberKeys.filter((key) => key.startsWith('assembly:')).forEach((key) => collectAssemblyTree(key.slice('assembly:'.length)))
+    }
+    rootAssemblyIds.forEach(collectAssemblyTree)
+    const copyBatchId = Date.now()
+    let firstSelection = ''
     updateProject((draft) => {
-      const current = draft.instances.find((instance) => instance.id === selectedInstance.id)
-      if (current) draft.instances.push({ ...current, id: duplicateId, x: current.x + 1, z: current.z + 1, overrides: structuredClone(current.overrides ?? []), partOffsets: structuredClone(current.partOffsets ?? {}) })
+      const boundary = Math.max(1, draft.sceneSizeCm / 2)
+      for (let copyIndex = 0; copyIndex < count; copyIndex += 1) {
+        const instanceMap = new Map<string, string>()
+        const customMap = new Map<string, string>()
+        const clonedInstanceIds: string[] = []
+        selectedInstanceIds.forEach((oldId) => {
+          const current = draft.instances.find((instance) => instance.id === oldId)
+          if (!current) return
+          const newId = `${oldId}-copy-${copyBatchId}-${copyIndex + 1}`
+          instanceMap.set(oldId, newId)
+          clonedInstanceIds.push(newId)
+          const offset = copyIndex + 1
+          draft.instances.push({
+            ...structuredClone(current),
+            id: newId,
+            x: Math.max(-boundary, Math.min(boundary, snapWorld(current.x + offset))),
+            z: Math.max(-boundary, Math.min(boundary, snapWorld(current.z + offset))),
+            overrides: structuredClone(current.overrides ?? []),
+            partOffsets: structuredClone(current.partOffsets ?? {}),
+          })
+        })
+        selectedCustomIds.forEach((oldId) => {
+          const newId = `${oldId}-copy-${copyBatchId}-${copyIndex + 1}`
+          customMap.set(oldId, newId)
+          const voxelOffset = (copyIndex + 1) * 10
+          draft.customVoxels.filter((voxel) => voxelEntityId(voxel) === oldId).forEach((voxel) => {
+            draft.customVoxels.push({ ...structuredClone(voxel), x: voxel.x + voxelOffset, z: voxel.z + voxelOffset, entityId: newId })
+          })
+          if (draft.customColors?.[oldId]) {
+            draft.customColors = { ...(draft.customColors ?? {}), [newId]: draft.customColors[oldId] }
+          }
+        })
+        const assemblyMapForCopy = new Map<string, string>()
+        ;[...assemblyTreeIds].forEach((oldId) => assemblyMapForCopy.set(oldId, `assembly-${copyBatchId}-${copyIndex + 1}-${oldId}`))
+        const mapLeafKey = (memberKey: string) => {
+          for (const [oldId, newId] of instanceMap) {
+            if (memberKey === `asset:${oldId}` || memberKey.startsWith(`asset:${oldId}:`)) return memberKey.replace(`asset:${oldId}`, `asset:${newId}`)
+          }
+          for (const [oldId, newId] of customMap) if (memberKey === `voxel:${oldId}`) return `voxel:${newId}`
+          return memberKey
+        }
+        const mapMemberKey = (memberKey: string) => memberKey.startsWith('assembly:')
+          ? `assembly:${assemblyMapForCopy.get(memberKey.slice('assembly:'.length)) ?? memberKey.slice('assembly:'.length)}`
+          : mapLeafKey(memberKey)
+        ;[...assemblyTreeIds].forEach((oldId) => {
+          const sourceAssembly = assemblyMap.get(oldId)
+          if (!sourceAssembly) return
+          draft.assemblies = [...(draft.assemblies ?? []), {
+            ...structuredClone(sourceAssembly),
+            id: assemblyMapForCopy.get(oldId)!,
+            name: (() => {
+              const used = new Set((draft.assemblies ?? []).map((assembly) => assembly.name).filter(Boolean))
+              let index = 1
+              while (used.has(`装配体 ${index}`)) index += 1
+              return `装配体 ${index}`
+            })(),
+            memberKeys: sourceAssembly.memberKeys.map(mapMemberKey),
+          }]
+        })
+        if (!firstSelection) firstSelection = rootAssemblyIds[0] ? `assembly:${assemblyMapForCopy.get(rootAssemblyIds[0])}` : clonedInstanceIds[0] ? clonedInstanceIds[0] : selectedCustomIds[0] ? `custom:${customMap.get(selectedCustomIds[0])}` : ''
+      }
     })
-    setSelectedId(duplicateId)
-    setNotice(`已复制实例 · ${selectedAsset?.name ?? '资产'}`)
+    setCheckedTreePartIds([])
+    setSelectedId(firstSelection)
+    setNotice(`已复制 ${sourceParts.length} 个选中实体 × ${count} · 装配体结构已保留`)
   }
 
   const deleteSelected = () => {
-    if (!selectedInstance || project.instances.length <= 1) {
-      setNotice('至少保留一个场景实例')
+    if (!selectedEntityParts.length) {
+      setNotice('请先选择要删除的实体')
       return
     }
-    const nextSelection = project.instances.find((instance) => instance.id !== selectedInstance.id)
-    updateProject((draft) => { draft.instances = draft.instances.filter((instance) => instance.id !== selectedInstance.id) })
-    setSelectedId(nextSelection?.id ?? '')
-    setNotice(`已删除实例 · ${selectedAsset?.name ?? '资产'}`)
+    deleteSceneParts(selectedEntityParts.map((part) => part.id))
   }
 
   const deleteSceneParts = (requestedIds: string[]) => {
@@ -1026,6 +1114,60 @@ function App() {
       ? checkedTreePartIds
       : [assemblyId ? `assembly:${assemblyId}` : targetId]
     deleteSceneParts(selectedIds)
+  }
+
+  const selectedTransformEditable = selectedEntityParts.length === 1
+  const selectedPosition = selectedTransformEditable && selectedScenePart
+    ? selectedScenePart.kind === 'asset' && selectedInstance
+      ? [selectedInstance.x, selectedInstance.z, selectedInstance.y ?? 0]
+      : selectedScenePart.voxels[0]
+        ? [voxelToWorld(selectedScenePart.voxels[0].x), voxelToWorld(selectedScenePart.voxels[0].z), voxelCenterToWorld(selectedScenePart.voxels[0].y)]
+        : [0, 0, 0]
+    : [0, 0, 0]
+
+  const changeSelectedTransform = (axis: number, requestedValue: number) => {
+    if (!selectedTransformEditable || !selectedScenePart || !Number.isFinite(requestedValue)) return
+    const boundary = Math.max(1, projectRef.current.sceneSizeCm / 2)
+    const value = Math.max(-boundary, Math.min(boundary, requestedValue))
+    if (selectedScenePart.kind === 'asset' && selectedInstance) {
+      const property = axis === 0 ? 'x' : axis === 1 ? 'z' : 'y'
+      updateProject((draft) => {
+        const instance = draft.instances.find((item) => item.id === selectedInstance.id)
+        if (!instance) return
+        instance[property] = snapWorld(value)
+      })
+      setNotice(`已更新位置 ${['X', 'Y', 'Z'][axis]} · 已限制在场景边界内`)
+      return
+    }
+    const entityId = selectedScenePart.partId
+    const firstVoxel = selectedScenePart.voxels[0]
+    if (!firstVoxel) return
+    const targetVoxel = axis === 2 ? Math.round(value / VOXEL_WORLD_SIZE - 0.5) : worldToVoxel(value)
+    const currentVoxel = axis === 0 ? firstVoxel.x : axis === 1 ? firstVoxel.z : firstVoxel.y
+    const delta = targetVoxel - currentVoxel
+    if (!delta) return
+    updateProject((draft) => {
+      draft.customVoxels = draft.customVoxels.map((voxel) => {
+        if (voxelEntityId(voxel) !== entityId) return voxel
+        if (axis === 0) return { ...voxel, x: voxel.x + delta }
+        if (axis === 1) return { ...voxel, z: voxel.z + delta }
+        return { ...voxel, y: voxel.y + delta }
+      })
+    })
+    setNotice(`已更新手动实体位置 ${['X', 'Y', 'Z'][axis]} · 已限制在场景边界内`)
+  }
+
+  const selectedColor = selectedEntityParts[0]?.colorOverride ?? selectedAsset?.color ?? '#6c827d'
+  const changeSelectedColor = (color: string) => {
+    if (!selectedEntityParts.length) return
+    const instanceIds = new Set(selectedEntityParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
+    const customIds = new Set(selectedEntityParts.filter((part) => part.kind === 'custom').map((part) => part.partId))
+    updateProject((draft) => {
+      draft.instances.forEach((instance) => { if (instanceIds.has(instance.id)) instance.colorOverride = color })
+      draft.customColors = { ...(draft.customColors ?? {}) }
+      customIds.forEach((entityId) => { draft.customColors![entityId] = color })
+    })
+    setNotice(`已更新选中实体颜色 · ${color.toUpperCase()}`)
   }
 
   const operateOnSceneSelection = (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => {
@@ -1132,7 +1274,7 @@ function App() {
             <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { setZoomLevel((value) => Math.max(50, value - 10)); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${Math.max(0, Math.min(100, ((zoomLevel - 50) / 150) * 100))}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { setZoomLevel((value) => Math.min(200, value + 10)); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{zoomLevel}%</span></div>
           </div>
         </section>
-        <Inspector selectedAsset={selectedAsset} selectedInstance={selectedInstance} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} onExport={exportSelectedPart} onDuplicate={duplicateSelected} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} />
+        <Inspector selectedAsset={selectedAsset} selectedInstance={selectedInstance} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onExport={exportSelectedPart} onDuplicate={duplicateSelected} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} />
       </main>
       {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} onClose={() => setLibraryOpen(false)} onRefresh={refreshLibrary} onSaveScene={saveCurrentSceneAsNew} onLoadScene={loadStoredScene} onLoadAsset={loadStoredAsset} />}
     </div>
@@ -1279,12 +1421,9 @@ function ToolButton({ icon, label, description, active, onClick }: { icon: React
   return <button className={`tool-button ${active ? 'active' : ''}`} data-tooltip={description} aria-label={label} onClick={onClick} title={description}>{icon}</button>
 }
 
-function Inspector({ selectedAsset, selectedInstance, selectedPart, selectedParts, editEntityId, onExport, onDuplicate, onDelete, onResetTransform, onSaveAsAsset }: { selectedAsset?: VoxelAsset; selectedInstance?: SceneInstance; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; editEntityId: string | null; onExport: () => void; onDuplicate: () => void; onDelete: () => void; onResetTransform: () => void; onSaveAsAsset: () => void }) {
+function Inspector({ selectedAsset, selectedInstance, selectedPart, selectedParts, editEntityId, position, transformEditable, selectedColor, onChangeTransform, onChangeColor, onExport, onDuplicate, onDelete, onResetTransform, onSaveAsAsset }: { selectedAsset?: VoxelAsset; selectedInstance?: SceneInstance; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; editEntityId: string | null; position: number[]; transformEditable: boolean; selectedColor: string; onChangeTransform: (axis: number, value: number) => void; onChangeColor: (color: string) => void; onExport: () => void; onDuplicate: (count: number) => void; onDelete: () => void; onResetTransform: () => void; onSaveAsAsset: () => void }) {
+  const [copyCount, setCopyCount] = useState(1)
   const previewVoxels = selectedParts.flatMap((part) => part.voxels)
-  const customOrigin = selectedPart?.voxels[0]
-  const position = selectedInstance
-    ? [selectedInstance.x, selectedInstance.z, selectedInstance.y ?? 0]
-    : customOrigin ? [voxelToWorld(customOrigin.x), voxelToWorld(customOrigin.z), voxelCenterToWorld(customOrigin.y)] : [0, 0, 0]
   const isAssembly = selectedParts.length > 1 && selectedParts.some((part) => part.assemblyId || part.assemblyIds?.length)
   const entityName = isAssembly ? `装配体 · ${selectedParts.length} 个子实体` : selectedAsset?.name ?? selectedPart?.label ?? (selectedPart ? '手动体素实体' : '未选择')
   const entityId = selectedInstance?.id ?? selectedPart?.id ?? '—'
@@ -1299,15 +1438,22 @@ function Inspector({ selectedAsset, selectedInstance, selectedPart, selectedPart
     </div>
     <div className="inspector-section">
       <div className="section-heading"><span>变换</span><button className="tiny-icon" onClick={onResetTransform} title="重置变换"><RotateCcw size={13} /></button></div>
-      <TransformRow icon={<Move3d size={14} />} label="位置" values={position} />
-      <TransformRow icon={<RotateCw size={14} />} label="旋转" values={[selectedInstance?.rotation ?? 0, 0, 0]} />
+      <TransformRow icon={<Move3d size={14} />} label="位置" values={position} editable={transformEditable} onChange={onChangeTransform} />
+      {!transformEditable && <div className="transform-hint">多选实体时不可直接编辑单一位置</div>}
+    </div>
+    <div className="inspector-section color-section">
+      <div className="section-heading"><span>颜色</span><span className="instance-label">实体覆盖色</span></div>
+      <ColorEditor color={selectedColor} disabled={!selectedParts.length} onChange={onChangeColor} />
     </div>
     <div className="inspector-section entity-actions-section">
       <div className="section-heading"><span>实体操作</span><span className="instance-label">{selectedParts.length} 个实体</span></div>
-      <div className="entity-actions"><button onClick={onSaveAsAsset}><Save size={14} /> 保存为模板实体</button></div>
+      <div className="entity-actions">
+        <div className="copy-entity-row"><span className="copy-entity-label">复制实体</span><button onClick={() => setCopyCount((value) => Math.max(1, value - 1))} title="减少复制数量"><Minus size={13} /></button><span className="copy-entity-count">{copyCount}</span><button onClick={() => setCopyCount((value) => Math.min(99, value + 1))} title="增加复制数量"><Plus size={13} /></button><button className="copy-confirm" onClick={() => onDuplicate(copyCount)}>确定</button></div>
+        <button onClick={onSaveAsAsset}><Save size={14} /> 保存为模板实体</button>
+        <button className="danger-action" onClick={onDelete}><Trash2 size={14} /> 删除实体</button>
+        <button className="export-action" onClick={onExport}><Download size={14} /> 导出选中部件 STL</button>
+      </div>
     </div>
-    {selectedInstance && <div className="inspector-section instance-section"><div className="section-heading"><span>实例</span><span className="instance-label">数量</span></div><div className="instance-actions"><button onClick={onDelete} title="删除选中实例"><Minus size={14} /></button><span>1</span><button onClick={onDuplicate} title="复制实例"><Plus size={14} /></button><button className="square-action" onClick={onDuplicate} title="复制实例"><Copy size={14} /></button><button className="square-action danger" onClick={onDelete} title="删除实例"><Trash2 size={14} /></button></div></div>}
-    {selectedAsset && <button className="export-panel-button" onClick={onExport}><Download size={16} /> 导出选中部件 STL</button>}
   </aside>
 }
 
@@ -1361,8 +1507,61 @@ function VoxelMiniPreview({ voxels, asset }: { voxels: Voxel[]; asset?: VoxelAss
   </svg></div>
 }
 
-function TransformRow({ icon, label, values }: { icon: React.ReactNode; label: string; values: number[] }) {
-  return <div className="transform-row"><div className="transform-label">{icon}{label}</div><div className="transform-values">{values.map((value, index) => <span key={index}>{['X', 'Y', 'Z'][index]} <b>{Number(value.toFixed(3))}</b></span>)}</div></div>
+function TransformRow({ icon, label, values, editable, onChange }: { icon: React.ReactNode; label: string; values: number[]; editable: boolean; onChange: (axis: number, value: number) => void }) {
+  return <div className="transform-row"><div className="transform-label">{icon}{label}</div><div className="transform-values">{values.map((value, index) => <label key={index}><span>{['X', 'Y', 'Z'][index]}</span><input aria-label={`位置 ${['X', 'Y', 'Z'][index]}`} type="number" step="0.1" value={Number(value.toFixed(3))} disabled={!editable} onChange={(event) => onChange(index, Number(event.target.value))} /></label>)}</div></div>
+}
+
+function ColorEditor({ color, disabled, onChange }: { color: string; disabled: boolean; onChange: (color: string) => void }) {
+  const colorInputRef = useRef<HTMLInputElement>(null)
+  const [hue, setHue] = useState(() => hexToHsl(color).h)
+  const [saturation, setSaturation] = useState(() => hexToHsl(color).s)
+  const lightness = hexToHsl(color).l
+  useEffect(() => {
+    const next = hexToHsl(color)
+    setHue(next.h)
+    setSaturation(next.s)
+  }, [color])
+  const updateHsl = (nextHue: number, nextSaturation: number) => onChange(hslToHex(nextHue, nextSaturation, lightness))
+  return <div className="color-editor">
+    <button className="inspector-color-button" aria-label="打开颜色选择器" title="选择实体颜色" disabled={disabled} style={{ background: color }} onClick={() => colorInputRef.current?.click()}><Palette size={14} /></button>
+    <input ref={colorInputRef} className="hidden-color-input" type="color" value={/^#[0-9a-f]{6}$/i.test(color) ? color : '#6c827d'} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
+    <div className="color-sliders">
+      <label><span>色调</span><input aria-label="色调" type="range" min="0" max="360" value={hue} disabled={disabled} onChange={(event) => { const next = Number(event.target.value); setHue(next); updateHsl(next, saturation) }} /></label>
+      <label><span>饱和度</span><input aria-label="饱和度" type="range" min="0" max="100" value={saturation} disabled={disabled} onChange={(event) => { const next = Number(event.target.value); setSaturation(next); updateHsl(hue, next) }} /></label>
+    </div>
+  </div>
+}
+
+function hexToHsl(hex: string): { h: number; s: number; l: number } {
+  const value = /^#[0-9a-f]{6}$/i.test(hex) ? hex.slice(1) : '6c827d'
+  const r = parseInt(value.slice(0, 2), 16) / 255
+  const g = parseInt(value.slice(2, 4), 16) / 255
+  const b = parseInt(value.slice(4, 6), 16) / 255
+  const max = Math.max(r, g, b)
+  const min = Math.min(r, g, b)
+  const delta = max - min
+  let h = 0
+  if (delta) {
+    if (max === r) h = ((g - b) / delta) % 6
+    else if (max === g) h = (b - r) / delta + 2
+    else h = (r - g) / delta + 4
+    h = Math.round(h * 60)
+    if (h < 0) h += 360
+  }
+  const l = (max + min) / 2
+  const s = delta === 0 ? 0 : delta / (1 - Math.abs(2 * l - 1))
+  return { h, s: Math.round(s * 100), l }
+}
+
+function hslToHex(h: number, saturation: number, lightness: number): string {
+  const s = Math.max(0, Math.min(100, saturation)) / 100
+  const l = Math.max(0, Math.min(1, lightness))
+  const chroma = (1 - Math.abs(2 * l - 1)) * s
+  const sector = h / 60
+  const x = chroma * (1 - Math.abs((sector % 2) - 1))
+  const [r1, g1, b1] = sector < 1 ? [chroma, x, 0] : sector < 2 ? [x, chroma, 0] : sector < 3 ? [0, chroma, x] : sector < 4 ? [0, x, chroma] : sector < 5 ? [x, 0, chroma] : [chroma, 0, x]
+  const m = l - chroma / 2
+  return `#${[r1, g1, b1].map((channel) => Math.round((channel + m) * 255).toString(16).padStart(2, '0')).join('')}`
 }
 
 function ViewportPalette({ materials, activeMaterial, onSelectMaterial, onReplaceMaterial }: { materials: Material[]; activeMaterial: string; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void }) {
@@ -1788,7 +1987,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
       if (!asset) continue
       const variant = styleMaterialVariants[instance.style]
       const renderAsset = variant ? { ...asset, color: variant.color, accent: variant.accent } : asset
-      const instanceGroup = buildAssetGroup(renderAsset, materialMap, instance.overrides, instance.partOffsets, instance.rotation)
+      const instanceGroup = buildAssetGroup(renderAsset, materialMap, instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride)
       instanceGroup.position.copy(toSceneWorld(instance.x, instance.y ?? 0, instance.z))
       instanceGroup.rotation.z = instance.rotation * Math.PI / 180
       instanceGroup.userData.instanceId = instance.id
@@ -1809,9 +2008,12 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
       custom.name = 'custom-voxels'
       for (const component of voxelComponents(project.customVoxels)) {
         const occupied = new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
+        const componentColor = project.customColors?.[voxelEntityId(component[0])]
         component.forEach((voxel) => {
         const material = materialMap.get(voxel.materialId) ?? materialMap.get('terracotta')!
-        const mesh = new THREE.Mesh(new THREE.BoxGeometry(VOXEL_WORLD_SIZE, VOXEL_WORLD_SIZE, VOXEL_WORLD_SIZE), material.clone())
+        const meshMaterial = material.clone()
+        if (componentColor) meshMaterial.color.set(componentColor)
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(VOXEL_WORLD_SIZE, VOXEL_WORLD_SIZE, VOXEL_WORLD_SIZE), meshMaterial)
         mesh.position.copy(toSceneWorld(voxelToWorld(voxel.x), voxelCenterToWorld(voxel.y), voxelToWorld(voxel.z)))
         mesh.userData.customVoxel = voxel
         mesh.userData.customComponentId = voxelComponentId(component)
@@ -2258,7 +2460,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
   return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onWheel={(event) => { if (event.ctrlKey) event.preventDefault() }} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { applyCameraView('default'); onNotice('视角已回中') }} /><div className="canvas-hint">{placementAsset ? '拖动资产预览到场地 · 绿色可放置 · 红色表示重叠' : tool === 'brush' ? '点击地面或体素面添加 · 空白处首个体素会新建并进入编辑模式 · 拖动旋转不编辑' : tool === 'erase' ? '点击体素擦除 · 删除后自动按连通性拆分实体' : `拖动实体 · ${dragAxis === 'horizontal' ? '水平（X/Y）' : '竖直（Z）'} · Shift/Command 拖动框选多个实体`}</div></div>
 }
 
-function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0) {
+function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0, colorOverride?: string) {
   const group = new THREE.Group()
   const scale = VOXEL_WORLD_SIZE
   const voxels = resolveInstanceVoxels(asset, overrides)
@@ -2280,7 +2482,9 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
     partGroup.position.set(cos * offset.x - sin * offset.z, sin * offset.x + cos * offset.z, offset.y)
     partGroup.userData.instancePartId = partId
     for (const voxel of component) {
-      const material = voxel.materialId === 'primary'
+      const material = colorOverride
+        ? new THREE.MeshStandardMaterial({ color: colorOverride, roughness: 0.72, metalness: 0.03 })
+        : voxel.materialId === 'primary'
         ? new THREE.MeshStandardMaterial({ color: asset.color, roughness: 0.72, metalness: 0.03 })
         : voxel.materialId === 'accent'
           ? new THREE.MeshStandardMaterial({ color: asset.accent, roughness: 0.72, metalness: 0.03 })

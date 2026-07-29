@@ -203,7 +203,13 @@ button { border: 0; cursor: pointer; color: inherit; }
 .transform-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
 .transform-label { width: 45px; display: flex; align-items: center; gap: 5px; color: #7e8989; font-size: 10px; }
 .transform-values { flex: 1; display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
-.transform-values span { border: 1px solid #364042; padding: 5px 4px; color: #6f797a; font-family: 'DM Mono', monospace; font-size: 8px; }.transform-values b { color: #c7cdca; font-weight: 400; }
+.transform-values label { min-width: 0; display: flex; align-items: center; gap: 3px; border: 1px solid #364042; padding: 0 4px; color: #6f797a; font-family: 'DM Mono', monospace; font-size: 8px; }
+.transform-values label span { flex: 0 0 auto; }
+.transform-values input { width: 100%; min-width: 0; height: 25px; padding: 0; color: #c7cdca; background: transparent; border: 0; outline: 0; font: 8px 'DM Mono', monospace; }
+.transform-values input:focus { color: #fff0df; }
+.transform-values input:disabled { color: #697474; cursor: not-allowed; }
+.transform-values input::-webkit-outer-spin-button, .transform-values input::-webkit-inner-spin-button { margin: 0; appearance: none; }
+.transform-hint { margin-top: 7px; color: #687474; font-size: 8px; }
 .material-count, .instance-label { color: #657071; font-family: 'DM Mono', monospace; font-size: 9px; }
 .parts-section { min-height: 150px; flex: 1; overflow: hidden; }
 .parts-list { height: 100%; overflow: auto; }
@@ -220,10 +226,27 @@ button { border: 0; cursor: pointer; color: inherit; }
 .custom-list button { width: 100%; height: 25px; display: flex; align-items: center; justify-content: space-between; padding: 0 5px; color: #8f9a98; background: transparent; border-bottom: 1px solid #2d383a; font-size: 9px; text-align: left; }
 .custom-list button:hover, .custom-list button.active { color: #f2c1a4; background: #2b2523; }
 .custom-list button span { display: flex; align-items: center; gap: 5px; }.custom-list button small { color: #5e6c6b; font-family: 'DM Mono', monospace; font-size: 8px; }
+.color-editor { display: flex; align-items: center; gap: 9px; }
+.inspector-color-button { width: 30px; height: 30px; display: grid; place-items: center; flex: 0 0 30px; color: rgba(255,255,255,.82); border: 1px solid #a8b0aa; box-shadow: inset 0 0 0 1px rgba(0,0,0,.25); cursor: pointer; }
+.inspector-color-button:hover { border-color: #f0b192; }
+.inspector-color-button:disabled { opacity: .35; cursor: not-allowed; }
+.color-sliders { flex: 1; display: grid; gap: 5px; }
+.color-sliders label { display: grid; grid-template-columns: 30px 1fr; align-items: center; gap: 6px; color: #7e8989; font-size: 8px; }
+.color-sliders input { width: 100%; height: 11px; accent-color: #b45b43; }
 .entity-actions-section { padding-bottom: 12px; }
-.entity-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.entity-actions { display: grid; gap: 6px; }
 .entity-actions button { min-height: 31px; display: flex; align-items: center; justify-content: center; gap: 5px; color: #b8c1bd; background: #1b2224; border: 1px solid #3b4749; font-size: 9px; }
 .entity-actions button:hover { color: #fff0df; border-color: #ae5b44; background: #2c2523; }
+.copy-entity-row { display: flex; align-items: center; gap: 0; min-height: 31px; }
+.copy-entity-label { flex: 1; color: #b8c1bd; font-size: 9px; }
+.copy-entity-row > button, .copy-entity-count { height: 27px; min-width: 27px; display: grid; place-items: center; color: #a8b0ad; background: #1a2022; border: 1px solid #384244; font-size: 9px; }
+.copy-entity-count { border-left: 0; border-right: 0; font: 9px 'DM Mono', monospace; }
+.copy-entity-row > button:hover { color: #fff0df; background: #2c2523; }
+.copy-entity-row .copy-confirm { min-width: 42px; margin-left: 6px; color: #fff0df; background: #a9523c; border-color: #c46b50; }
+.copy-entity-row .copy-confirm:hover { background: #c66c50; }
+.entity-actions .danger-action { color: #d98b7d; }
+.entity-actions .export-action { color: #fff0df; background: #a9523c; border-color: #c46b50; }
+.entity-actions .export-action:hover { background: #c66c50; }
 .child-preview-section { min-height: 194px; }
 .child-preview-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
 .child-preview-card { min-width: 0; padding: 3px; border: 1px solid #354043; background: #171d1f; color: #899493; font-size: 8px; }
