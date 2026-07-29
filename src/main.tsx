@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, CircleUserRound, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, SquareDashedMousePointer, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { MATERIALS, Material, ProjectState, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, findInstanceVoxelAtSceneVoxel, highestVoxelAt, makeAssetFromSceneParts, makeDefaultProject, makeStl, resolveInstanceSceneVoxels, resolveInstanceVoxels, sceneAssemblies, sceneEntityParts, snapWorld, uniqueAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel } from './voxel'
+import { AssetAssembly, MATERIALS, Material, ProjectState, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, findInstanceVoxelAtSceneVoxel, highestVoxelAt, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneEntityParts, snapWorld, uniqueAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel } from './voxel'
 import { importModelAsVoxelAsset } from './model-import'
 import { LibraryResponse, loadAsset, loadLibrary, loadScene, saveAsset, saveScene } from './persistence'
 import './styles.css'
@@ -246,24 +246,20 @@ function App() {
   const sceneParts = useMemo(() => sceneEntityParts(project), [project])
   const lockedPartIds = useMemo(() => new Set(sceneParts.filter((part) => scenePartIsLocked(project, part)).map((part) => part.id)), [project, sceneParts])
   const selectedAssemblyId = selectedId.startsWith('assembly:') ? selectedId.slice('assembly:'.length) : undefined
-  const selectedScenePart = sceneParts.find((part) => part.id === selectedId || part.instanceId === selectedId || (selectedAssemblyId && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(selectedAssemblyId)))
+  const selectedScenePart = sceneParts.find((part) => part.id === selectedId) ?? sceneParts.find((part) => part.instanceId === selectedId)
   const selectedInstance = selectedScenePart?.instanceId ? project.instances.find((instance) => instance.id === selectedScenePart.instanceId) : project.instances.find((instance) => instance.id === selectedId)
   const selectedAsset = selectedInstance ? project.assets.find((asset) => asset.id === selectedInstance.assetId) : undefined
   const selectedEntityParts = useMemo(() => {
-    const checkedPartIds = new Set<string>()
-    const checkedAssemblyIds = new Set<string>()
-    checkedTreePartIds.forEach((id) => {
-      if (id.startsWith('assembly:')) checkedAssemblyIds.add(id.slice('assembly:'.length))
-      else checkedPartIds.add(id)
-    })
-    if (selectedAssemblyId) checkedAssemblyIds.add(selectedAssemblyId)
-    if (selectedScenePart) {
-      (selectedScenePart.assemblyIds ?? (selectedScenePart.assemblyId ? [selectedScenePart.assemblyId] : [])).forEach((id) => checkedAssemblyIds.add(id))
-      checkedPartIds.add(selectedScenePart.id)
+    const checkedPartIds = new Set(checkedTreePartIds.filter((id) => !id.startsWith('assembly:')))
+    const checkedAssemblyIds = new Set(checkedTreePartIds.filter((id) => id.startsWith('assembly:')).map((id) => id.slice('assembly:'.length)))
+    if (selectedAssemblyId && !checkedTreePartIds.length) checkedAssemblyIds.add(selectedAssemblyId)
+    if (selectedScenePart?.instanceId && !checkedTreePartIds.length && !selectedAssemblyId && selectedId === selectedScenePart.instanceId) {
+      return sceneParts.filter((part) => part.instanceId === selectedScenePart.instanceId)
     }
+    if (selectedScenePart && !checkedTreePartIds.length && !selectedAssemblyId) checkedPartIds.add(selectedScenePart.id)
     if (!checkedPartIds.size && !checkedAssemblyIds.size) return []
     return sceneParts.filter((part) => checkedPartIds.has(part.id) || (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).some((assemblyId) => checkedAssemblyIds.has(assemblyId)))
-  }, [sceneParts, selectedScenePart, selectedAssemblyId, checkedTreePartIds])
+  }, [sceneParts, selectedScenePart, selectedAssemblyId, selectedId, checkedTreePartIds])
   const sceneTreeItems = useMemo<SceneTreeItem[]>(() => {
     const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
     const baseNameForPart = (part: SceneEntityPart) => {
@@ -435,6 +431,19 @@ function App() {
       { x: voxel.x, y: voxel.y, z: voxel.z + 1 }, { x: voxel.x, y: voxel.y, z: voxel.z - 1 },
     ]
     const assetNeighbor = currentParts.find((part) => part.kind === 'asset' && part.voxels.some((candidate) => neighbors.some((neighbor) => sceneVoxelKey(candidate) === sceneVoxelKey(neighbor))))
+    const touchingCustomIds = [...new Set(currentProject.customVoxels.filter((candidate) => neighbors.some((neighbor) => sceneVoxelKey(candidate) === sceneVoxelKey(neighbor))).map(voxelEntityId))]
+    if (editAssemblyId) {
+      const entityId = `voxel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      updateProject((draft) => {
+        if (draft.customVoxels.some((item) => item.x === voxel.x && item.y === voxel.y && item.z === voxel.z)) return
+        draft.customVoxels.push({ ...voxel, entityId })
+        const assembly = (draft.assemblies ?? []).find((item) => item.id === editAssemblyId)
+        if (assembly && !assembly.memberKeys.includes(`voxel:${entityId}`)) assembly.memberKeys.push(`voxel:${entityId}`)
+      })
+      setSelectedId(`custom:${entityId}`)
+      setNotice(`装配体编辑模式 · 已新建子实体并加入当前装配体 · ${voxel.x}, ${voxel.y}, ${voxel.z}`)
+      return
+    }
     if (assetNeighbor?.instanceId) {
       const instance = currentProject.instances.find((item) => item.id === assetNeighbor.instanceId)
       const asset = instance ? currentProject.assets.find((item) => item.id === instance.assetId) : undefined
@@ -459,7 +468,6 @@ function App() {
       setNotice('当前处于实体编辑模式 · 请点击当前实体表面或相邻面进行修改')
       return
     }
-    const touchingCustomIds = [...new Set(currentProject.customVoxels.filter((candidate) => neighbors.some((neighbor) => sceneVoxelKey(candidate) === sceneVoxelKey(neighbor))).map(voxelEntityId))]
     const entityId = touchingCustomIds[0] ?? editingCustomId ?? voxel.entityId ?? `voxel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     updateProject((draft) => {
       const exists = draft.customVoxels.some((item) => item.x === voxel.x && item.y === voxel.y && item.z === voxel.z)
@@ -579,8 +587,28 @@ function App() {
       return
     }
     const instanceId = `instance-${asset.id}-${Date.now()}`
-    updateProject((draft) => draft.instances.push({ id: instanceId, assetId: asset.id, ...position, rotation: 0, style: asset.style, visible: true, overrides: [] }))
-    setSelectedId(instanceId)
+    let placedRootAssemblyId = ''
+    updateProject((draft) => {
+      draft.instances.push({ id: instanceId, assetId: asset.id, ...position, rotation: 0, style: asset.style, visible: true, overrides: [] })
+      if (asset.assembly) {
+        const nodeIds = new Map(asset.assembly.nodes.map((node) => [node.id, `assembly-${instanceId}-${node.id}`]))
+        asset.assembly.nodes.forEach((node) => {
+          const memberKeys = [...new Set(node.memberKeys.flatMap((memberKey) => {
+            if (memberKey.startsWith('assembly:')) {
+              const mapped = nodeIds.get(memberKey.slice('assembly:'.length))
+              return mapped ? [`assembly:${mapped}`] : []
+            }
+            if (memberKey.startsWith('part:')) return [`asset:${instanceId}:${memberKey.slice('part:'.length)}`]
+            return []
+          }))]
+          if (memberKeys.length < 2) return
+          const sceneAssemblyId = nodeIds.get(node.id)!
+          draft.assemblies = [...(draft.assemblies ?? []), { id: sceneAssemblyId, name: node.name || asset.assembly?.name || '装配体', memberKeys }]
+        })
+        placedRootAssemblyId = nodeIds.get(asset.assembly.rootId) ?? ''
+      }
+    })
+    setSelectedId(placedRootAssemblyId ? `assembly:${placedRootAssemblyId}` : instanceId)
     setNotice(`已放置资产 · ${asset.name}`)
     endPlacement()
   }
@@ -769,9 +797,42 @@ function App() {
     assembleSceneParts(parts, checkedTreePartIds)
   }
 
+  const renameSceneEntity = (targetId: string, assemblyId?: string) => {
+    const targetAssemblyId = assemblyId ?? (targetId.startsWith('assembly:') ? targetId.slice('assembly:'.length) : undefined)
+    const assembly = targetAssemblyId ? projectRef.current.assemblies?.find((item) => item.id === targetAssemblyId) : undefined
+    const part = !assembly ? sceneEntityParts(projectRef.current).find((item) => item.id === targetId) : undefined
+    if (!assembly && !part) return
+    const currentName = assembly?.name ?? projectRef.current.entityNames?.[part!.memberKey] ?? scenePartBaseName(projectRef.current, part!)
+    const requested = window.prompt('重命名实体', currentName)
+    const trimmed = requested?.trim()
+    if (!trimmed) return
+    const usedNames = new Set<string>(assembly
+      ? (projectRef.current.assemblies ?? []).filter((item) => item.id !== assembly.id).map((item) => item.name?.trim()).filter((name): name is string => Boolean(name))
+      : Object.entries(projectRef.current.entityNames ?? {}).filter(([key]) => key !== part!.memberKey).map(([, name]) => name))
+    let nextName = trimmed
+    let suffix = 2
+    while (usedNames.has(nextName)) nextName = `${trimmed} ${suffix++}`
+    updateProject((draft) => {
+      if (targetAssemblyId) {
+        const target = (draft.assemblies ?? []).find((item) => item.id === targetAssemblyId)
+        if (target) target.name = nextName
+      } else if (part) {
+        draft.entityNames = { ...(draft.entityNames ?? {}), [part.memberKey]: nextName }
+      }
+    })
+    setTreeContextMenu(null)
+    setNotice(`已重命名 · ${nextName}`)
+  }
+
   const enterEditMode = (entityId: string) => {
+    if (entityId.startsWith('assembly:')) {
+      const confirmed = window.confirm('您正在编辑装配体。任何体素添加将会新建该装配体下的子实体，在对应子实体上进行的擦除将会直接作用于对应子实体。确定要继续吗？')
+      if (!confirmed) return
+    }
     setEditEntityId(entityId)
     setSelectedId(entityId)
+    setCheckedTreePartIds([entityId])
+    if (!entityId.startsWith('assembly:')) revealScenePartPath(entityId)
     setTreeContextMenu(null)
     setNotice('已进入编辑修改模式 · 当前实体的修改将保留在场景实例上')
   }
@@ -948,17 +1009,86 @@ function App() {
     }
   }
 
+  const makeAssemblyTemplateAsset = (sourceProject: ProjectState, sourceParts: SceneEntityPart[], rootAssemblyId: string): VoxelAsset | null => {
+    const sourceAssemblies = sourceProject.assemblies ?? []
+    const assemblyMap = new Map(sourceAssemblies.map((assembly) => [assembly.id, assembly]))
+    const rootAssembly = assemblyMap.get(rootAssemblyId)
+    if (!rootAssembly) return null
+    const assemblyIds = new Set<string>()
+    const collectAssemblyIds = (assemblyId: string) => {
+      if (assemblyIds.has(assemblyId)) return
+      assemblyIds.add(assemblyId)
+      assemblyMap.get(assemblyId)?.memberKeys.filter((key) => key.startsWith('assembly:')).forEach((key) => collectAssemblyIds(key.slice('assembly:'.length)))
+    }
+    collectAssemblyIds(rootAssemblyId)
+    const includedParts = sourceParts.filter((part) => (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(rootAssemblyId))
+    if (includedParts.length < 2) return null
+    const allVoxels = includedParts.flatMap((part) => part.voxels)
+    const minX = Math.min(...allVoxels.map((voxel) => voxel.x))
+    const minY = Math.min(...allVoxels.map((voxel) => voxel.y))
+    const minZ = Math.min(...allVoxels.map((voxel) => voxel.z))
+    const partIdMap = new Map<string, string>()
+    const partVoxels: Record<string, Voxel[]> = {}
+    includedParts.forEach((part, index) => {
+      const localPartId = `part-${index + 1}`
+      partIdMap.set(part.id, localPartId)
+      partVoxels[localPartId] = part.voxels.map((voxel) => ({ x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ, materialId: voxel.materialId }))
+    })
+    const uniqueVoxels = new Map<string, Voxel>()
+    Object.values(partVoxels).flat().forEach((voxel) => uniqueVoxels.set(`${voxel.x},${voxel.y},${voxel.z}`, voxel))
+    const mapStoredMemberKey = (storedKey: string): string[] => {
+      if (storedKey.startsWith('assembly:')) {
+        const mappedAssemblyId = `assembly-node-${storedKey.slice('assembly:'.length)}`
+        return assemblyIds.has(storedKey.slice('assembly:'.length)) ? [`assembly:${mappedAssemblyId}`] : []
+      }
+      const matchingParts = includedParts.filter((part) => part.memberKey === storedKey || (storedKey.startsWith('asset:') && part.memberKey.startsWith(`${storedKey}:`)))
+      return matchingParts.map((part) => `part:${partIdMap.get(part.id)}`).filter((key): key is string => Boolean(key))
+    }
+    const nodes = [...assemblyIds].map((assemblyId) => {
+      const assembly = assemblyMap.get(assemblyId)!
+      return {
+        id: `assembly-node-${assemblyId}`,
+        name: assembly.name?.trim() || '装配体',
+        memberKeys: [...new Set(assembly.memberKeys.flatMap(mapStoredMemberKey))],
+      }
+    })
+    const rootName = rootAssembly.name?.trim() || '装配体'
+    const width = Math.max(...allVoxels.map((voxel) => voxel.x)) - minX + 1
+    const depth = Math.max(...allVoxels.map((voxel) => voxel.z)) - minZ + 1
+    const height = Math.max(...allVoxels.map((voxel) => voxel.y)) - minY + 1
+    const assembly: AssetAssembly = { name: rootName, rootId: `assembly-node-${rootAssemblyId}`, nodes }
+    return {
+      id: `asset-assembly-${Date.now()}`,
+      name: rootName,
+      style: '自定义实体',
+      kind: 'imported',
+      color: selectedAsset?.color ?? '#6c827d',
+      accent: selectedAsset?.accent ?? '#d2a354',
+      width,
+      depth,
+      height,
+      parts: Object.keys(partVoxels),
+      partVoxels,
+      voxels: [...uniqueVoxels.values()],
+      source: '装配体模板保存',
+      assembly,
+      isTemplate: true,
+    }
+  }
+
   const saveSelectedEntityAsAsset = () => {
     if (!selectedEntityParts.length) {
       setNotice('请先选择一个实体')
       return
     }
-    const baseName = selectedAsset ? `${selectedAsset.name}·副本` : '自定义体素实体'
-    const name = uniqueAssetName(project.assets, baseName)
-    const asset = makeAssetFromSceneParts(`asset-custom-${Date.now()}`, name, selectedEntityParts, selectedAsset?.color ?? '#6c827d', selectedAsset?.accent ?? '#d2a354')
+    const assemblyRootId = selectedAssemblyId ?? (selectedEntityParts.flatMap((part) => part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).find((assemblyId) => !(project.assemblies ?? []).some((candidate) => candidate.memberKeys.includes(`assembly:${assemblyId}`))))
+    const assemblyAsset = assemblyRootId ? makeAssemblyTemplateAsset(projectRef.current, selectedEntityParts, assemblyRootId) : null
+    const baseName = assemblyAsset?.name ?? (selectedAsset ? `${selectedAsset.name}·副本` : '自定义体素实体')
+    const name = assemblyAsset ? baseName : uniqueAssetName(project.assets, baseName)
+    const asset = assemblyAsset ? { ...assemblyAsset, name } : makeAssetFromSceneParts(`asset-custom-${Date.now()}`, name, selectedEntityParts, selectedAsset?.color ?? '#6c827d', selectedAsset?.accent ?? '#d2a354')
     updateProject((draft) => draft.assets.push(asset))
     void saveAsset(asset).catch(() => setPersistenceStatus('offline'))
-    setNotice(`已保存为新实体 · ${name}`)
+    setNotice(assemblyAsset ? `已保存装配体模板 · ${name} · 内含 ${selectedEntityParts.length} 个实体` : `已保存为新实体 · ${name}`)
   }
 
   const splitSelectedEntity = () => {
@@ -1208,6 +1338,63 @@ function App() {
     setNotice(`已更新选中实体颜色 · ${color.toUpperCase()}`)
   }
 
+  type SceneTransformAxis = 'x' | 'y' | 'z'
+  const sceneAxisToVoxelAxis = (axis: SceneTransformAxis): 'x' | 'y' | 'z' => axis === 'x' ? 'x' : axis === 'y' ? 'z' : 'y'
+
+  const applyCustomVoxelTransform = (parts: SceneEntityPart[], transform: (voxels: Voxel[]) => Voxel[]) => {
+    const selectedCustomIds = new Set(parts.filter((part) => part.kind === 'custom').map((part) => part.partId))
+    if (!selectedCustomIds.size) return false
+    updateProject((draft) => {
+      const transformedByKey = new Map<string, Voxel>()
+      for (const entityId of selectedCustomIds) {
+        const source = draft.customVoxels.filter((voxel) => voxelEntityId(voxel) === entityId)
+        const transformed = transform(source)
+        source.forEach((voxel, index) => transformedByKey.set(`${entityId}:${voxel.x},${voxel.y},${voxel.z}`, { ...transformed[index], entityId }))
+      }
+      draft.customVoxels = draft.customVoxels.map((voxel) => transformedByKey.get(`${voxelEntityId(voxel)}:${voxel.x},${voxel.y},${voxel.z}`) ?? voxel)
+    })
+    return true
+  }
+
+  const mirrorSelectedEntities = (axis: SceneTransformAxis) => {
+    if (!selectedEntityParts.length) {
+      setNotice('请先选择要镜像的实体')
+      return
+    }
+    const voxelAxis = sceneAxisToVoxelAxis(axis)
+    const customChanged = applyCustomVoxelTransform(selectedEntityParts, (voxels) => mirrorVoxels(voxels, voxelAxis))
+    const instanceIds = new Set(selectedEntityParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
+    if (instanceIds.size) {
+      updateProject((draft) => {
+        draft.instances.forEach((instance) => {
+          if (!instanceIds.has(instance.id)) return
+          instance.mirror = { x: instance.mirror?.x ?? false, y: instance.mirror?.y ?? false, z: instance.mirror?.z ?? false, [axis]: !(instance.mirror?.[axis] ?? false) }
+        })
+      })
+    }
+    setNotice(`已镜像选中实体 · ${axis.toUpperCase()} 轴${customChanged && instanceIds.size ? ' · 资产实例同步镜像' : ''}`)
+  }
+
+  const rotateSelectedEntities = (axis: SceneTransformAxis, degrees: 90 | 180 | 270) => {
+    if (!selectedEntityParts.length) {
+      setNotice('请先选择要旋转的实体')
+      return
+    }
+    const voxelAxis = sceneAxisToVoxelAxis(axis)
+    applyCustomVoxelTransform(selectedEntityParts, (voxels) => rotateVoxels(voxels, voxelAxis, degrees))
+    const instanceIds = new Set(selectedEntityParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
+    if (instanceIds.size) {
+      updateProject((draft) => {
+        draft.instances.forEach((instance) => {
+          if (!instanceIds.has(instance.id)) return
+          const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationY' : 'rotationZ'
+          instance[key] = ((instance[key] ?? 0) + degrees) % 360
+        })
+      })
+    }
+    setNotice(`已旋转选中实体 · ${axis.toUpperCase()} 轴 ${degrees}°`)
+  }
+
   const operateOnSceneSelection = (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => {
     const parts = resolveOperationParts(partIds)
     if (operation === 'delete') deleteSceneParts(partIds)
@@ -1227,24 +1414,44 @@ function App() {
     if (!selectedInstance) return
     updateProject((draft) => {
       const instance = draft.instances.find((item) => item.id === selectedInstance.id)
-      if (instance) { instance.x = 0; instance.y = 0; instance.z = 0; instance.rotation = 0; instance.partOffsets = {} }
+      if (instance) { instance.x = 0; instance.y = 0; instance.z = 0; instance.rotation = 0; instance.rotationX = 0; instance.rotationY = 0; instance.rotationZ = 0; instance.mirror = { x: false, y: false, z: false }; instance.partOffsets = {} }
     })
     setNotice('已重置选中实例变换')
   }
 
+  const revealScenePartPath = (partId: string) => {
+    const part = sceneEntityParts(projectRef.current).find((candidate) => candidate.id === partId)
+    if (!part) return
+    const assemblyIds = part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])
+    if (assemblyIds.length) setExpandedAssemblies((current) => ({ ...current, ...Object.fromEntries(assemblyIds.map((assemblyId) => [assemblyId, true])) }))
+  }
+
   const selectTreeItem = (id: string, additive = false) => {
-    const partIds = resolveOperationParts([id]).map((part) => part.id)
-    if (additive) {
-      setCheckedTreePartIds((current) => {
-        const next = new Set(current)
-        const allSelected = partIds.every((partId) => next.has(partId))
-        partIds.forEach((partId) => allSelected ? next.delete(partId) : next.add(partId))
-        return [...next]
-      })
-    } else {
-      setCheckedTreePartIds([])
-    }
+    const removing = additive && checkedTreePartIds.includes(id)
+    setCheckedTreePartIds((current) => {
+      if (!additive) return [id]
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return [...next]
+    })
+    setSelectedId(removing && checkedTreePartIds.length === 1 ? '' : id)
+    if (!removing && !id.startsWith('assembly:')) revealScenePartPath(id)
+    setTreeContextMenu(null)
+  }
+
+  const toggleTreeChecked = (id: string) => {
+    const removing = checkedTreePartIds.includes(id)
+    setCheckedTreePartIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
+    setSelectedId(removing && selectedId === id ? '' : id)
+    if (!removing && !id.startsWith('assembly:')) revealScenePartPath(id)
+    setTreeContextMenu(null)
+  }
+
+  const selectScenePart = (id: string) => {
     setSelectedId(id)
+    setCheckedTreePartIds([id])
+    revealScenePartPath(id)
     setTreeContextMenu(null)
   }
 
@@ -1256,7 +1463,10 @@ function App() {
       partIds.forEach((partId) => allSelected ? next.delete(partId) : next.add(partId))
       return [...next]
     })
-    if (partIds[0]) setSelectedId(partIds[0])
+    if (partIds[0]) {
+      setSelectedId(partIds[0])
+      revealScenePartPath(partIds[0])
+    }
     else if (!additive) setSelectedId('')
     setTreeContextMenu(null)
   }
@@ -1294,8 +1504,8 @@ function App() {
             <button className="micro-control" onClick={() => setNotice('当前体素单位 · 1 mm')}><Grid3X3 size={14} /> 1 mm体素 <ChevronDown size={13} /></button>
             <button className="micro-control" onClick={() => setNotice('边界设置面板尚未接入')}><SlidersHorizontal size={14} /> 边界 <ChevronDown size={13} /></button>
           </div>
-          <VoxelViewport project={project} selectedId={selectedId} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} tool={tool} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={project.assets.find((asset) => asset.id === placementAssetId) ?? null} placementPreview={placementPreview} viewMode={viewMode} showGrid={showGrid} showGround={showGround} zoomLevel={zoomLevel} onCameraApiChange={setCameraControlApi} onSelect={setSelectedId} onSelectMultiple={updateSceneCheckedSelection} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onEditInstanceVoxel={editInstanceVoxel} onMoveSceneParts={moveSceneParts} onPlacementMove={updatePlacementPreview} onPlaceAsset={placeAssetAt} onNotice={setNotice} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onBatchOperation={operateOnSceneSelection}>
-            <SceneTreePanel items={sceneTreeItems} selectedId={selectedId} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} expandedAssemblies={expandedAssemblies} contextMenu={treeContextMenu} onToggleExpanded={(assemblyId) => setExpandedAssemblies((current) => ({ ...current, [assemblyId]: !(current[assemblyId] ?? true) }))} onSelect={selectTreeItem} onToggleChecked={(id) => setCheckedTreePartIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])} onAssemble={assembleCheckedTreeParts} onDissolve={dissolveSceneAssembly} onEnterEdit={enterEditMode} onDelete={deleteSceneTreeEntity} onToggleLock={toggleTreeLock} onContextMenu={(targetId, x, y, assemblyId) => setTreeContextMenu({ targetId, assemblyId, x, y })} />
+          <VoxelViewport project={project} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} tool={tool} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={project.assets.find((asset) => asset.id === placementAssetId) ?? null} placementPreview={placementPreview} viewMode={viewMode} showGrid={showGrid} showGround={showGround} zoomLevel={zoomLevel} onCameraApiChange={setCameraControlApi} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onEditInstanceVoxel={editInstanceVoxel} onMoveSceneParts={moveSceneParts} onPlacementMove={updatePlacementPreview} onPlaceAsset={placeAssetAt} onNotice={setNotice} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
+            <SceneTreePanel items={sceneTreeItems} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} expandedAssemblies={expandedAssemblies} contextMenu={treeContextMenu} onToggleExpanded={(assemblyId) => setExpandedAssemblies((current) => ({ ...current, [assemblyId]: !(current[assemblyId] ?? true) }))} onSelect={selectTreeItem} onToggleChecked={toggleTreeChecked} onAssemble={assembleCheckedTreeParts} onDissolve={dissolveSceneAssembly} onEnterEdit={enterEditMode} onRename={renameSceneEntity} onDelete={deleteSceneTreeEntity} onToggleLock={toggleTreeLock} onContextMenu={(targetId, x, y, assemblyId) => setTreeContextMenu({ targetId, assemblyId, x, y })} />
           </VoxelViewport>
           <div className="viewport-footer">
             <div className="tool-group">
@@ -1312,7 +1522,7 @@ function App() {
             <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { setZoomLevel((value) => Math.max(50, value - 10)); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${Math.max(0, Math.min(100, ((zoomLevel - 50) / 150) * 100))}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { setZoomLevel((value) => Math.min(200, value + 10)); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{zoomLevel}%</span></div>
           </div>
         </section>
-        <Inspector selectedAsset={selectedAsset} selectedInstance={selectedInstance} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onExport={exportSelectedPart} onDuplicate={duplicateSelected} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} />
+        <Inspector selectedAsset={selectedAsset} selectedInstance={selectedInstance} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onDuplicate={duplicateSelected} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} />
       </main>
       {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} onClose={() => setLibraryOpen(false)} onRefresh={refreshLibrary} onSaveScene={saveCurrentSceneAsNew} onLoadScene={loadStoredScene} onLoadAsset={loadStoredAsset} />}
     </div>
@@ -1345,7 +1555,7 @@ function TreeLabel({ text }: { text: string }) {
   return <span ref={viewportRef} className={`scene-tree-label ${overflowing ? 'overflowing' : ''}`} title={text} style={{ '--tree-label-distance': `${distance}px` } as React.CSSProperties}><span ref={contentRef} className="scene-tree-label-text">{text}</span></span>
 }
 
-function SceneTreePanel({ items, selectedId, expandedAssemblies, checkedPartIds, lockedPartIds, contextMenu, onToggleExpanded, onSelect, onToggleChecked, onAssemble, onDissolve, onEnterEdit, onDelete, onToggleLock, onContextMenu }: { items: SceneTreeItem[]; selectedId: string; expandedAssemblies: Record<string, boolean>; checkedPartIds: string[]; lockedPartIds: Set<string>; contextMenu: TreeContextMenuState; onToggleExpanded: (assemblyId: string) => void; onSelect: (id: string, additive?: boolean) => void; onToggleChecked: (id: string) => void; onAssemble: () => void; onDissolve: (assemblyId: string) => void; onEnterEdit: (id: string) => void; onDelete: (targetId: string, assemblyId?: string) => void; onToggleLock: (targetId: string, assemblyId?: string) => void; onContextMenu: (targetId: string, x: number, y: number, assemblyId?: string) => void }) {
+function SceneTreePanel({ items, selectedId, selectedPartIds, expandedAssemblies, checkedPartIds, lockedPartIds, contextMenu, onToggleExpanded, onSelect, onToggleChecked, onAssemble, onDissolve, onEnterEdit, onRename, onDelete, onToggleLock, onContextMenu }: { items: SceneTreeItem[]; selectedId: string; selectedPartIds: string[]; expandedAssemblies: Record<string, boolean>; checkedPartIds: string[]; lockedPartIds: Set<string>; contextMenu: TreeContextMenuState; onToggleExpanded: (assemblyId: string) => void; onSelect: (id: string, additive?: boolean) => void; onToggleChecked: (id: string) => void; onAssemble: () => void; onDissolve: (assemblyId: string) => void; onEnterEdit: (id: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onDelete: (targetId: string, assemblyId?: string) => void; onToggleLock: (targetId: string, assemblyId?: string) => void; onContextMenu: (targetId: string, x: number, y: number, assemblyId?: string) => void }) {
   const scrollTree = (event: React.WheelEvent<HTMLDivElement>) => {
     event.preventDefault()
     event.stopPropagation()
@@ -1364,8 +1574,10 @@ function SceneTreePanel({ items, selectedId, expandedAssemblies, checkedPartIds,
   const renderItem = (item: SceneTreeItem, child = false): React.ReactNode => {
     if (item.kind === 'part' && item.part) {
       const part = item.part
-      const selected = selectedId === part.id
-      const checked = checkedPartIds.includes(part.id)
+      const selected = selectedPartIds.includes(part.id)
+      const checkedAssemblyIds = new Set(checkedPartIds.filter((id) => id.startsWith('assembly:')).map((id) => id.slice('assembly:'.length)))
+      const partAssemblyIds = part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])
+      const checked = checkedPartIds.includes(part.id) || partAssemblyIds.some((assemblyId) => checkedAssemblyIds.has(assemblyId))
       const locked = lockedPartIds.has(part.id)
       return <div className={`scene-tree-row ${child ? 'child' : ''} ${selected ? 'selected' : ''}`} key={part.id} onWheel={scrollTree} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onContextMenu(part.id, event.clientX, event.clientY) }}>
         <input type="checkbox" aria-label={`选择子实体 ${part.displayLabel ?? part.label ?? part.partId}`} checked={checked} onChange={() => onToggleChecked(part.id)} onClick={(event) => event.stopPropagation()} />
@@ -1389,12 +1601,13 @@ function SceneTreePanel({ items, selectedId, expandedAssemblies, checkedPartIds,
   const operatesOnChecked = checkedPartIds.length >= 1 && (checkedPartIds.includes(contextMenu?.targetId ?? '') || contextPartIds.some((id) => checkedPartIds.includes(id)))
   const operationPartIds = operatesOnChecked ? checkedPartIds : contextPartIds
   const operationLocked = operationPartIds.length > 0 && operationPartIds.every((id) => lockedPartIds.has(id))
+  const canEnterEdit = checkedPartIds.length < 2
   return <aside className="scene-tree-panel">
     <div className="scene-tree-list">
       {items.length === 0 && <div className="scene-tree-empty">场景中暂无用户实体</div>}
       {items.map((item) => renderItem(item))}
     </div>
-    {contextMenu && <div className="scene-tree-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}>{checkedPartIds.length >= 2 && <button onClick={onAssemble}>组装已选实体</button>}<button onClick={() => onToggleLock(contextMenu.targetId, contextMenu.assemblyId)}>{operationLocked ? '取消固定所选实体' : '固定所选实体'}</button><button onClick={() => onEnterEdit(contextMenu.targetId)}>进入编辑修改模式</button>{contextMenu.assemblyId && <button onClick={() => onDissolve(contextMenu.assemblyId!)}>原位解散装配体</button>}<button className="danger" onClick={() => onDelete(contextMenu.targetId, contextMenu.assemblyId)}>删除所选实体</button></div>}
+    {contextMenu && <div className="scene-tree-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}>{checkedPartIds.length >= 2 && <button onClick={onAssemble}>组装已选实体</button>}<button onClick={() => onRename(contextMenu.targetId, contextMenu.assemblyId)}>重命名</button><button onClick={() => onToggleLock(contextMenu.targetId, contextMenu.assemblyId)}>{operationLocked ? '取消固定所选实体' : '固定所选实体'}</button>{canEnterEdit && <button onClick={() => onEnterEdit(contextMenu.targetId)}>进入编辑修改模式</button>}{contextMenu.assemblyId && <button onClick={() => onDissolve(contextMenu.assemblyId!)}>原位解散装配体</button>}<button className="danger" onClick={() => onDelete(contextMenu.targetId, contextMenu.assemblyId)}>删除所选实体</button></div>}
   </aside>
 }
 
@@ -1459,8 +1672,11 @@ function ToolButton({ icon, label, description, active, onClick }: { icon: React
   return <button className={`tool-button ${active ? 'active' : ''}`} data-tooltip={description} aria-label={label} onClick={onClick} title={description}>{icon}</button>
 }
 
-function Inspector({ selectedAsset, selectedInstance, selectedPart, selectedParts, editEntityId, position, transformEditable, selectedColor, onChangeTransform, onChangeColor, onExport, onDuplicate, onDelete, onResetTransform, onSaveAsAsset }: { selectedAsset?: VoxelAsset; selectedInstance?: SceneInstance; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; editEntityId: string | null; position: number[]; transformEditable: boolean; selectedColor: string; onChangeTransform: (axis: number, value: number) => void; onChangeColor: (color: string) => void; onExport: () => void; onDuplicate: (count: number) => void; onDelete: () => void; onResetTransform: () => void; onSaveAsAsset: () => void }) {
+function Inspector({ selectedAsset, selectedInstance, selectedPart, selectedParts, editEntityId, position, transformEditable, selectedColor, onChangeTransform, onChangeColor, onMirror, onRotate, onExport, onDuplicate, onDelete, onResetTransform, onSaveAsAsset }: { selectedAsset?: VoxelAsset; selectedInstance?: SceneInstance; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; editEntityId: string | null; position: number[]; transformEditable: boolean; selectedColor: string; onChangeTransform: (axis: number, value: number) => void; onChangeColor: (color: string) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onExport: () => void; onDuplicate: (count: number) => void; onDelete: () => void; onResetTransform: () => void; onSaveAsAsset: () => void }) {
   const [copyCount, setCopyCount] = useState(1)
+  const [mirrorAxis, setMirrorAxis] = useState<'x' | 'y' | 'z'>('x')
+  const [rotateAxis, setRotateAxis] = useState<'x' | 'y' | 'z'>('z')
+  const [rotateDegrees, setRotateDegrees] = useState<90 | 180 | 270>(90)
   const previewVoxels = selectedParts.flatMap((part) => part.voxels)
   const isAssembly = selectedParts.length > 1 && selectedParts.some((part) => part.assemblyId || part.assemblyIds?.length)
   const entityName = isAssembly ? `装配体 · ${selectedParts.length} 个子实体` : selectedAsset?.name ?? selectedPart?.label ?? (selectedPart ? '手动体素实体' : '未选择')
@@ -1487,6 +1703,8 @@ function Inspector({ selectedAsset, selectedInstance, selectedPart, selectedPart
       <div className="section-heading"><span>实体操作</span><span className="instance-label">{selectedParts.length} 个实体</span></div>
       <div className="entity-actions">
         <div className="copy-entity-row"><span className="copy-entity-label">复制实体</span><button onClick={() => setCopyCount((value) => Math.max(1, value - 1))} title="减少复制数量"><Minus size={13} /></button><span className="copy-entity-count">{copyCount}</span><button onClick={() => setCopyCount((value) => Math.min(99, value + 1))} title="增加复制数量"><Plus size={13} /></button><button className="copy-confirm" onClick={() => onDuplicate(copyCount)}>确定</button></div>
+        <div className="entity-transform-operation"><span>镜像实体</span><div className="axis-choice">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={mirrorAxis === axis ? 'active' : ''} onClick={() => setMirrorAxis(axis)}>{axis.toUpperCase()}</button>)}</div><button className="operation-confirm" onClick={() => onMirror(mirrorAxis)}>执行</button></div>
+        <div className="entity-transform-operation"><span>旋转实体</span><div className="axis-choice">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={rotateAxis === axis ? 'active' : ''} onClick={() => setRotateAxis(axis)}>{axis.toUpperCase()}</button>)}</div><div className="degree-choice">{([90, 180, 270] as const).map((degrees) => <button key={degrees} className={rotateDegrees === degrees ? 'active' : ''} onClick={() => setRotateDegrees(degrees)}>{degrees}°</button>)}</div><button className="operation-confirm" onClick={() => onRotate(rotateAxis, rotateDegrees)}>执行</button></div>
         <button onClick={onSaveAsAsset}><Save size={14} /> 保存为模板实体</button>
         <button className="danger-action" onClick={onDelete}><Trash2 size={14} /> 删除实体</button>
         <button className="export-action" onClick={onExport}><Download size={14} /> 导出选中部件 STL</button>
@@ -1784,7 +2002,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   </div>
 }
 
-function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, editEntityId, tool, activeMaterial, materials, dragAxis, placementAsset, placementPreview, viewMode, showGrid, showGround, zoomLevel, onCameraApiChange, onSelect, onSelectMultiple, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onEditInstanceVoxel, onMoveSceneParts, onPlacementMove, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onBatchOperation, children }: { project: ProjectState; selectedId: string; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; tool: Tool; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; placementPreview: PlacementPreview | null; viewMode: '视图' | '正交' | '透视'; showGrid: boolean; showGround: boolean; zoomLevel: number; onCameraApiChange: (api: CameraControlApi | null) => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onMoveSceneParts: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number, trackHistory?: boolean) => GridMoveResult; onPlacementMove: (assetId: string, x: number, z: number) => void; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
+function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, tool, activeMaterial, materials, dragAxis, placementAsset, placementPreview, viewMode, showGrid, showGround, zoomLevel, onCameraApiChange, onSelect, onSelectMultiple, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onEditInstanceVoxel, onMoveSceneParts, onPlacementMove, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; tool: Tool; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; placementPreview: PlacementPreview | null; viewMode: '视图' | '正交' | '透视'; showGrid: boolean; showGround: boolean; zoomLevel: number; onCameraApiChange: (api: CameraControlApi | null) => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onMoveSceneParts: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number, trackHistory?: boolean) => GridMoveResult; onPlacementMove: (assetId: string, x: number, z: number) => void; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.Camera | null>(null)
@@ -2015,8 +2233,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
     group.clear()
     const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
     const currentSceneParts = sceneEntityParts(project)
-    const checkedAssemblyIds = new Set(checkedPartIds.filter((id) => id.startsWith('assembly:')).map((id) => id.slice('assembly:'.length)))
-    const selectedScenePartIds = new Set(currentSceneParts.filter((part) => checkedPartIds.includes(part.id) || selectedId === part.id || (selectedId.startsWith('assembly:') && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(selectedId.slice('assembly:'.length))) || (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).some((assemblyId) => checkedAssemblyIds.has(assemblyId))).map((part) => part.id))
+    const selectedScenePartIds = new Set(selectedPartIds)
     const editAssemblyId = editEntityId?.startsWith('assembly:') ? editEntityId.slice('assembly:'.length) : undefined
     const editScenePartIds = new Set(currentSceneParts.filter((part) => editEntityId === part.id || (editAssemblyId && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(editAssemblyId))).map((part) => part.id))
     for (const instance of project.instances) {
@@ -2025,9 +2242,8 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
       if (!asset) continue
       const variant = styleMaterialVariants[instance.style]
       const renderAsset = variant ? { ...asset, color: variant.color, accent: variant.accent } : asset
-      const instanceGroup = buildAssetGroup(renderAsset, materialMap, instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride)
+      const instanceGroup = buildAssetGroup(renderAsset, materialMap, instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ)
       instanceGroup.position.copy(toSceneWorld(instance.x, instance.y ?? 0, instance.z))
-      instanceGroup.rotation.z = instance.rotation * Math.PI / 180
       instanceGroup.userData.instanceId = instance.id
       instanceGroup.traverse((object) => {
         object.userData.instanceId = instance.id
@@ -2036,7 +2252,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
       instanceGroup.traverse((object) => {
         if (!(object instanceof THREE.Mesh) || object.userData.selectionGlow) return
         const scenePartId = object.userData.scenePartId as string | undefined
-        const highlighted = instance.id === selectedId || Boolean(scenePartId && (selectedScenePartIds.has(scenePartId) || editScenePartIds.has(scenePartId)))
+        const highlighted = Boolean(scenePartId && (selectedScenePartIds.has(scenePartId) || editScenePartIds.has(scenePartId)))
         if (highlighted) addVoxelHighlight(object)
       })
       group.add(instanceGroup)
@@ -2083,7 +2299,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
       })
       group.add(preview)
     }
-  }, [project, selectedId, checkedPartIds, editEntityId, materialMap, placementAsset, placementPreview])
+  }, [project, selectedId, selectedPartIds, checkedPartIds, editEntityId, materialMap, placementAsset, placementPreview])
 
   const getPointerContext = (event: { clientX: number; clientY: number }) => {
     const renderer = rendererRef.current
@@ -2122,8 +2338,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
     const hit = context?.hits.find((item) => item.object.userData.scenePartId)
     const hitPart = hit?.object.userData.scenePartId ? sceneEntityParts(project).find((part) => part.id === hit.object.userData.scenePartId) : undefined
     if (!hitPart) return
-    const entityId = hitPart.assemblyId ? `assembly:${hitPart.assemblyId}` : hitPart.id
-    onEnterEditMode(entityId)
+    onEnterEditMode(hitPart.id)
   }
 
   useEffect(() => {
@@ -2156,10 +2371,6 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
   }
 
   const hitSelectionPartIds = (part: SceneEntityPart) => {
-    if (part.assemblyId || part.assemblyIds?.length) {
-      const assemblyId = part.assemblyIds?.[0] ?? part.assemblyId
-      return sceneEntityParts(project).filter((candidate) => (candidate.assemblyIds ?? (candidate.assemblyId ? [candidate.assemblyId] : [])).includes(assemblyId!)).map((candidate) => candidate.id)
-    }
     return [part.id]
   }
 
@@ -2179,7 +2390,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
     const { hits, floorPoint } = context
     const hit = hits[0]
     if (tool === 'select' && hit?.object.userData.scenePartId) {
-      onSelect(hit.object.userData.instanceId ?? hit.object.userData.scenePartId)
+      onSelect(hit.object.userData.scenePartId)
       return
     }
     if (tool !== 'brush' && tool !== 'erase') return
@@ -2240,8 +2451,9 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
       const context = getPointerContext(event)
       const hit = context?.hits.find((item) => item.object.userData.scenePartId)
       const hitPart = hit?.object.userData.scenePartId ? sceneEntityParts(project).find((part) => part.id === hit.object.userData.scenePartId) : undefined
+      const explicitMultiSelection = selectedPartIds.length > 1 && (checkedPartIds.length > 1 || (checkedPartIds.length === 1 && !checkedPartIds[0].startsWith('assembly:')))
       const targetPartIds = hitPart
-        ? checkedPartIds.includes(hitPart.id) ? checkedPartIds : hitSelectionPartIds(hitPart)
+        ? explicitMultiSelection && selectedPartIds.includes(hitPart.id) ? selectedPartIds : hitSelectionPartIds(hitPart)
         : []
       cameraGestureRef.current = { pointerId: event.pointerId, button: 'right', lastX: event.clientX, lastY: event.clientY, moved: false, contextPartIds: targetPartIds }
       if (controlsRef.current) controlsRef.current.enabled = false
@@ -2257,9 +2469,10 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
       const sceneParts = sceneEntityParts(project)
       const hitPart = hit?.object.userData.scenePartId ? sceneParts.find((part) => part.id === hit.object.userData.scenePartId) : undefined
       if (hitPart) {
-        const selectedParts = checkedPartIds.includes(hitPart.id)
-          ? sceneParts.filter((part) => checkedPartIds.includes(part.id))
-          : sceneAssemblies(sceneParts, { includeContacts: false }).find((assembly) => assembly.some((part) => part.id === hitPart.id)) ?? [hitPart]
+        const explicitMultiSelection = selectedPartIds.length > 1 && (checkedPartIds.length > 1 || (checkedPartIds.length === 1 && !checkedPartIds[0].startsWith('assembly:')))
+        const selectedParts = explicitMultiSelection && selectedPartIds.includes(hitPart.id)
+          ? sceneParts.filter((part) => selectedPartIds.includes(part.id))
+          : [hitPart]
         const instanceId = hitPart.instanceId
         const instance = instanceId ? project.instances.find((item) => item.id === instanceId) : undefined
         if (event.metaKey || event.shiftKey) {
@@ -2267,7 +2480,7 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
           onNotice('已加入复选 · 可继续选择多个实体')
           return
         }
-        onSelect(hitPart.assemblyId ? `assembly:${hitPart.assemblyId}` : hitPart.id)
+        onSelect(hitPart.id)
         if (selectedParts.every((part) => lockedPartIds.has(part.id))) {
           onNotice('当前实体已固定 · 请先在右键菜单中取消固定')
           return
@@ -2495,19 +2708,16 @@ function VoxelViewport({ project, selectedId, checkedPartIds, lockedPartIds, edi
   }
 
   const sceneContextLocked = Boolean(sceneContextMenu?.partIds.length && sceneContextMenu.partIds.every((partId) => lockedPartIds.has(partId)))
-  const sceneContextEditTargetId = sceneContextMenu?.partIds[0]
-    ? (() => {
-        const part = sceneEntityParts(project).find((candidate) => candidate.id === sceneContextMenu.partIds[0])
-        return part?.assemblyId ? `assembly:${part.assemblyId}` : part?.id ?? ''
-      })()
-    : ''
-  return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onWheel={(event) => { if (event.ctrlKey) event.preventDefault() }} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextEditTargetId && <button onClick={() => { onEnterEditMode(sceneContextEditTargetId); setSceneContextMenu(null) }}>进入编辑修改模式</button>}{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { applyCameraView('default'); onNotice('视角已回中') }} /><div className="canvas-hint">{placementAsset ? '拖动资产预览到场地 · 绿色可放置 · 红色表示重叠' : tool === 'brush' ? '点击地面或体素面添加 · 空白处首个体素会新建并进入编辑模式 · 拖动旋转不编辑' : tool === 'erase' ? '点击体素擦除 · 删除后自动按连通性拆分实体' : `拖动实体 · ${dragAxis === 'horizontal' ? '水平（X/Y）' : '竖直（Z）'} · Shift/Command 拖动框选多个实体`}</div></div>
+  const sceneContextEditTargetId = sceneContextMenu?.partIds.length === 1 ? sceneContextMenu.partIds[0] : ''
+  const sceneContextRenameTargetId = sceneContextMenu?.partIds.length === 1 ? sceneContextMenu.partIds[0] : ''
+  return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onWheel={(event) => { if (event.ctrlKey) event.preventDefault() }} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextRenameTargetId && <button onClick={() => { onRename(sceneContextRenameTargetId); setSceneContextMenu(null) }}>重命名</button>}{sceneContextEditTargetId && <button onClick={() => { onEnterEditMode(sceneContextEditTargetId); setSceneContextMenu(null) }}>进入编辑修改模式</button>}{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { applyCameraView('default'); onNotice('视角已回中') }} /><div className="canvas-hint">{placementAsset ? '拖动资产预览到场地 · 绿色可放置 · 红色表示重叠' : tool === 'brush' ? '点击地面或体素面添加 · 空白处首个体素会新建并进入编辑模式 · 拖动旋转不编辑' : tool === 'erase' ? '点击体素擦除 · 删除后自动按连通性拆分实体' : `拖动实体 · ${dragAxis === 'horizontal' ? '水平（X/Y）' : '竖直（Z）'} · Shift/Command 拖动框选多个实体`}</div></div>
 }
 
-function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0, colorOverride?: string) {
+function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0, colorOverride?: string, mirror: SceneInstance['mirror'] = undefined, rotationX = 0, rotationY = 0, rotationZ = 0) {
   const group = new THREE.Group()
   const scale = VOXEL_WORLD_SIZE
   const voxels = resolveInstanceVoxels(asset, overrides)
+  group.rotation.set(rotationX * Math.PI / 180, rotationY * Math.PI / 180, -(rotation + rotationZ) * Math.PI / 180)
   if (!voxels.length) {
     const placeholder = new THREE.Mesh(new THREE.BoxGeometry(asset.width * scale, asset.depth * scale, asset.height * scale), new THREE.MeshStandardMaterial({ color: asset.color, roughness: 0.76 }))
     placeholder.position.z = asset.height * scale / 2
@@ -2515,15 +2725,11 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
     group.add(placeholder)
     return group
   }
-  const angle = rotation * Math.PI / 180
-  const cos = Math.cos(angle)
-  const sin = Math.sin(angle)
-  for (const component of voxelComponents(voxels)) {
-    const partId = voxelComponentId(component)
+  for (const { partId, voxels: component } of resolveInstanceComponents(asset, overrides)) {
     const occupied = new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
     const partGroup = new THREE.Group()
     const offset = partOffsets?.[partId] ?? { x: 0, y: 0, z: 0 }
-    partGroup.position.set(cos * offset.x - sin * offset.z, sin * offset.x + cos * offset.z, offset.y)
+    partGroup.position.set(mirror?.x ? -offset.x : offset.x, mirror?.y ? -offset.z : offset.z, mirror?.z ? -offset.y : offset.y)
     partGroup.userData.instancePartId = partId
     for (const voxel of component) {
       const material = colorOverride
@@ -2534,7 +2740,10 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
           ? new THREE.MeshStandardMaterial({ color: asset.accent, roughness: 0.72, metalness: 0.03 })
           : materialMap.get(voxel.materialId) ?? new THREE.MeshStandardMaterial({ color: voxel.materialId.startsWith('#') ? voxel.materialId : asset.color, roughness: 0.72, metalness: 0.03 })
       const mesh = new THREE.Mesh(new THREE.BoxGeometry(scale, scale, scale), material.clone())
-      mesh.position.set((voxel.x + 0.5 - asset.width / 2) * scale, (voxel.z + 0.5 - asset.depth / 2) * scale, (voxel.y + 0.5) * scale)
+      const localXIndex = mirror?.x ? asset.width - 1 - voxel.x : voxel.x
+      const localYIndex = mirror?.z ? asset.height - 1 - voxel.y : voxel.y
+      const localZIndex = mirror?.y ? asset.depth - 1 - voxel.z : voxel.z
+      mesh.position.set((localXIndex + 0.5 - asset.width / 2) * scale, (localZIndex + 0.5 - asset.depth / 2) * scale, (localYIndex + 0.5) * scale)
       mesh.userData.instanceVoxel = { ...voxel }
       mesh.userData.instancePartId = partId
       const exposedFaces = exposedVoxelFaces(voxel, occupied)

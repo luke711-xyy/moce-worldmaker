@@ -54,7 +54,7 @@ button { border: 0; cursor: pointer; color: inherit; }
 .scene-tree-select .tree-node-mark { width: 7px; height: 7px; flex: 0 0 auto; border: 1px solid #85918e; background: #526d6a; }
 .scene-tree-select .assembly-mark { flex: 0 0 auto; color: #d2a354; }
 .scene-tree-children { position: relative; margin-left: 7px; border-left: 0; }
-.scene-tree-children::before { content: ''; position: absolute; left: 13px; top: 0; bottom: 0; width: 1px; background: #3a4547; pointer-events: none; }
+.scene-tree-children::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: #3a4547; pointer-events: none; }
 .scene-tree-children .scene-tree-children { margin-left: 14px; }
 .scene-tree-empty { padding: 18px 8px; color: #687475; font-size: 9px; line-height: 1.6; }
 .scene-tree-context-menu { position: fixed; z-index: 30; min-width: 112px; padding: 4px; background: #273033; border: 1px solid #586466; box-shadow: 0 10px 25px rgba(0,0,0,.34); }
@@ -246,6 +246,12 @@ button { border: 0; cursor: pointer; color: inherit; }
 .copy-entity-row > button:hover { color: #fff0df; background: #2c2523; }
 .copy-entity-row .copy-confirm { min-width: 42px; margin-left: 6px; color: #fff0df; background: #a9523c; border-color: #c46b50; }
 .copy-entity-row .copy-confirm:hover { background: #c66c50; }
+.entity-transform-operation { display: flex; align-items: center; gap: 5px; min-height: 31px; color: #b8c1bd; font-size: 9px; }
+.entity-transform-operation > span { min-width: 49px; }
+.axis-choice, .degree-choice { display: flex; gap: 2px; }
+.axis-choice button, .degree-choice button { min-height: 25px; min-width: 25px; padding: 0 5px; color: #8f9b98; background: #1a2022; border: 1px solid #384244; font: 8px 'DM Mono', monospace; }
+.axis-choice button.active, .degree-choice button.active { color: #fff0df; background: #8f4938; border-color: #c46b50; }
+.entity-transform-operation .operation-confirm { min-height: 25px; min-width: 31px; padding: 0 5px; color: #fff0df; background: #a9523c; border-color: #c46b50; font-size: 8px; }
 .entity-actions .danger-action { color: #d98b7d; }
 .entity-actions .export-action { color: #fff0df; background: #a9523c; border-color: #c46b50; }
 .entity-actions .export-action:hover { background: #c66c50; }

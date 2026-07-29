@@ -33,8 +33,15 @@ export type VoxelAsset = {
   partVoxels?: Record<string, Voxel[]>
   voxels: Voxel[]
   source?: string
+  assembly?: AssetAssembly
   /** Only template assets appear in the left asset library. */
   isTemplate?: boolean
+}
+
+export type AssetAssembly = {
+  name: string
+  rootId: string
+  nodes: Array<{ id: string; name: string; memberKeys: string[] }>
 }
 
 export type SceneInstance = {
@@ -49,6 +56,10 @@ export type SceneInstance = {
   overrides: VoxelOverride[]
   partOffsets?: Record<string, { x: number; y: number; z: number }>
   colorOverride?: string
+  mirror?: { x: boolean; y: boolean; z: boolean }
+  rotationX?: number
+  rotationY?: number
+  rotationZ?: number
 }
 
 export type ProjectState = {
@@ -246,54 +257,115 @@ export function resolveInstanceVoxels(asset: VoxelAsset, overrides: VoxelOverrid
   return [...resolved.values()]
 }
 
-export function findInstanceVoxelAtSceneVoxel(instance: SceneInstance, asset: VoxelAsset, sceneVoxel: Pick<Voxel, 'x' | 'y' | 'z'>): Voxel | undefined {
-  const angle = instance.rotation * Math.PI / 180
-  const cos = Math.cos(angle)
-  const sin = Math.sin(angle)
-  const worldX = voxelToWorld(sceneVoxel.x) - instance.x
-  const worldZ = voxelToWorld(sceneVoxel.z) - instance.z
-  const resolved = resolveInstanceVoxels(asset, instance.overrides ?? [])
-  return voxelComponents(resolved).flatMap((component) => {
-    const offset = instance.partOffsets?.[voxelComponentId(component)] ?? { x: 0, y: 0, z: 0 }
-    const adjustedWorldX = worldX - offset.x
-    const adjustedWorldZ = worldZ - offset.z
-    const localX = cos * adjustedWorldX - sin * adjustedWorldZ
-    const localZ = sin * adjustedWorldX + cos * adjustedWorldZ
-    const localY = sceneVoxel.y - worldToVoxel((instance.y ?? 0) + offset.y)
-    const localVoxel = {
-      x: Math.round(localX / VOXEL_WORLD_SIZE + asset.width / 2 - 0.5),
-      y: localY,
-      z: Math.round(localZ / VOXEL_WORLD_SIZE + asset.depth / 2 - 0.5),
+export function resolveInstanceComponents(asset: VoxelAsset, overrides: VoxelOverride[] = []): Array<{ partId: string; voxels: Voxel[] }> {
+  const resolved = resolveInstanceVoxels(asset, overrides)
+  if (!asset.partVoxels || !Object.keys(asset.partVoxels).length) return voxelComponents(resolved).map((voxels) => ({ partId: voxelComponentId(voxels), voxels }))
+  const resolvedByKey = new Map(resolved.map((voxel) => [voxelKey(voxel), voxel]))
+  const claimed = new Set<string>()
+  const components = Object.entries(asset.partVoxels).flatMap(([partId, sourceVoxels]) => {
+    const voxels = sourceVoxels.map((voxel) => resolvedByKey.get(voxelKey(voxel))).filter((voxel): voxel is Voxel => Boolean(voxel))
+    voxels.forEach((voxel) => claimed.add(voxelKey(voxel)))
+    return voxelComponents(voxels).map((component, index) => ({ partId: index === 0 ? partId : `${partId}#${index + 1}`, voxels: component }))
+  }).filter((component) => component.voxels.length > 0)
+  const additions = resolved.filter((voxel) => !claimed.has(voxelKey(voxel)))
+  if (additions.length) components.push({ partId: voxelComponentId(additions), voxels: additions })
+  return components
+}
+
+export type VoxelTransformAxis = 'x' | 'y' | 'z'
+
+export function mirrorVoxels(voxels: Voxel[], axis: VoxelTransformAxis): Voxel[] {
+  if (!voxels.length) return []
+  const values = voxels.map((voxel) => voxel[axis])
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  return voxels.map((voxel) => ({ ...voxel, [axis]: min + max - voxel[axis] }))
+}
+
+export function rotateVoxels(voxels: Voxel[], axis: VoxelTransformAxis, degrees: 90 | 180 | 270): Voxel[] {
+  if (!voxels.length) return []
+  const minX = Math.min(...voxels.map((voxel) => voxel.x))
+  const maxX = Math.max(...voxels.map((voxel) => voxel.x))
+  const minY = Math.min(...voxels.map((voxel) => voxel.y))
+  const maxY = Math.max(...voxels.map((voxel) => voxel.y))
+  const minZ = Math.min(...voxels.map((voxel) => voxel.z))
+  const maxZ = Math.max(...voxels.map((voxel) => voxel.z))
+  return voxels.map((voxel) => {
+    if (degrees === 180) {
+      if (axis === 'x') return { ...voxel, y: minY + maxY - voxel.y, z: minZ + maxZ - voxel.z }
+      if (axis === 'y') return { ...voxel, x: minX + maxX - voxel.x, z: minZ + maxZ - voxel.z }
+      return { ...voxel, x: minX + maxX - voxel.x, y: minY + maxY - voxel.y }
     }
-    return component.filter((voxel) => voxel.x === localVoxel.x && voxel.y === localVoxel.y && voxel.z === localVoxel.z)
+    if (axis === 'x') {
+      return degrees === 90
+        ? { ...voxel, y: minY + maxZ - voxel.z, z: minZ + voxel.y - minY }
+        : { ...voxel, y: minY + voxel.z - minZ, z: minZ + maxY - voxel.y }
+    }
+    if (axis === 'y') {
+      return degrees === 90
+        ? { ...voxel, x: minX + voxel.z - minZ, z: minZ + maxX - voxel.x }
+        : { ...voxel, x: minX + maxZ - voxel.z, z: minZ + voxel.x - minX }
+    }
+    return degrees === 90
+      ? { ...voxel, x: minX + maxY - voxel.y, y: minY + voxel.x - minX }
+      : { ...voxel, x: minX + voxel.y - minY, y: minY + maxX - voxel.x }
+  })
+}
+
+export function findInstanceVoxelAtSceneVoxel(instance: SceneInstance, asset: VoxelAsset, sceneVoxel: Pick<Voxel, 'x' | 'y' | 'z'>): Voxel | undefined {
+  return resolveInstanceComponents(asset, instance.overrides ?? []).flatMap(({ partId, voxels }) => {
+    const resolvedSceneVoxels = resolveInstanceComponentSceneVoxels(instance, asset, voxels, partId)
+    return voxels.filter((_, index) => {
+      const voxel = resolvedSceneVoxels[index]
+      return voxel.x === sceneVoxel.x && voxel.y === sceneVoxel.y && voxel.z === sceneVoxel.z
+    })
   })[0]
 }
 
-function resolveInstanceComponentSceneVoxels(instance: SceneInstance, asset: VoxelAsset, component: Voxel[], x = instance.x, z = instance.z, y = instance.y ?? 0): Voxel[] {
-  const angle = instance.rotation * Math.PI / 180
-  const cos = Math.cos(angle)
-  const sin = Math.sin(angle)
-  const offset = instance.partOffsets?.[voxelComponentId(component)] ?? { x: 0, y: 0, z: 0 }
+function rotateSceneVector(vector: { x: number; y: number; z: number }, rotationX: number, rotationY: number, rotationZ: number): { x: number; y: number; z: number } {
+  const cx = Math.cos(rotationX)
+  const sx = Math.sin(rotationX)
+  const cy = Math.cos(rotationY)
+  const sy = Math.sin(rotationY)
+  const cz = Math.cos(rotationZ)
+  const sz = Math.sin(rotationZ)
+  const afterX = { x: vector.x, y: cx * vector.y - sx * vector.z, z: sx * vector.y + cx * vector.z }
+  const afterY = { x: cy * afterX.x + sy * afterX.z, y: afterX.y, z: -sy * afterX.x + cy * afterX.z }
+  return { x: cz * afterY.x - sz * afterY.y, y: sz * afterY.x + cz * afterY.y, z: afterY.z }
+}
+
+function resolveInstanceComponentSceneVoxels(instance: SceneInstance, asset: VoxelAsset, component: Voxel[], componentId = voxelComponentId(component), x = instance.x, z = instance.z, y = instance.y ?? 0): Voxel[] {
+  const offset = instance.partOffsets?.[componentId] ?? { x: 0, y: 0, z: 0 }
+  const mirror = instance.mirror ?? { x: false, y: false, z: false }
+  const rotationX = (instance.rotationX ?? 0) * Math.PI / 180
+  const rotationY = (instance.rotationY ?? 0) * Math.PI / 180
+  const rotationZ = -(instance.rotation + (instance.rotationZ ?? 0)) * Math.PI / 180
   return component.map((voxel) => {
-    const localX = (voxel.x + 0.5 - asset.width / 2) * VOXEL_WORLD_SIZE
-    const localZ = (voxel.z + 0.5 - asset.depth / 2) * VOXEL_WORLD_SIZE
+    const localXIndex = mirror.x ? asset.width - 1 - voxel.x : voxel.x
+    const localYIndex = mirror.z ? asset.height - 1 - voxel.y : voxel.y
+    const localZIndex = mirror.y ? asset.depth - 1 - voxel.z : voxel.z
+    const local = rotateSceneVector({
+      x: (localXIndex + 0.5 - asset.width / 2) * VOXEL_WORLD_SIZE + (mirror.x ? -offset.x : offset.x),
+      y: (localZIndex + 0.5 - asset.depth / 2) * VOXEL_WORLD_SIZE + (mirror.y ? -offset.z : offset.z),
+      z: (localYIndex + 0.5) * VOXEL_WORLD_SIZE + (mirror.z ? -offset.y : offset.y),
+    }, rotationX, rotationY, rotationZ)
     return {
       ...voxel,
-      x: worldToVoxel(x + cos * localX + sin * localZ + offset.x),
-      y: worldToVoxel(y + offset.y) + voxel.y,
-      z: worldToVoxel(z - sin * localX + cos * localZ + offset.z),
+      x: worldToVoxel(x + local.x),
+      y: Math.round((local.z + y) / VOXEL_WORLD_SIZE - 0.5),
+      z: worldToVoxel(z + local.y),
     }
   })
 }
 
 export function resolveInstanceSceneVoxels(instance: SceneInstance, asset: VoxelAsset, x = instance.x, z = instance.z, y = instance.y ?? 0): Voxel[] {
-  return voxelComponents(resolveInstanceVoxels(asset, instance.overrides ?? [])).flatMap((component) => resolveInstanceComponentSceneVoxels(instance, asset, component, x, z, y))
+  return resolveInstanceComponents(asset, instance.overrides ?? []).flatMap(({ partId, voxels }) => resolveInstanceComponentSceneVoxels(instance, asset, voxels, partId, x, z, y))
 }
 
 export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
   const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
   const assemblies = project.assemblies ?? []
-  const memberKeyMatches = (storedKey: string, candidateKey: string) => storedKey === candidateKey || (storedKey.startsWith('asset:') && candidateKey.startsWith(`${storedKey}:`))
+  const memberKeyMatches = (storedKey: string, candidateKey: string) => storedKey === candidateKey || (storedKey.startsWith('asset:') && (candidateKey.startsWith(`${storedKey}:`) || candidateKey.startsWith(`${storedKey}#`)))
   const assemblyPathForMemberKey = (memberKey: string): string[] => {
     let bestPath: string[] = []
     const visit = (key: string, path: string[], seen: Set<string>) => {
@@ -312,11 +384,9 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
     if (!instance.visible) continue
     const asset = assetMap.get(instance.assetId)
     if (!asset) continue
-    const resolved = resolveInstanceVoxels(asset, instance.overrides ?? [])
-    for (const component of voxelComponents(resolved)) {
-      const partId = voxelComponentId(component)
-      const sceneVoxels = resolveInstanceComponentSceneVoxels(instance, asset, component)
-      const label = Object.entries(asset.partVoxels ?? {}).find(([, sourceVoxels]) => sourceVoxels.some((sourceVoxel) => component.some((voxel) => voxelKey(sourceVoxel) === voxelKey(voxel))))?.[0] ?? partId
+    for (const { partId, voxels: component } of resolveInstanceComponents(asset, instance.overrides ?? [])) {
+      const sceneVoxels = resolveInstanceComponentSceneVoxels(instance, asset, component, partId)
+      const label = partId.split('#')[0]
       const memberKey = `asset:${instance.id}:${partId}`
       const assemblyIds = assemblyPathForMemberKey(memberKey)
       parts.push({ id: `asset:${instance.id}:${partId}`, kind: 'asset', instanceId: instance.id, partId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label, colorOverride: instance.colorOverride, voxels: sceneVoxels })

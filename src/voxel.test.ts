@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStl, nextVoxelY, resolveInstanceVoxels, sceneAssemblies, sceneEntityParts, snapWorld, uniqueAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel } from './voxel'
+import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, nextVoxelY, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneEntityParts, snapWorld, uniqueAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
@@ -62,6 +62,27 @@ describe('莫测造境体素核心数据', () => {
     expect(resolved).toContainEqual(added)
     expect(resolved).toHaveLength(uniqueOriginalCount)
     expect(house.voxels).toHaveLength(originalCount)
+  })
+
+  it('keeps authored asset part ids when resolving scene components', () => {
+    const asset = makeDefaultProject().assets.find((item) => item.id === 'house-chinese')!
+    const components = resolveInstanceComponents(asset)
+    expect(components.map((component) => component.partId)).toEqual(asset.parts)
+    expect(components.every((component) => component.voxels.length > 0)).toBe(true)
+  })
+
+  it('mirrors and rotates voxel coordinates around their own bounds', () => {
+    const voxels = [
+      { x: 0, y: 0, z: 0, materialId: 'stone' },
+      { x: 1, y: 0, z: 0, materialId: 'jade' },
+      { x: 0, y: 1, z: 0, materialId: 'gold' },
+    ]
+    expect(mirrorVoxels(voxels, 'x').map(({ x }) => x)).toEqual([1, 0, 1])
+    expect(rotateVoxels(voxels, 'z', 180)).toEqual([
+      { x: 1, y: 1, z: 0, materialId: 'stone' },
+      { x: 0, y: 1, z: 0, materialId: 'jade' },
+      { x: 1, y: 0, z: 0, materialId: 'gold' },
+    ])
   })
 
   it('maps scene grid cells to centered asset voxels, including rotated instances', () => {
