@@ -168,6 +168,7 @@ const CURRENT_SCENE_ID = 'scene-main'
 type PersistenceStatus = 'loading' | 'saved' | 'offline'
 const MIN_ZOOM_LEVEL = 50
 const MAX_ZOOM_LEVEL = 2000
+const WHEEL_ZOOM_INPUT_GAIN = 4
 
 function clampZoomLevel(value: number): number {
   return Math.max(MIN_ZOOM_LEVEL, Math.min(MAX_ZOOM_LEVEL, value))
@@ -3537,7 +3538,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     const applyWheelZoom = (event: WheelEvent) => {
       if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return
       event.preventDefault()
-      const scale = Math.pow(0.95, controls.zoomSpeed * Math.abs(event.deltaY * 0.01))
+      const scale = Math.pow(0.95, controls.zoomSpeed * WHEEL_ZOOM_INPUT_GAIN * Math.abs(event.deltaY * 0.01))
       const nextZoom = cameraZoomLevelRef.current * (event.deltaY < 0 ? 1 / scale : scale)
       setCameraZoomLevel(nextZoom)
     }
@@ -3828,7 +3829,12 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     onCameraApiChange({
       rotate: rotateCameraByInput,
       view: (view) => applyCameraView(view),
-      reset: () => applyCameraView('default', 100),
+      reset: () => {
+        applyCameraView('default', 100)
+        // Reset the visible ruler immediately as part of the same operation;
+        // it must not depend on the next animation frame being delivered.
+        onZoomChangeRef.current(100)
+      },
       zoomIn: () => setCameraZoomLevel(cameraZoomLevelRef.current + (cameraZoomLevelRef.current >= 100 ? 50 : 10)),
       zoomOut: () => setCameraZoomLevel(cameraZoomLevelRef.current - (cameraZoomLevelRef.current > 100 ? 50 : 10)),
     })
