@@ -3395,11 +3395,11 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     key.castShadow = true
     scene.add(key)
     const initialBounds = sceneBoundsForProject(project)
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(initialBounds.x * VOXEL_WORLD_SIZE, initialBounds.y * VOXEL_WORLD_SIZE), new THREE.MeshStandardMaterial({ color: '#11181b', roughness: 0.95, side: THREE.DoubleSide }))
-    // Voxel row y=0 starts at z=0. Keep the floor just below it to avoid
-    // coplanar depth fighting and prevent the ground from visually entering
-    // the bottom row of voxels.
-    floor.position.z = -0.004
+    // The bottom of voxel row y=0 is the scene ground at z=0. Keep the floor
+    // on that exact datum; depthWrite is disabled so the coplanar floor does
+    // not prevent the voxel faces and grid from resolving their own depth.
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(initialBounds.x * VOXEL_WORLD_SIZE, initialBounds.y * VOXEL_WORLD_SIZE), new THREE.MeshStandardMaterial({ color: '#11181b', roughness: 0.95, side: THREE.DoubleSide, depthWrite: false }))
+    floor.position.z = 0
     floor.name = 'editing-floor'
     floor.receiveShadow = true
     scene.add(floor)
