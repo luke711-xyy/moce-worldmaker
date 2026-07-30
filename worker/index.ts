@@ -294,7 +294,7 @@ async function handleApi(request: Request, env: Env, owner: string): Promise<Res
       existing.add(id)
       const name = await uniqueName(env, owner, 'asset', asset.name)
       const stored = { ...structuredClone(asset), id, name, isTemplate: true, updatedAt: new Date().toISOString() } as unknown as JsonRecord
-      await saveObject(env, owner, 'asset', id, name, stored, stored)
+      await saveObject(env, owner, 'asset', id, name, stored, assetSummary(stored, stored.updatedAt as string))
       storedAssets.push(stored)
     }
     const categories = await replaceCategories(env, owner, [...await categoryPaths(env, owner), ...file.categories, ...storedAssets.map((asset) => asset.categoryPath as string[] ?? [])])
@@ -374,7 +374,7 @@ async function handleApi(request: Request, env: Env, owner: string): Promise<Res
       const name = await uniqueName(env, owner, 'asset', payload.name, id)
       const stored = { ...structuredClone(payload), id, name, isTemplate: true, updatedAt: new Date().toISOString() } as JsonRecord
       const updatedAt = new Date().toISOString()
-      await saveObject(env, owner, 'asset', id, name, stored, stored, updatedAt)
+      await saveObject(env, owner, 'asset', id, name, stored, assetSummary(stored, updatedAt), updatedAt)
       const categories = await replaceCategories(env, owner, [...await categoryPaths(env, owner), ...((stored.categoryPath as string[] | undefined) ? [stored.categoryPath as string[]] : [])])
       return json({ ok: true, asset: assetSummary(stored, updatedAt), assetCategories: categories }, 200, request, env)
     }

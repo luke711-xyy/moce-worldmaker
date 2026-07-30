@@ -23,6 +23,30 @@ const quote = (value) => `'${String(value).replaceAll("'", "''")}'`
 const keyFor = (kind, id) => `${kind}/${encodeURIComponent(owner)}/${encodeURIComponent(id)}.json`
 const isoNow = () => new Date().toISOString()
 
+const assetSummary = (asset, updatedAt) => ({
+  id: asset.id,
+  name: asset.name,
+  kind: asset.kind,
+  style: asset.style,
+  width: asset.width,
+  depth: asset.depth,
+  height: asset.height,
+  voxelCount: Array.isArray(asset.voxels) ? asset.voxels.length : 0,
+  updatedAt,
+})
+
+const sceneSummary = (sceneFile, id, updatedAt) => {
+  const state = sceneFile.scene ?? sceneFile
+  return {
+    id,
+    name: String(state.name ?? '未命名场景'),
+    assetCount: Array.isArray(sceneFile.sceneAssets) ? sceneFile.sceneAssets.length : 0,
+    instanceCount: Array.isArray(state.instances) ? state.instances.length : 0,
+    customVoxelCount: Array.isArray(state.customVoxels) ? state.customVoxels.length : 0,
+    updatedAt,
+  }
+}
+
 const objects = []
 const categories = new Map()
 const assets = Object.values(database.assets ?? {})
@@ -31,7 +55,7 @@ for (const asset of assets) {
   const updatedAt = asset.updatedAt ?? isoNow()
   const key = keyFor('asset', id)
   const summary = { ...asset, isTemplate: asset.isTemplate !== false }
-  objects.push({ kind: 'asset', id, name: String(asset.name ?? '未命名实体'), key, summary, value: summary, updatedAt })
+  objects.push({ kind: 'asset', id, name: String(asset.name ?? '未命名实体'), key, summary: assetSummary(summary, updatedAt), value: summary, updatedAt })
   const category = Array.isArray(asset.categoryPath) ? asset.categoryPath.filter(Boolean) : []
   for (let index = 1; index <= category.length; index += 1) {
     const prefix = category.slice(0, index)
@@ -51,23 +75,24 @@ for (const [id, rawScene] of Object.entries(database.scenes ?? {})) {
   const name = String(scene.scene?.name ?? scene.name ?? '未命名场景')
   const updatedAt = scene.updatedAt ?? isoNow()
   const key = keyFor('scene', id)
-  const summary = {
+  const value = {
     format: 'moce-scene',
     formatVersion: 1,
     scene: scene.scene,
     sceneAssets: scene.sceneAssets ?? [],
   }
-  objects.push({ kind: 'scene', id, name, key, summary: { scene: summary.scene, sceneAssets: summary.sceneAssets }, value: summary, updatedAt })
+  objects.push({ kind: 'scene', id, name, key, summary: sceneSummary(value, id, updatedAt), value, updatedAt })
 }
 
-let sql = 'BEGIN TRANSACTION;\n'
+// D1's remote file executor does not accept SQLite transaction wrappers.
+// Each statement is applied by D1; the migration is idempotent via upserts.
+let sql = ''
 for (const item of objects) {
   sql += `INSERT INTO objects (owner_id, kind, id, name, blob_key, summary_json, updated_at) VALUES (${quote(owner)}, ${quote(item.kind)}, ${quote(item.id)}, ${quote(item.name)}, ${quote(item.key)}, ${quote(JSON.stringify(item.summary))}, ${quote(item.updatedAt)}) ON CONFLICT(owner_id, kind, id) DO UPDATE SET name = excluded.name, blob_key = excluded.blob_key, summary_json = excluded.summary_json, updated_at = excluded.updated_at;\n`
 }
 for (const category of categories.values()) {
   sql += `INSERT INTO asset_categories (owner_id, path_key, path_json) VALUES (${quote(owner)}, ${quote(category.join('\u001f'))}, ${quote(JSON.stringify(category))}) ON CONFLICT(owner_id, path_key) DO UPDATE SET path_json = excluded.path_json;\n`
 }
-sql += 'COMMIT;\n'
 fs.writeFileSync(sqlPath, sql)
 
 const run = (command, commandArgs) => {
