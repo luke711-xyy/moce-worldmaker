@@ -18,6 +18,18 @@ f 3 7 8 4
 f 5 1 4 8
 `
 
+const zUpStl = ((): string => {
+  const triangles = [
+    [[0, 0, 0], [2, 0, 0], [2, 2, 0]], [[0, 0, 0], [2, 2, 0], [0, 2, 0]],
+    [[0, 0, 4], [2, 2, 4], [2, 0, 4]], [[0, 0, 4], [0, 2, 4], [2, 2, 4]],
+    [[0, 0, 0], [0, 0, 4], [2, 0, 4]], [[0, 0, 0], [2, 0, 4], [2, 0, 0]],
+    [[2, 0, 0], [2, 0, 4], [2, 2, 4]], [[2, 0, 0], [2, 2, 4], [2, 2, 0]],
+    [[2, 2, 0], [2, 2, 4], [0, 2, 4]], [[2, 2, 0], [0, 2, 4], [0, 2, 0]],
+    [[0, 2, 0], [0, 2, 4], [0, 0, 4]], [[0, 2, 0], [0, 0, 4], [0, 0, 0]],
+  ]
+  return `solid z-up-box\n${triangles.map(([a, b, c]) => ` facet normal 0 0 0\n  outer loop\n   vertex ${a.join(' ')}\n   vertex ${b.join(' ')}\n   vertex ${c.join(' ')}\n  endloop\n endfacet`).join('\n')}\nendsolid z-up-box`
+})()
+
 describe('模型转体素', () => {
   it('turns a small OBJ mesh into editable voxels', async () => {
     const asset = await importModelAsVoxelAsset(new File([cubeObj], 'sample.obj'), 'terracotta', { targetSizeMm: 8 })
@@ -45,5 +57,12 @@ describe('模型转体素', () => {
     const result = await importModelAsVoxelAssetWithDiagnostics(new File([openObj], 'open.obj'), { mode: 'solid' })
     expect(result.diagnostics.closedMesh).toBe(false)
     expect(result.diagnostics.warnings.some((warning) => warning.includes('封闭网格'))).toBe(true)
+  })
+
+  it('maps the conventional STL Z-up axis to the editor vertical Y axis', async () => {
+    const result = await importModelAsVoxelAssetWithDiagnostics(new File([zUpStl], 'standing-robot.stl'), { targetSizeMm: 8, mode: 'surface' })
+    expect(result.asset.height).toBe(8)
+    expect(result.asset.width).toBe(4)
+    expect(result.asset.depth).toBe(4)
   })
 })

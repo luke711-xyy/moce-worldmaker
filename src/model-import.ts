@@ -59,6 +59,11 @@ function parseGltf(buffer: ArrayBuffer): Promise<THREE.Object3D> {
 
 function modelFromStl(buffer: ArrayBuffer): THREE.Object3D {
   const geometry = new STLLoader().parse(buffer)
+  // STL files conventionally use Z-up coordinates, while the editor's asset
+  // grid uses Y as the vertical voxel axis.  Convert Z-up to the editor's
+  // Y-up convention before bounds calculation and voxelization; otherwise a
+  // standing model is imported lying on its side.
+  geometry.rotateX(-Math.PI / 2)
   geometry.computeVertexNormals()
   return new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: '#d2a354' }))
 }
@@ -145,13 +150,18 @@ function normalizeTriangles(triangles: ModelTriangle[], targetSizeMm: number): {
   const largest = Math.max(size.x, size.y, size.z, EPSILON)
   const scale = targetSizeMm / largest
   const min = bounds.min.clone()
-  const normalize = (point: THREE.Vector3) => point.clone().sub(min).multiplyScalar(scale)
+  const clean = (value: number) => Math.round(value * 1e9) / 1e9
+  const normalize = (point: THREE.Vector3) => {
+    const normalized = point.clone().sub(min).multiplyScalar(scale)
+    return new THREE.Vector3(clean(normalized.x), clean(normalized.y), clean(normalized.z))
+  }
   const normalized = triangles.map((triangle) => ({ ...triangle, a: normalize(triangle.a), b: normalize(triangle.b), c: normalize(triangle.c) }))
+  const dimension = (value: number) => Math.max(1, Math.ceil(value - 1e-9))
   return {
     triangles: normalized,
-    width: Math.max(1, Math.ceil(size.x * scale)),
-    height: Math.max(1, Math.ceil(size.y * scale)),
-    depth: Math.max(1, Math.ceil(size.z * scale)),
+    width: dimension(size.x * scale),
+    height: dimension(size.y * scale),
+    depth: dimension(size.z * scale),
   }
 }
 
