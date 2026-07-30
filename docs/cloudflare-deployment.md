@@ -59,7 +59,7 @@ npm run deploy:staging
 npm run deploy
 ```
 
-前者部署 `moce-worldmaker-staging`，后者用 production 环境部署 `moce-worldmaker`。
+前者部署 `moce-worldmaker-staging`，后者会先以 `CLOUDFLARE_ENV=production` 构建，再部署构建产物中已经展平为 production 的 `moce-worldmaker` 配置。不要只给 `wrangler deploy` 传 `--env production`；Vite 插件的环境选择发生在构建阶段。
 
 ## Cloudflare Access
 
