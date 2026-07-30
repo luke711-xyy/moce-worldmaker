@@ -14,6 +14,19 @@ import { raycastVoxelDda } from './runtime/voxel-dda'
 import { ChunkMeshWorkerClient } from './runtime/chunk-mesh-client'
 import './styles.css'
 
+declare global {
+  interface Window {
+    __MOCE_PERFORMANCE__?: {
+      renderCount: number
+      drawCalls: number
+      triangles: number
+      geometries: number
+      textures: number
+      lastRenderAt: number
+    }
+  }
+}
+
 type Tool = 'select' | 'brush' | 'erase'
 type CameraViewId = 'front' | 'back' | 'left' | 'right' | 'top' | 'bottom' | 'front-top' | 'front-bottom' | 'back-top' | 'back-bottom' | 'front-left' | 'front-right' | 'back-left' | 'back-right' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'front-top-left' | 'front-top-right' | 'front-bottom-left' | 'front-bottom-right' | 'back-top-left' | 'back-top-right' | 'back-bottom-left' | 'back-bottom-right'
 type CameraView = 'default' | CameraViewId
@@ -3413,6 +3426,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     const observer = new ResizeObserver(resize)
     observer.observe(mount)
     const occlusionRaycaster = new THREE.Raycaster()
+    let renderCount = 0
     const updateAxisGizmo = () => {
       const svg = axisGizmoRef.current
       const currentCamera = cameraRef.current
@@ -3540,6 +3554,20 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         renderer.autoClear = true
         hidden.reverse().forEach(({ object, visible }) => { object.visible = visible })
       }
+      renderCount += 1
+      window.__MOCE_PERFORMANCE__ = {
+        renderCount,
+        drawCalls: renderer.info.render.calls,
+        triangles: renderer.info.render.triangles,
+        geometries: renderer.info.memory.geometries,
+        textures: renderer.info.memory.textures,
+        lastRenderAt: performance.now(),
+      }
+      renderer.domElement.dataset.renderCount = `${renderCount}`
+      renderer.domElement.dataset.drawCalls = `${renderer.info.render.calls}`
+      renderer.domElement.dataset.triangles = `${renderer.info.render.triangles}`
+      renderer.domElement.dataset.geometries = `${renderer.info.memory.geometries}`
+      renderer.domElement.dataset.textures = `${renderer.info.memory.textures}`
       if (controlsAnimating || performance.now() < renderUntil) {
         frame = requestAnimationFrame(animate)
       } else if (interactionQuality) {
@@ -3548,6 +3576,8 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         frame = requestAnimationFrame(animate)
       }
     }
+    if (frame) cancelAnimationFrame(frame)
+    frame = 0
     invalidateRender()
     setReady(true)
     return () => {
