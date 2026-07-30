@@ -129,10 +129,20 @@ type SceneLibraryContextMenuState = {
 } | null
 
 type SceneEntityContextMenuState = {
-  assetId: string
+  entityId: string
   x: number
   y: number
 } | null
+
+type SceneLibraryEntity = {
+  id: string
+  name: string
+  subtitle: string
+  asset: VoxelAsset
+  memberKeys: string[]
+  instanceIds: string[]
+  assemblyIds: string[]
+}
 
 type AssetCategorySaveState = {
   asset: VoxelAsset
@@ -1886,16 +1896,41 @@ function App() {
     setNotice(`已添加实体到当前场景 · 请拖动放置 · ${sceneAsset.name}`)
   }
 
-  const deleteLibrarySceneEntity = async (sceneId: string, assetId: string, name: string) => {
+  const deleteLibrarySceneEntity = async (sceneId: string, entity: SceneLibraryEntity) => {
+    const { name } = entity
     const sceneName = library.scenes.find((scene) => scene.id === sceneId)?.name ?? '当前场景'
     if (!window.confirm(`确定从场景“${sceneName}”删除实体“${name}”？该实体的场景实例也会被删除。`)) return
     try {
       const source = selectedLibrarySceneProject ?? normalizeStoredProject(await loadScene(sceneId))
+      const removedMemberKeys = new Set(entity.memberKeys)
+      const removedInstanceIds = new Set(entity.instanceIds)
+      const removedAssemblyIds = new Set(entity.assemblyIds)
+      const removedVoxelEntityIds = new Set(entity.memberKeys
+        .filter((key) => key.startsWith('voxel:'))
+        .map((key) => key.slice('voxel:'.length)))
       const next: ProjectState = {
         ...source,
-        assets: source.assets.filter((asset) => asset.id !== assetId),
-        instances: source.instances.filter((instance) => instance.assetId !== assetId),
+        instances: source.instances.filter((instance) => !removedInstanceIds.has(instance.id)),
+        customVoxels: source.customVoxels.filter((voxel) => !removedVoxelEntityIds.has(voxelEntityId(voxel))),
+        assemblies: (source.assemblies ?? [])
+          .filter((assembly) => !removedAssemblyIds.has(assembly.id))
+          .map((assembly) => ({
+            ...assembly,
+            memberKeys: assembly.memberKeys.filter((memberKey) => {
+              if (removedMemberKeys.has(memberKey)) return false
+              if (memberKey.startsWith('assembly:')) return !removedAssemblyIds.has(memberKey.slice('assembly:'.length))
+              if (memberKey.startsWith('asset:')) return ![...removedInstanceIds].some((instanceId) => memberKey.startsWith(`asset:${instanceId}:`))
+              if (memberKey.startsWith('voxel:')) return !removedVoxelEntityIds.has(memberKey.slice('voxel:'.length))
+              return true
+            }),
+          }))
+          .filter((assembly) => assembly.memberKeys.length > 0),
       }
+      const removedKeys = new Set([...removedMemberKeys, ...[...removedInstanceIds].map((instanceId) => `asset:${instanceId}`)])
+      next.entityNames = Object.fromEntries(Object.entries(next.entityNames ?? {}).filter(([key]) => !removedKeys.has(key) && ![...removedInstanceIds].some((instanceId) => key.startsWith(`asset:${instanceId}:`))))
+      next.entityNameModes = Object.fromEntries(Object.entries(next.entityNameModes ?? {}).filter(([key]) => next.entityNames?.[key]))
+      next.entityNameSequences = Object.fromEntries(Object.entries(next.entityNameSequences ?? {}).filter(([key]) => next.entityNames?.[key]))
+      next.entityNameParents = Object.fromEntries(Object.entries(next.entityNameParents ?? {}).filter(([key]) => next.entityNames?.[key]))
       await saveScene(sceneId, createSceneFile(next))
       setSelectedLibrarySceneProject(normalizeStoredProject(next))
       await refreshLibrary()
@@ -2806,7 +2841,7 @@ function App() {
         </section>
         <Inspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? selectedEntityParts[0]?.colorOverride : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={Object.fromEntries(project.materials.map((material) => [material.id, material.color]))} copyPreview={copyPreview} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportEntityFile={exportSelectedEntityFile} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => setCopyPreview(null)} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
       </main>
-      {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null) }} onImportScene={() => sceneLibraryImportInputRef.current?.click()} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} />}
+      {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} currentSceneId={sceneFileRef?.libraryId ?? CURRENT_SCENE_ID} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null) }} onImportScene={() => sceneLibraryImportInputRef.current?.click()} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} />}
       {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
       {modelImportDialog && <ModelImportDialog state={modelImportDialog} targetSizeMm={modelImportTargetSize} mode={modelImportMode} preserveParts={modelImportPreserveParts} onTargetSizeChange={setModelImportTargetSize} onModeChange={setModelImportMode} onPreservePartsChange={setModelImportPreserveParts} onStart={runModelImport} onConfirm={confirmModelImport} onCancel={() => setModelImportDialog(null)} />}
       {unsavedDialogOpen && <UnsavedChangesDialog onDecision={handleUnsavedDecision} />}
@@ -3009,12 +3044,56 @@ function VoxelThumbnail({ asset }: { asset: VoxelAsset }) {
   return <div className="thumbnail-scene" aria-label={`${asset.name} 3D 预览`}><VoxelMiniPreview voxels={asset.voxels} asset={asset} /></div>
 }
 
-function SceneLibraryDialog({ library, busy, selectedSceneId, selectedSceneProject, onClose, onImportScene, onLoadScene, onSelectScene, onSaveSceneEntity, onAddSceneEntityToCurrentScene, onDeleteSceneEntity, contextMenu, onContextMenu, onCloseContextMenu, onDuplicateScene, onDeleteScene }: { library: LibraryResponse; busy: boolean; selectedSceneId: string | null; selectedSceneProject: ProjectState | null; onClose: () => void; onImportScene: () => void; onLoadScene: (id: string, name: string) => void; onSelectScene: (id: string, name: string, x: number, y: number) => void; onSaveSceneEntity: (asset: VoxelAsset) => void; onAddSceneEntityToCurrentScene: (asset: VoxelAsset) => void; onDeleteSceneEntity: (sceneId: string, assetId: string, name: string) => void | Promise<void>; contextMenu: SceneLibraryContextMenuState; onContextMenu: (sceneId: string, x: number, y: number) => void; onCloseContextMenu: () => void; onDuplicateScene: (sceneId: string, name: string) => void; onDeleteScene: (sceneId: string, name: string) => void }) {
+function SceneLibraryDialog({ library, busy, currentSceneId, selectedSceneId, selectedSceneProject, onClose, onImportScene, onLoadScene, onSelectScene, onSaveSceneEntity, onAddSceneEntityToCurrentScene, onDeleteSceneEntity, contextMenu, onContextMenu, onCloseContextMenu, onDuplicateScene, onDeleteScene }: { library: LibraryResponse; busy: boolean; currentSceneId: string; selectedSceneId: string | null; selectedSceneProject: ProjectState | null; onClose: () => void; onImportScene: () => void; onLoadScene: (id: string, name: string) => void; onSelectScene: (id: string, name: string, x: number, y: number) => void; onSaveSceneEntity: (asset: VoxelAsset) => void; onAddSceneEntityToCurrentScene: (asset: VoxelAsset) => void; onDeleteSceneEntity: (sceneId: string, entity: SceneLibraryEntity) => void | Promise<void>; contextMenu: SceneLibraryContextMenuState; onContextMenu: (sceneId: string, x: number, y: number) => void; onCloseContextMenu: () => void; onDuplicateScene: (sceneId: string, name: string) => void; onDeleteScene: (sceneId: string, name: string) => void }) {
   const [entityContextMenu, setEntityContextMenu] = useState<SceneEntityContextMenuState>(null)
   const menuCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const contextScene = contextMenu ? library.scenes.find((scene) => scene.id === contextMenu.sceneId) : undefined
-  const selectedAssetIds = new Set(selectedSceneProject?.instances.map((instance) => instance.assetId) ?? [])
-  const selectedSceneEntities = selectedSceneProject?.assets.filter((asset) => selectedAssetIds.has(asset.id)) ?? []
+  const selectedSceneEntities = useMemo<SceneLibraryEntity[]>(() => {
+    if (!selectedSceneProject) return []
+    const parts = sceneEntityParts(selectedSceneProject)
+    const assemblies = selectedSceneProject.assemblies ?? []
+    const childAssemblyIds = new Set(assemblies.flatMap((assembly) => assembly.memberKeys
+      .filter((memberKey) => memberKey.startsWith('assembly:'))
+      .map((memberKey) => memberKey.slice('assembly:'.length))))
+    const assemblyMap = new Map(assemblies.map((assembly) => [assembly.id, assembly]))
+    const collectAssemblyIds = (assemblyId: string, collected = new Set<string>()) => {
+      if (collected.has(assemblyId)) return collected
+      collected.add(assemblyId)
+      assemblyMap.get(assemblyId)?.memberKeys
+        .filter((memberKey) => memberKey.startsWith('assembly:'))
+        .forEach((memberKey) => collectAssemblyIds(memberKey.slice('assembly:'.length), collected))
+      return collected
+    }
+    const makeEntity = (id: string, name: string, subtitle: string, entityParts: SceneEntityPart[], assemblyIds: string[]): SceneLibraryEntity | null => {
+      if (!entityParts.length) return null
+      const firstVoxel = entityParts.flatMap((part) => part.voxels)[0]
+      const color = entityParts.map((part) => part.colorOverride).find(Boolean)
+        ?? (firstVoxel ? materialColorForVoxel(selectedSceneProject, firstVoxel) : '#6c827d')
+      const asset = makeAssetFromSceneParts(`scene-library-${id}`, name, entityParts, color)
+      return {
+        id,
+        name,
+        subtitle,
+        asset,
+        memberKeys: entityParts.map((part) => part.memberKey),
+        instanceIds: [...new Set(entityParts.map((part) => part.instanceId).filter((value): value is string => Boolean(value)))],
+        assemblyIds,
+      }
+    }
+    const entities: SceneLibraryEntity[] = []
+    assemblies.filter((assembly) => !childAssemblyIds.has(assembly.id)).forEach((assembly) => {
+      const assemblyIds = [...collectAssemblyIds(assembly.id)]
+      const entityParts = parts.filter((part) => (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).some((assemblyId) => assemblyIds.includes(assemblyId)))
+      const entity = makeEntity(`assembly:${assembly.id}`, assembly.name?.trim() || '装配体', `装配体 · ${entityParts.length} 个子实体`, entityParts, assemblyIds)
+      if (entity) entities.push(entity)
+    })
+    parts.filter((part) => !(part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).length).forEach((part) => {
+      const name = sceneEntityTreeName(selectedSceneProject, part)
+      const entity = makeEntity(part.id, name, `${part.kind === 'custom' ? '手动体素' : '场景实体'} · ${part.voxels.length} 个体素`, [part], [])
+      if (entity) entities.push(entity)
+    })
+    return entities
+  }, [selectedSceneProject])
   const cancelMenuClose = () => {
     if (menuCloseTimerRef.current) {
       clearTimeout(menuCloseTimerRef.current)
@@ -3037,12 +3116,12 @@ function SceneLibraryDialog({ library, busy, selectedSceneId, selectedSceneProje
     const scene = event.currentTarget.dataset.sceneId ? library.scenes.find((item) => item.id === event.currentTarget.dataset.sceneId) : undefined
     if (scene) onSelectScene(scene.id, scene.name, event.clientX + 8, event.clientY + 8)
   }
-  const openEntityMenu = (event: React.MouseEvent<HTMLButtonElement>, assetId: string) => {
+  const openEntityMenu = (event: React.MouseEvent<HTMLButtonElement>, entityId: string) => {
     event.preventDefault()
     event.stopPropagation()
     cancelMenuClose()
     onCloseContextMenu()
-    setEntityContextMenu({ assetId, x: event.clientX + 8, y: event.clientY + 8 })
+    setEntityContextMenu({ entityId, x: event.clientX + 8, y: event.clientY + 8 })
   }
   const closeMenus = () => {
     cancelMenuClose()
@@ -3055,14 +3134,14 @@ function SceneLibraryDialog({ library, busy, selectedSceneId, selectedSceneProje
       <div className="library-dialog-heading"><div><h2>场景库</h2><p>场景文件与场景实体由当前工程自动管理</p></div><button className="icon-button" aria-label="关闭场景库" onClick={onClose}><X size={17} /></button></div>
       <div className="library-dialog-toolbar"><span>{library.scenes.length} 个场景 · {selectedSceneId ? `${selectedSceneEntities.length} 个实体` : '未选择场景'}</span><div className="library-toolbar-actions"><button className="tiny-button" onClick={onImportScene} disabled={busy}><FolderOpen size={13} /> 导入场景文件</button></div></div>
       <div className="library-columns">
-        <div className="library-column"><div className="library-column-title">场景</div>{library.scenes.length ? library.scenes.map((scene) => <button className={`library-row ${selectedSceneId === scene.id ? 'selected' : ''}`} data-scene-id={scene.id} key={scene.id} onPointerEnter={openSceneMenu} onPointerLeave={scheduleMenuClose} onClick={openSceneMenu} onContextMenu={openSceneMenu}><div><strong>{scene.name}</strong><span>{scene.instanceCount} 个实例 · {scene.customVoxelCount} 个手动体素 · {scene.assetCount} 个依赖实体</span></div><ChevronRight size={15} /></button>) : <div className="empty-panel">尚无场景</div>}</div>
-        <div className="library-column"><div className="library-column-title">实体</div>{!selectedSceneId ? <div className="empty-panel">请选择场景查看实体</div> : selectedSceneEntities.length ? selectedSceneEntities.map((asset) => <button className="library-row" key={asset.id} onClick={(event) => openEntityMenu(event, asset.id)} onContextMenu={(event) => openEntityMenu(event, asset.id)}><div><strong>{asset.name}</strong><span>{asset.style} · {asset.voxels.length} 个体素</span></div><ChevronRight size={15} /></button>) : <div className="empty-panel">当前场景没有可显示的实体</div>}</div>
+        <div className="library-column"><div className="library-column-title">场景</div>{library.scenes.length ? library.scenes.map((scene) => <button className={`library-row ${selectedSceneId === scene.id ? 'selected' : ''}`} data-scene-id={scene.id} key={scene.id} onPointerEnter={openSceneMenu} onPointerLeave={scheduleMenuClose} onClick={openSceneMenu} onContextMenu={openSceneMenu}><div><strong>{scene.name}</strong><span>{scene.instanceCount} 个实例 · {scene.customVoxelCount} 个手动体素 · {scene.assetCount} 个依赖实体</span></div><div className="library-row-actions">{currentSceneId === scene.id && <em>当前场景</em>}<ChevronRight size={15} /></div></button>) : <div className="empty-panel">尚无场景</div>}</div>
+        <div className="library-column"><div className="library-column-title">实体</div>{!selectedSceneId ? <div className="empty-panel">请选择场景查看实体</div> : selectedSceneEntities.length ? selectedSceneEntities.map((entity) => <button className="library-row" key={entity.id} onClick={(event) => openEntityMenu(event, entity.id)} onContextMenu={(event) => openEntityMenu(event, entity.id)}><div><strong>{entity.name}</strong><span>{entity.subtitle}</span></div><ChevronRight size={15} /></button>) : <div className="empty-panel">当前场景没有可显示的实体</div>}</div>
       </div>
       {contextScene && contextMenu && <div className="scene-library-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerEnter={cancelMenuClose} onPointerLeave={scheduleMenuClose} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}><button onClick={() => { closeMenus(); onLoadScene(contextScene.id, contextScene.name) }}>打开场景</button><button onClick={() => { closeMenus(); onDuplicateScene(contextScene.id, contextScene.name) }}>创建副本</button><button className="danger" onClick={() => { closeMenus(); onDeleteScene(contextScene.id, contextScene.name) }}>删除场景</button></div>}
       {entityContextMenu && selectedSceneId && (() => {
-        const entity = selectedSceneEntities.find((asset) => asset.id === entityContextMenu.assetId)
+        const entity = selectedSceneEntities.find((item) => item.id === entityContextMenu.entityId)
         if (!entity) return null
-        return <div className="scene-library-context-menu" style={{ left: entityContextMenu.x, top: entityContextMenu.y }} onPointerEnter={cancelMenuClose} onPointerLeave={scheduleMenuClose} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}><button onClick={() => { closeMenus(); onSaveSceneEntity(entity) }}>保存到当前资产库</button><button onClick={() => { closeMenus(); onAddSceneEntityToCurrentScene(entity) }}>添加到当前场景</button><button className="danger" onClick={() => { closeMenus(); onDeleteSceneEntity(selectedSceneId, entity.id, entity.name) }}>删除该实体</button></div>
+        return <div className="scene-library-context-menu" style={{ left: entityContextMenu.x, top: entityContextMenu.y }} onPointerEnter={cancelMenuClose} onPointerLeave={scheduleMenuClose} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}><button onClick={() => { closeMenus(); onSaveSceneEntity(entity.asset) }}>保存到当前资产库</button><button onClick={() => { closeMenus(); onAddSceneEntityToCurrentScene(entity.asset) }}>添加到当前场景</button><button className="danger" onClick={() => { closeMenus(); onDeleteSceneEntity(selectedSceneId, entity) }}>删除该实体</button></div>
       })()}
       {busy && <div className="library-loading">正在访问场景库…</div>}
     </section>

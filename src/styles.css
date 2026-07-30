@@ -358,6 +358,8 @@ button { border: 0; cursor: pointer; color: inherit; }
 .library-row strong, .library-row span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .library-row strong { margin-bottom: 4px; font-size: 10px; font-weight: 500; }
 .library-row span { color: #6f7c7b; font-family: 'DM Mono', monospace; font-size: 8px; }
+.library-row-actions { display: flex; align-items: center; gap: 7px; flex-shrink: 0; }
+.library-row-actions em { color: #c46b50; font-size: 8px; font-style: normal; white-space: nowrap; }
 .library-loading { padding: 10px 20px; color: #e0a17e; font-size: 9px; border-top: 1px solid #303b3d; }
 .scene-library-context-menu { position: fixed; z-index: 45; min-width: 132px; padding: 4px; background: #273033; border: 1px solid #586466; box-shadow: 0 12px 28px rgba(0,0,0,.4); }
 .scene-library-context-menu button { width: 100%; padding: 7px 9px; color: #e8d8cb; background: transparent; font-size: 9px; text-align: left; }
