@@ -342,15 +342,15 @@ button { border: 0; cursor: pointer; color: inherit; }
 .mini-preview svg { display: block; width: 100%; height: 100%; overflow: visible; }
 .mini-preview-empty, .empty-panel { height: 100%; display: grid; place-items: center; color: #687474; font-size: 9px; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 24px; background: rgba(7,10,11,.68); }
-.library-dialog { width: min(780px, 100%); max-height: min(620px, 90vh); display: flex; flex-direction: column; border: 1px solid #465154; background: #202729; box-shadow: 0 22px 70px rgba(0,0,0,.45); }
+.library-dialog { width: min(780px, 100%); height: min(760px, calc(100vh - 48px)); display: flex; flex-direction: column; border: 1px solid #465154; background: #202729; box-shadow: 0 22px 70px rgba(0,0,0,.45); }
 .library-dialog-heading { display: flex; align-items: flex-start; justify-content: space-between; padding: 18px 20px 14px; border-bottom: 1px solid #303b3d; }
 .library-dialog-heading h2 { margin: 0 0 5px; color: #f1ece2; font-size: 16px; font-weight: 600; }
 .library-dialog-heading p { margin: 0; color: #7f8b8a; font-size: 10px; }
 .library-dialog-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 10px 20px; color: #84908f; font-family: 'DM Mono', monospace; font-size: 9px; border-bottom: 1px solid #303b3d; }
 .library-toolbar-actions { display: flex; align-items: center; gap: 5px; }
-.library-columns { min-height: 260px; display: grid; grid-template-columns: 1fr 1fr; gap: 1px; overflow: auto; background: #303b3d; }
-.library-column { padding: 14px; background: #202729; }
-.library-column-title { margin-bottom: 8px; color: #cbd0ca; font-size: 11px; }
+.library-columns { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 1px; overflow: hidden; background: #303b3d; }
+.library-column { min-height: 0; padding: 14px; overflow-y: auto; overflow-x: hidden; background: #202729; }
+.library-column-title { position: sticky; top: -14px; z-index: 2; margin: -14px -14px 8px; padding: 14px 14px 8px; color: #cbd0ca; background: #202729; font-size: 11px; }
 .library-row { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 8px; color: #aeb8b4; background: #1b2224; border: 1px solid #354043; text-align: left; }
 .library-row + .library-row { margin-top: 5px; }
 .library-row:hover { color: #fff0df; border-color: #ae5b44; background: #2c2523; }
