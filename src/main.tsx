@@ -8,6 +8,7 @@ import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sce
 import { LibraryResponse, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
 import { importModelAsVoxelAssetInWorker, ModelImportResult, VoxelizeMode } from './model-import'
+import { SceneOccupancyIndex } from './runtime/spatial-index'
 import './styles.css'
 
 type Tool = 'select' | 'brush' | 'erase'
@@ -32,7 +33,7 @@ type SelectGesture = {
   lastDeltaX: number
   lastDeltaY: number
   lastDeltaZ: number
-  historyTracked: boolean
+  visualRoots: Array<{ object: THREE.Object3D; startPosition: THREE.Vector3 }>
   moved: boolean
 }
 
@@ -581,6 +582,11 @@ function App() {
   }
 
   const sceneParts = useMemo(() => sceneEntityParts(project), [project])
+  const sceneOccupancy = useMemo(() => SceneOccupancyIndex.fromParts(sceneParts), [sceneParts])
+  const sceneOccupancyRef = useRef(sceneOccupancy)
+  useEffect(() => {
+    sceneOccupancyRef.current = sceneOccupancy
+  }, [sceneOccupancy])
   const lockedPartIds = useMemo(() => new Set(sceneParts.filter((part) => scenePartIsLocked(project, part)).map((part) => part.id)), [project, sceneParts])
   const selectedAssemblyId = selectedId.startsWith('assembly:') ? selectedId.slice('assembly:'.length) : undefined
   const selectedScenePart = sceneParts.find((part) => part.id === selectedId) ?? sceneParts.find((part) => part.instanceId === selectedId)
@@ -976,18 +982,12 @@ function App() {
   const sceneVoxelKey = (voxel: Pick<Voxel, 'x' | 'y' | 'z'>) => `${voxel.x},${voxel.y},${voxel.z}`
 
   const hasAssetCollisionAt = (asset: VoxelAsset, x: number, y: number, z: number, rotation = 0, overrides: VoxelOverride[] = [], excludedInstanceId?: string) => {
-    const currentProject = projectRef.current
     const movingInstance: SceneInstance = { id: 'placement-preview', assetId: asset.id, x, y, z, rotation, style: asset.style, visible: true, overrides }
-    const movingKeys = new Set(resolveInstanceSceneVoxels(movingInstance, asset).map(sceneVoxelKey))
-    if (currentProject.customVoxels.some((voxel) => movingKeys.has(sceneVoxelKey(voxel)))) return true
-    const assetMap = new Map(currentProject.assets.map((item) => [item.id, item]))
-    return currentProject.instances.some((other) => {
-      if (!other.visible || other.id === excludedInstanceId) return false
-      const otherAsset = assetMap.get(other.assetId)
-      if (!otherAsset) return false
-      const otherKeys = new Set(resolveInstanceSceneVoxels(other, otherAsset).map(sceneVoxelKey))
-      return [...movingKeys].some((key) => otherKeys.has(key))
-    })
+    const movingVoxels = resolveInstanceSceneVoxels(movingInstance, asset)
+    const excludedOwnerIds = excludedInstanceId
+      ? sceneEntityParts(projectRef.current).filter((part) => part.instanceId === excludedInstanceId).map((part) => part.id)
+      : []
+    return sceneOccupancyRef.current.collidesProjectVoxels(movingVoxels, excludedOwnerIds)
   }
 
   const hasInstanceCollisionAt = (instanceId: string, x: number, y: number, z: number) => {
@@ -1001,17 +1001,8 @@ function App() {
   }
 
   const hasCustomComponentCollisionAt = (component: Voxel[], deltaX: number, deltaY: number, deltaZ: number) => {
-    const movingKeys = new Set(component.map((voxel) => sceneVoxelKey({ ...voxel, x: voxel.x + deltaX, y: voxel.y + deltaY, z: voxel.z + deltaZ })))
-    const componentKeys = new Set(component.map(sceneVoxelKey))
-    if (projectRef.current.customVoxels.some((voxel) => !componentKeys.has(sceneVoxelKey(voxel)) && movingKeys.has(sceneVoxelKey(voxel)))) return true
-    const assetMap = new Map(projectRef.current.assets.map((asset) => [asset.id, asset]))
-    return projectRef.current.instances.some((instance) => {
-      if (!instance.visible) return false
-      const asset = assetMap.get(instance.assetId)
-      if (!asset) return false
-      const occupiedKeys = new Set(resolveInstanceSceneVoxels(instance, asset).map(sceneVoxelKey))
-      return [...movingKeys].some((key) => occupiedKeys.has(key))
-    })
+    const excludedOwnerIds = [...new Set(component.map((voxel) => `custom:${voxelEntityId(voxel)}`))]
+    return sceneOccupancyRef.current.collidesTranslatedProjectVoxels(component, { x: deltaX, y: deltaY, z: deltaZ }, excludedOwnerIds)
   }
 
   const beginPlacement = (asset: VoxelAsset) => {
@@ -1201,27 +1192,31 @@ function App() {
     return result
   }
 
-  const moveSceneParts = (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number, trackHistory = true): GridMoveResult => {
+  const previewScenePartsMove = (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number): GridMoveResult => {
     if (!deltaX && !deltaY && !deltaZ) return { moved: false, blocked: false, deltaX: 0, deltaY: 0, deltaZ: 0 }
     const movableParts = parts.filter((part) => !scenePartIsLocked(projectRef.current, part))
     if (!movableParts.length) {
-      setNotice('选中的实体已固定 · 请先取消固定')
       return { moved: false, blocked: true, deltaX: 0, deltaY: 0, deltaZ: 0 }
     }
-    const currentParts = sceneEntityParts(projectRef.current)
-    const movingIds = new Set(movableParts.map((part) => part.id))
     const movingVoxels = movableParts.flatMap((part) => part.voxels)
-    const staticVoxels = currentParts.filter((part) => !movingIds.has(part.id)).flatMap((part) => part.voxels)
-    const staticKeys = new Set(staticVoxels.map(sceneVoxelKey))
+    const movingIds = movableParts.map((part) => part.id)
     const bounds = sceneBoundsForProject(projectRef.current)
-    const result = resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => {
+    return resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => {
       const movedVoxels = movingVoxels.map((voxel) => ({ ...voxel, x: voxel.x + stepX, y: voxel.y + stepY, z: voxel.z + stepZ }))
-      return sceneVoxelsWithinBounds(movedVoxels, bounds) && movedVoxels.every((voxel) => !staticKeys.has(sceneVoxelKey(voxel)))
+      return sceneVoxelsWithinBounds(movedVoxels, bounds)
+        && !sceneOccupancyRef.current.collidesTranslatedProjectVoxels(movingVoxels, { x: stepX, y: stepY, z: stepZ }, movingIds)
     })
+  }
+
+  const commitScenePartsMove = (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number): GridMoveResult => {
+    const result = previewScenePartsMove(parts, deltaX, deltaY, deltaZ)
     if (!result.moved) {
       if (result.blocked) setNotice('实体已抵达碰撞边界 · 该方向无法继续')
       return result
     }
+    const movableParts = parts.filter((part) => !scenePartIsLocked(projectRef.current, part))
+    const currentParts = sceneEntityParts(projectRef.current)
+    const movingIds = new Set(movableParts.map((part) => part.id))
     const movingCustomIds = new Set(movableParts.filter((part) => part.kind === 'custom').flatMap((part) => part.voxels.map(voxelEntityId)))
     const assetPartsByInstance = new Map<string, SceneEntityPart[]>()
     movableParts.filter((part) => part.kind === 'asset' && part.instanceId).forEach((part) => {
@@ -1264,7 +1259,7 @@ function App() {
       })
       instance.partOffsets = offsets
     })
-    commitProject(nextProject, trackHistory)
+    commitProject(nextProject, true)
     if (result.blocked) setNotice('已抵达碰撞边界 · 该方向无法继续')
     return result
   }
@@ -2562,7 +2557,7 @@ function App() {
               </div>}
             </div>
           </div>
-          <VoxelViewport project={project} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} tool={tool} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={project.assets.find((asset) => asset.id === placementAssetId) ?? null} placementPreview={placementPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={(value) => setZoomLevel(clampZoomLevel(value))} onCameraApiChange={setCameraControlApi} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onEditInstanceVoxel={editInstanceVoxel} onMoveSceneParts={moveSceneParts} onPlacementMove={updatePlacementPreview} onPlaceAsset={placeAssetAt} onNotice={setNotice} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
+          <VoxelViewport project={project} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} tool={tool} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={project.assets.find((asset) => asset.id === placementAssetId) ?? null} placementPreview={placementPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={(value) => setZoomLevel(clampZoomLevel(value))} onCameraApiChange={setCameraControlApi} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onEditInstanceVoxel={editInstanceVoxel} onPreviewScenePartsMove={previewScenePartsMove} onCommitScenePartsMove={commitScenePartsMove} onPlacementMove={updatePlacementPreview} onPlaceAsset={placeAssetAt} onNotice={setNotice} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
             <SceneTreePanel items={sceneTreeItems} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} expandedAssemblies={expandedAssemblies} contextMenu={treeContextMenu} onToggleExpanded={(assemblyId) => setExpandedAssemblies((current) => ({ ...current, [assemblyId]: !(current[assemblyId] ?? true) }))} onSelect={selectTreeItem} onToggleChecked={toggleTreeChecked} onAssemble={assembleCheckedTreeParts} onDissolve={dissolveSceneAssembly} onEnterEdit={enterEditMode} onRename={renameSceneEntity} onDelete={deleteSceneTreeEntity} onToggleLock={toggleTreeLock} onContextMenu={(targetId, x, y, assemblyId) => { if (!editEntityId || targetId === editEntityId) setTreeContextMenu({ targetId, assemblyId, x, y }) }} />
           </VoxelViewport>
           <div className="viewport-footer">
@@ -3195,7 +3190,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   </div>
 }
 
-function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, tool, activeMaterial, materials, dragAxis, placementAsset, placementPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onSelect, onSelectMultiple, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onEditInstanceVoxel, onMoveSceneParts, onPlacementMove, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; tool: Tool; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; placementPreview: PlacementPreview | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onMoveSceneParts: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number, trackHistory?: boolean) => GridMoveResult; onPlacementMove: (assetId: string, x: number, z: number) => void; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
+function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, tool, activeMaterial, materials, dragAxis, placementAsset, placementPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onSelect, onSelectMultiple, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onEditInstanceVoxel, onPreviewScenePartsMove, onCommitScenePartsMove, onPlacementMove, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; tool: Tool; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; placementPreview: PlacementPreview | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onPlacementMove: (assetId: string, x: number, z: number) => void; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.Camera | null>(null)
@@ -3224,6 +3219,9 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   const toSceneWorld = (x: number, y: number, z: number) => new THREE.Vector3(x, z, y)
 
   const materialMap = useMemo(() => new Map(project.materials.map((material) => [material.id, new THREE.MeshStandardMaterial({ color: material.color, roughness: 0.72, metalness: 0.03 })])), [project.materials])
+  useEffect(() => () => {
+    materialMap.forEach((material) => material.dispose())
+  }, [materialMap])
 
   useEffect(() => {
     const mount = mountRef.current
@@ -3450,6 +3448,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       observer.disconnect()
       controls.removeEventListener('change', reportZoom)
       controls.dispose()
+      disposeThreeObject(scene)
       renderer.dispose()
       dimPlane.geometry.dispose()
       dimPlane.material.dispose()
@@ -3568,6 +3567,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   useEffect(() => {
     const group = groupRef.current
     if (!group) return
+    disposeThreeObject(group)
     group.clear()
     const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
     const currentSceneParts = sceneEntityParts(project)
@@ -3608,6 +3608,9 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       const custom = new THREE.Group()
       custom.name = 'custom-voxels'
       for (const component of voxelComponents(project.customVoxels)) {
+        const componentGroup = new THREE.Group()
+        const componentScenePartId = `custom:${voxelEntityId(component[0])}`
+        componentGroup.userData.scenePartId = componentScenePartId
         const occupied = new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
         const componentColor = project.customColors?.[voxelEntityId(component[0])]
         component.forEach((voxel) => {
@@ -3618,7 +3621,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         mesh.position.copy(toSceneWorld(voxelCenterToWorld(voxel.x), voxelCenterToWorld(voxel.y), voxelCenterToWorld(voxel.z)))
         mesh.userData.customVoxel = voxel
         mesh.userData.customComponentId = voxelComponentId(component)
-        mesh.userData.scenePartId = `custom:${voxelEntityId(voxel)}`
+        mesh.userData.scenePartId = componentScenePartId
         const exposedFaces = exposedVoxelFaces(voxel, occupied)
         mesh.userData.exposedFaces = exposedFaces
         mesh.userData.outerVoxel = exposedFaces.length > 0
@@ -3630,8 +3633,9 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
           meshMaterial.color.multiplyScalar(0.5)
           if (mesh.userData.outerVoxel) addVoxelHighlight(mesh).forEach((part) => { part.visible = false })
         }
-        custom.add(mesh)
+        componentGroup.add(mesh)
         })
+        custom.add(componentGroup)
       }
       group.add(custom)
     }
@@ -3729,6 +3733,42 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
 
   const hitSelectionPartIds = (part: SceneEntityPart) => {
     return [part.id]
+  }
+
+  const collectDragVisualRoots = (partIds: string[]) => {
+    const group = groupRef.current
+    if (!group) return []
+    const requestedIds = new Set(partIds)
+    const roots: SelectGesture['visualRoots'] = []
+    group.traverse((object) => {
+      const scenePartId = object.userData.scenePartId as string | undefined
+      const parentPartId = object.parent?.userData.scenePartId as string | undefined
+      if (!scenePartId || !requestedIds.has(scenePartId) || parentPartId === scenePartId || object.userData.selectionGlow) return
+      roots.push({ object, startPosition: object.position.clone() })
+    })
+    return roots
+  }
+
+  const setDragVisualOffset = (gesture: SelectGesture, deltaX: number, deltaY: number, deltaZ: number) => {
+    const worldOffset = new THREE.Vector3(voxelToWorld(deltaX), voxelToWorld(deltaZ), voxelToWorld(deltaY))
+    gesture.visualRoots.forEach(({ object, startPosition }) => {
+      object.position.copy(startPosition).add(worldOffset)
+    })
+  }
+
+  const resetDragVisuals = (gesture: SelectGesture) => {
+    gesture.visualRoots.forEach(({ object, startPosition }) => {
+      object.position.copy(startPosition)
+    })
+  }
+
+  const commitDragGesture = (gesture: SelectGesture) => {
+    if (!gesture.moved || (!gesture.lastDeltaX && !gesture.lastDeltaY && !gesture.lastDeltaZ)) {
+      resetDragVisuals(gesture)
+      return
+    }
+    const result = onCommitScenePartsMove(gesture.parts, gesture.lastDeltaX, gesture.lastDeltaY, gesture.lastDeltaZ)
+    if (!result.moved) resetDragVisuals(gesture)
   }
 
   const belongsToEditEntity = (object: THREE.Object3D) => {
@@ -3864,7 +3904,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
           lastDeltaX: 0,
           lastDeltaY: 0,
           lastDeltaZ: 0,
-          historyTracked: false,
+          visualRoots: collectDragVisualRoots(movableParts.map((part) => part.id)),
           moved: false,
         }
       } else {
@@ -3925,26 +3965,21 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         if (!verticalPoint) return
         const deltaZ = worldToVoxel(verticalPoint.z - selectGesture.startVerticalZ)
         if (deltaZ === selectGesture.lastDeltaY) return
-        const moveResult = onMoveSceneParts(parts, 0, deltaZ - selectGesture.lastDeltaY, 0, !selectGesture.historyTracked)
-        if (moveResult.moved) {
-          selectGesture.parts = parts.map((part) => ({ ...part, voxels: part.voxels.map((voxel) => ({ ...voxel, y: voxel.y + moveResult.deltaY })) }))
-          selectGesture.lastDeltaY += moveResult.deltaY
-          selectGesture.historyTracked = true
-        }
+        const moveResult = onPreviewScenePartsMove(parts, 0, deltaZ, 0)
+        selectGesture.lastDeltaX = moveResult.deltaX
+        selectGesture.lastDeltaY = moveResult.deltaY
+        selectGesture.lastDeltaZ = moveResult.deltaZ
+        setDragVisualOffset(selectGesture, moveResult.deltaX, moveResult.deltaY, moveResult.deltaZ)
         return
       }
       const deltaX = worldToVoxel(context.floorPoint!.x - selectGesture.startGroundX)
       const deltaZ = worldToVoxel(context.floorPoint!.y - selectGesture.startGroundY)
       if (deltaX === selectGesture.lastDeltaX && deltaZ === selectGesture.lastDeltaZ) return
-      const stepX = deltaX - selectGesture.lastDeltaX
-      const stepZ = deltaZ - selectGesture.lastDeltaZ
-      const moveResult = onMoveSceneParts(parts, stepX, 0, stepZ, !selectGesture.historyTracked)
-      if (moveResult.moved) {
-        selectGesture.parts = parts.map((part) => ({ ...part, voxels: part.voxels.map((voxel) => ({ ...voxel, x: voxel.x + moveResult.deltaX, z: voxel.z + moveResult.deltaZ })) }))
-        selectGesture.lastDeltaX += moveResult.deltaX
-        selectGesture.lastDeltaZ += moveResult.deltaZ
-        selectGesture.historyTracked = true
-      }
+      const moveResult = onPreviewScenePartsMove(parts, deltaX, 0, deltaZ)
+      selectGesture.lastDeltaX = moveResult.deltaX
+      selectGesture.lastDeltaY = moveResult.deltaY
+      selectGesture.lastDeltaZ = moveResult.deltaZ
+      setDragVisualOffset(selectGesture, moveResult.deltaX, moveResult.deltaY, moveResult.deltaZ)
       return
     }
     const gesture = editGestureRef.current
@@ -3980,6 +4015,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     const selectGesture = selectGestureRef.current
     if (selectGesture?.pointerId === event.pointerId) {
       selectGestureRef.current = null
+      commitDragGesture(selectGesture)
       if (controlsRef.current) controlsRef.current.enabled = true
       return
     }
@@ -3995,6 +4031,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     boxSelectGestureRef.current = null
     setSceneSelectionBox(null)
     editGestureRef.current = null
+    if (selectGestureRef.current) resetDragVisuals(selectGestureRef.current)
     selectGestureRef.current = null
     if (controlsRef.current) controlsRef.current.enabled = true
   }
@@ -4021,7 +4058,9 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         return
       }
       if (selectGestureRef.current?.pointerId === event.pointerId) {
+        const selectGesture = selectGestureRef.current
         selectGestureRef.current = null
+        commitDragGesture(selectGesture)
         if (controlsRef.current) controlsRef.current.enabled = true
         return
       }
@@ -4032,6 +4071,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       boxSelectGestureRef.current = null
       setSceneSelectionBox(null)
       editGestureRef.current = null
+      if (selectGestureRef.current) resetDragVisuals(selectGestureRef.current)
       selectGestureRef.current = null
       if (controlsRef.current) controlsRef.current.enabled = true
     }
