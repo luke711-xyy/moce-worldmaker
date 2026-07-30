@@ -558,6 +558,15 @@ function normalizeAssetCategoryPaths(paths: string[][], assets: VoxelAsset[] = [
   return [...merged.values()]
 }
 
+function sceneNameFromFileName(fileName: string, fallback = '未命名场景'): string {
+  const baseName = fileName
+    .split(/[\\/]/)
+    .pop()
+    ?.replace(/\.(?:moceworld|json)$/i, '')
+    .trim()
+  return baseName || fallback
+}
+
 function assetCategoryTreeFromAssetsAndPaths(assets: VoxelAsset[], paths: string[][]): AssetCategoryNode[] {
   return buildAssetCategoryTree([
     ...paths.map((path) => ({ path })),
@@ -2104,6 +2113,10 @@ function App() {
   const importSceneFileToLibrary = async (file: File) => {
     try {
       const sceneFile = parseSceneFileText(await file.text())
+      // The filename is the name the user explicitly chose when exporting or
+      // renaming a portable scene file.  The embedded scene name can still be
+      // the original project name, so use the filename for the library label.
+      sceneFile.scene.name = sceneNameFromFileName(file.name, sceneFile.scene.name)
       const result = await importScene(sceneFile)
       await refreshLibrary()
       setNotice(`已导入场景到场景库 · ${result.scene.name}`)
