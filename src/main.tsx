@@ -557,6 +557,7 @@ function App() {
   const [assetCategoryPaths, setAssetCategoryPaths] = useState<string[][]>(() => collectAssetCategoryPaths(makeDefaultProject().assets))
   const [assetCategorySave, setAssetCategorySave] = useState<AssetCategorySaveState>(null)
   const persistenceReadyRef = useRef(false)
+  const interactionActiveRef = useRef(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sceneLibraryImportInputRef = useRef<HTMLInputElement>(null)
   const entityFileInputRef = useRef<HTMLInputElement>(null)
@@ -864,6 +865,7 @@ function App() {
   useEffect(() => {
     if (!persistenceReadyRef.current) return
     let idleId: number | null = null
+    let timer = 0
     const persist = () => {
       try {
         saveScene(CURRENT_SCENE_ID, createSceneFile(project)).then(() => setPersistenceStatus('saved')).catch(() => setPersistenceStatus('offline'))
@@ -871,10 +873,15 @@ function App() {
         setPersistenceStatus('offline')
       }
     }
-    const timer = window.setTimeout(() => {
+    const schedulePersist = () => {
+      if (interactionActiveRef.current) {
+        timer = window.setTimeout(schedulePersist, 250)
+        return
+      }
       idleId = window.requestIdleCallback ? window.requestIdleCallback(persist, { timeout: 1500 }) : null
       if (idleId === null) persist()
-    }, 1200)
+    }
+    timer = window.setTimeout(schedulePersist, 1200)
     return () => {
       window.clearTimeout(timer)
       if (idleId !== null && window.cancelIdleCallback) window.cancelIdleCallback(idleId)
@@ -1059,6 +1066,7 @@ function App() {
   }
 
   const beginPlacement = (asset: VoxelAsset) => {
+    interactionActiveRef.current = true
     setPlacementAssetId(asset.id)
     setNotice(`正在拖动资产 · ${asset.name}`)
   }
@@ -1100,6 +1108,7 @@ function App() {
   }
 
   const endPlacement = () => {
+    interactionActiveRef.current = false
     setPlacementAssetId(null)
   }
 
@@ -2608,7 +2617,7 @@ function App() {
               </div>}
             </div>
           </div>
-          <VoxelViewport project={project} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} tool={tool} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={project.assets.find((asset) => asset.id === placementAssetId) ?? null} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={(value) => setZoomLevel(clampZoomLevel(value))} onCameraApiChange={setCameraControlApi} onRaycastVoxel={raycastSceneVoxel} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onEditInstanceVoxel={editInstanceVoxel} onPreviewScenePartsMove={previewScenePartsMove} onCommitScenePartsMove={commitScenePartsMove} onPreviewPlacement={previewPlacementAt} onPlaceAsset={placeAssetAt} onNotice={setNotice} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
+          <VoxelViewport project={project} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} tool={tool} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={project.assets.find((asset) => asset.id === placementAssetId) ?? null} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={(value) => setZoomLevel(clampZoomLevel(value))} onCameraApiChange={setCameraControlApi} onInteractionChange={(active) => { interactionActiveRef.current = active }} onRaycastVoxel={raycastSceneVoxel} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onEditInstanceVoxel={editInstanceVoxel} onPreviewScenePartsMove={previewScenePartsMove} onCommitScenePartsMove={commitScenePartsMove} onPreviewPlacement={previewPlacementAt} onPlaceAsset={placeAssetAt} onNotice={setNotice} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
             <SceneTreePanel items={sceneTreeItems} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} expandedAssemblies={expandedAssemblies} contextMenu={treeContextMenu} onToggleExpanded={(assemblyId) => setExpandedAssemblies((current) => ({ ...current, [assemblyId]: !(current[assemblyId] ?? true) }))} onSelect={selectTreeItem} onToggleChecked={toggleTreeChecked} onAssemble={assembleCheckedTreeParts} onDissolve={dissolveSceneAssembly} onEnterEdit={enterEditMode} onRename={renameSceneEntity} onDelete={deleteSceneTreeEntity} onToggleLock={toggleTreeLock} onContextMenu={(targetId, x, y, assemblyId) => { if (!editEntityId || targetId === editEntityId) setTreeContextMenu({ targetId, assemblyId, x, y }) }} />
           </VoxelViewport>
           <div className="viewport-footer">
@@ -3263,7 +3272,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   </div>
 }
 
-function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, tool, activeMaterial, materials, dragAxis, placementAsset, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onRaycastVoxel, onSelect, onSelectMultiple, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onEditInstanceVoxel, onPreviewScenePartsMove, onCommitScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; tool: Tool; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
+function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, tool, activeMaterial, materials, dragAxis, placementAsset, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSelect, onSelectMultiple, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onEditInstanceVoxel, onPreviewScenePartsMove, onCommitScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; tool: Tool; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.Camera | null>(null)
@@ -3942,7 +3951,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     pointerRef.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
     pointerRef.current.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
     raycasterRef.current.setFromCamera(pointerRef.current, camera)
-    const rawHits = groupRef.current ? raycasterRef.current.intersectObject(groupRef.current, true) : []
+    const rawHits = tool !== 'select' && !placementAsset && groupRef.current ? raycasterRef.current.intersectObject(groupRef.current, true) : []
     const hits = editEntityId ? rawHits.filter((item) => belongsToEditEntity(item.object)) : rawHits
     const voxelHit = onRaycastVoxel(raycasterRef.current.ray.origin, raycasterRef.current.ray.direction)
     const floor = scene.getObjectByName('editing-floor')
@@ -4203,6 +4212,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
           visualRoots: collectDragVisualRoots(movableParts.map((part) => part.id)),
           moved: false,
         }
+        onInteractionChange(true)
       } else {
         boxSelectGestureRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, currentX: event.clientX, currentY: event.clientY, additive: event.metaKey || event.shiftKey, moved: false }
         setSceneSelectionBox(null)
@@ -4315,6 +4325,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     if (selectGesture?.pointerId === event.pointerId) {
       selectGestureRef.current = null
       commitDragGesture(selectGesture)
+      onInteractionChange(false)
       if (controlsRef.current) controlsRef.current.enabled = true
       return
     }
@@ -4332,6 +4343,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     editGestureRef.current = null
     if (selectGestureRef.current) resetDragVisuals(selectGestureRef.current)
     selectGestureRef.current = null
+    onInteractionChange(false)
     if (controlsRef.current) controlsRef.current.enabled = true
   }
 
@@ -4360,6 +4372,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         const selectGesture = selectGestureRef.current
         selectGestureRef.current = null
         commitDragGesture(selectGesture)
+        onInteractionChange(false)
         if (controlsRef.current) controlsRef.current.enabled = true
         return
       }
@@ -4372,6 +4385,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       editGestureRef.current = null
       if (selectGestureRef.current) resetDragVisuals(selectGestureRef.current)
       selectGestureRef.current = null
+      onInteractionChange(false)
       if (controlsRef.current) controlsRef.current.enabled = true
     }
     window.addEventListener('pointerup', finishWindowPointer)
