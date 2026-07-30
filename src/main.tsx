@@ -1024,6 +1024,36 @@ function App() {
       }
     }
     if (editEntityId && !editingCustomId) {
+      const editingAssetPart = currentParts.find((part) => part.kind === 'asset' && (part.id === editEntityId || part.instanceId === editEntityId))
+      if (editingAssetPart) {
+        const entityId = `voxel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        let targetAssemblyId = editingAssetPart.assemblyIds?.[0]
+        updateProject((draft) => {
+          if (draft.customVoxels.some((item) => item.x === voxel.x && item.y === voxel.y && item.z === voxel.z)) return
+          draft.customVoxels.push({ ...voxel, entityId })
+          if (!targetAssemblyId) {
+            const assemblyNumber = Math.max(1, draft.assemblySequence ?? 1)
+            draft.assemblySequence = assemblyNumber + 1
+            targetAssemblyId = `assembly-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+            draft.assemblies = [...(draft.assemblies ?? []), {
+              id: targetAssemblyId,
+              name: `装配体 ${assemblyNumber}`,
+              nameMode: 'auto',
+              sequence: assemblyNumber,
+              memberKeys: [editingAssetPart.memberKey],
+            }]
+          }
+          const assembly = (draft.assemblies ?? []).find((item) => item.id === targetAssemblyId)
+          if (assembly && !assembly.memberKeys.includes(`voxel:${entityId}`)) assembly.memberKeys.push(`voxel:${entityId}`)
+        })
+        if (targetAssemblyId) {
+          setEditEntityId(`assembly:${targetAssemblyId}`)
+          setCheckedTreePartIds([`assembly:${targetAssemblyId}`])
+        }
+        setSelectedId(`custom:${entityId}`)
+        setNotice(`已在当前编辑实体上新建子实体 · ${voxel.x}, ${voxel.y}, ${voxel.z}`)
+        return
+      }
       setNotice('当前处于实体编辑模式 · 请点击当前实体表面或相邻面进行修改')
       return
     }
@@ -4237,16 +4267,24 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     }
     if (tool !== 'brush' && tool !== 'erase') return
     // Edit mode changes rendering emphasis, not physical occupancy. If a
-    // different entity is the first visible voxel hit, stop here instead of
-    // filtering it out and falling through to the edited entity or the floor.
-    // This keeps hidden geometry from being painted through.
+    // different entity is the first visible voxel hit, use that entity only as
+    // a collision surface. The new voxel is still handed to the current edit
+    // target, so editing can build against another entity without modifying
+    // the entity that was clicked.
     if (editEntityId) {
       const firstVoxelHit = rawHits.find((item) => {
         const hasVoxel = Boolean(intersectionVoxel(item, 'instanceVoxels', 'instanceVoxel') || intersectionVoxel(item, 'customVoxels', 'customVoxel'))
         return hasVoxel
       })
       if (firstVoxelHit && !belongsToEditEntity(firstVoxelHit.object)) {
-        onNotice('当前实体被其他实体遮挡 · 绘制不能穿透已有实体')
+        const hitVoxel = intersectionVoxel(firstVoxelHit, 'instanceVoxels', 'instanceVoxel')
+          ?? intersectionVoxel(firstVoxelHit, 'customVoxels', 'customVoxel')
+        if (tool === 'brush' && hitVoxel && firstVoxelHit.face) {
+          const displayNormal = firstVoxelHit.face.normal.clone().transformDirection(firstVoxelHit.object.matrixWorld)
+          onAddVoxel(adjacentVoxel(hitVoxel, { x: displayNormal.x, y: displayNormal.z, z: displayNormal.y }, activeMaterial))
+        } else {
+          onNotice('擦除模式只能作用于当前编辑实体 · 其他实体仍会阻挡穿透')
+        }
         return
       }
     }
