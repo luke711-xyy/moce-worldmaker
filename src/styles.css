@@ -311,6 +311,13 @@ button { border: 0; cursor: pointer; color: inherit; }
 .copy-preview-axis { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
 .copy-preview-axis button { min-height: 24px; min-width: 28px; padding: 0 6px; color: #8f9b98; background: #1a2022; border: 1px solid #384244; font-size: 8px; }
 .copy-preview-axis button:hover, .copy-preview-axis button.active { color: #fff0df; background: #a9523c; border-color: #c46b50; }
+.copy-preview-gap { display: flex; align-items: center; gap: 4px; margin-top: 7px; color: #b8c1bd; font-size: 8px; }
+.copy-preview-gap span { margin-right: auto; }
+.copy-preview-gap button { min-width: 23px; min-height: 22px; padding: 0 4px; color: #8f9b98; background: #1a2022; border: 1px solid #384244; font-size: 8px; }
+.copy-preview-gap button:hover:not(:disabled) { color: #fff0df; border-color: #ae5b44; background: #2c2523; }
+.copy-preview-gap button:disabled { opacity: .4; cursor: default; }
+.copy-preview-gap strong { min-width: 22px; color: #fff0df; text-align: center; font: 8px 'DM Mono', monospace; }
+.copy-preview-gap em { color: #7f8b88; font-style: normal; }
 .copy-preview-status { margin-top: 6px; color: #9bb6a4; font-size: 8px; line-height: 1.5; }
 .copy-preview-status.invalid { color: #e58a76; }
 .copy-preview-generate { width: 100%; min-height: 25px; margin-top: 7px; color: #fff0df; background: #a9523c; border-color: #c46b50; font-size: 8px; }

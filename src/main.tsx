@@ -83,6 +83,7 @@ type CopyDirectionAxis = 'x' | 'y' | 'z'
 
 type CopyPreviewState = {
   count: number
+  gap: number
   axis: CopyDirectionAxis
   sign: 1 | -1
   sourceInstanceIds: string[]
@@ -2179,7 +2180,7 @@ function App() {
     return parts.filter((part) => (part.instanceId && sourceInstanceIds.includes(part.instanceId)) || (part.kind === 'custom' && sourceCustomIds.includes(part.partId)))
   }
 
-  const createCopyPreview = (sourceProject: ProjectState, sourceParts: SceneEntityPart[], count: number, axis: CopyDirectionAxis, sign: 1 | -1): CopyPreviewState | null => {
+  const createCopyPreview = (sourceProject: ProjectState, sourceParts: SceneEntityPart[], count: number, gap: number, axis: CopyDirectionAxis, sign: 1 | -1): CopyPreviewState | null => {
     if (!sourceParts.length) return null
     const sourceVoxels = sourceParts.flatMap((part) => part.voxels)
     if (!sourceVoxels.length) return null
@@ -2195,7 +2196,7 @@ function App() {
     // vertical, so translate the user choice before calculating the offset.
     const dataAxis: Record<CopyDirectionAxis, 'x' | 'y' | 'z'> = { x: 'x', y: 'z', z: 'y' }
     const selectedDataAxis = dataAxis[axis]
-    const distance = dimensions[selectedDataAxis] + 1
+    const distance = dimensions[selectedDataAxis] + gap
     const offsets = Array.from({ length: count }, (_, index) => ({ x: selectedDataAxis === 'x' ? sign * distance * (index + 1) : 0, y: selectedDataAxis === 'y' ? sign * distance * (index + 1) : 0, z: selectedDataAxis === 'z' ? sign * distance * (index + 1) : 0 }))
     const bounds = sceneBoundsForProject(sourceProject)
     const inBounds = (voxel: Voxel) => voxel.x >= -Math.floor(bounds.x / 2) && voxel.x < Math.ceil(bounds.x / 2) && voxel.z >= -Math.floor(bounds.y / 2) && voxel.z < Math.ceil(bounds.y / 2) && voxel.y >= 0 && voxel.y < bounds.z
@@ -2212,7 +2213,7 @@ function App() {
       }
     }
     const previewAsset = makeAssetFromSceneParts('copy-preview', '复制预览', sourceParts, '#6c827d', '#d2a354', (voxel, part) => scenePartVoxelDisplayColor(sourceProject, part, voxel))
-    return { count, axis, sign, sourceInstanceIds: [...new Set(sourceParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))], sourceCustomIds: [...new Set(sourceParts.filter((part) => part.kind === 'custom').map((part) => part.partId))], asset: previewAsset, origin: { x: (minX + dimensions.x / 2) * VOXEL_WORLD_SIZE, y: (minZ + dimensions.z / 2) * VOXEL_WORLD_SIZE, z: minY * VOXEL_WORLD_SIZE }, offsets, valid: !invalidReason, invalidReason }
+    return { count, gap, axis, sign, sourceInstanceIds: [...new Set(sourceParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))], sourceCustomIds: [...new Set(sourceParts.filter((part) => part.kind === 'custom').map((part) => part.partId))], asset: previewAsset, origin: { x: (minX + dimensions.x / 2) * VOXEL_WORLD_SIZE, y: (minZ + dimensions.z / 2) * VOXEL_WORLD_SIZE, z: minY * VOXEL_WORLD_SIZE }, offsets, valid: !invalidReason, invalidReason }
   }
 
   const startDuplicatePreview = (requestedCount: number) => {
@@ -2222,7 +2223,7 @@ function App() {
       return
     }
     const count = Math.max(1, Math.min(99, Math.round(requestedCount) || 1))
-    const preview = createCopyPreview(sourceProject, selectedEntityParts.map((part) => structuredClone(part)), count, 'x', 1)
+    const preview = createCopyPreview(sourceProject, selectedEntityParts.map((part) => structuredClone(part)), count, 1, 'x', 1)
     setCopyPreview(preview)
     setNotice(preview?.valid ? '请选择复制方向，确认后生成实体' : preview?.invalidReason === 'collision' ? '默认复制方向会与已有实体重叠，请选择其他方向' : '默认复制方向超出场景边界，请选择其他方向')
   }
@@ -2231,14 +2232,22 @@ function App() {
     if (!copyPreview) return
     const sourceProject = projectRef.current
     const sourceParts = copySourceParts(sourceProject, copyPreview.sourceInstanceIds, copyPreview.sourceCustomIds)
-    setCopyPreview(createCopyPreview(sourceProject, sourceParts, copyPreview.count, axis, sign))
+    setCopyPreview(createCopyPreview(sourceProject, sourceParts, copyPreview.count, copyPreview.gap, axis, sign))
+  }
+
+  const changeCopyPreviewGap = (gap: number) => {
+    if (!copyPreview) return
+    const sourceProject = projectRef.current
+    const sourceParts = copySourceParts(sourceProject, copyPreview.sourceInstanceIds, copyPreview.sourceCustomIds)
+    const nextGap = Math.max(0, Math.min(99, Math.round(gap)))
+    setCopyPreview(createCopyPreview(sourceProject, sourceParts, copyPreview.count, nextGap, copyPreview.axis, copyPreview.sign))
   }
 
   const confirmDuplicate = () => {
     if (!copyPreview) return
     const sourceProject = projectRef.current
     const sourceParts = copySourceParts(sourceProject, copyPreview.sourceInstanceIds, copyPreview.sourceCustomIds)
-    const currentPreview = createCopyPreview(sourceProject, sourceParts, copyPreview.count, copyPreview.axis, copyPreview.sign)
+    const currentPreview = createCopyPreview(sourceProject, sourceParts, copyPreview.count, copyPreview.gap, copyPreview.axis, copyPreview.sign)
     if (!currentPreview?.valid) {
       setNotice(currentPreview?.invalidReason === 'collision' ? '复制被拒绝：会与已有实体重叠' : '复制被拒绝：会超出场景边界')
       setCopyPreview(currentPreview)
@@ -2265,7 +2274,13 @@ function App() {
           const newId = `${oldId}-copy-${copyBatchId}-${copyIndex + 1}`
           instanceMap.set(oldId, newId); clonedInstanceIds.push(newId)
           const translateWorld = (value: number, delta: number) => Number((value + voxelToWorld(delta)).toFixed(3))
-          draft.instances.push({ ...structuredClone(current), id: newId, x: translateWorld(current.x, offset.x), z: translateWorld(current.z, offset.z), y: translateWorld(current.y ?? 0, offset.y), overrides: structuredClone(current.overrides ?? []), partOffsets: structuredClone(current.partOffsets ?? {}) })
+          const clonedInstance = { ...structuredClone(current), id: newId, overrides: structuredClone(current.overrides ?? []), partOffsets: structuredClone(current.partOffsets ?? {}) }
+          // Horizontal copies must preserve the source elevation exactly. Only
+          // a user-selected editor Z offset is allowed to change instance.y.
+          clonedInstance.x = translateWorld(current.x, offset.x)
+          clonedInstance.z = translateWorld(current.z, offset.z)
+          if (offset.y !== 0) clonedInstance.y = translateWorld(current.y ?? 0, offset.y)
+          draft.instances.push(clonedInstance)
         })
         currentPreview.sourceCustomIds.forEach((oldId) => {
           const newId = `${oldId}-copy-${copyBatchId}-${copyIndex + 1}`
@@ -2685,7 +2700,7 @@ function App() {
             <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { setZoomLevel((value) => clampZoomLevel(value - (value > 100 ? 50 : 10))); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${((zoomLevel - MIN_ZOOM_LEVEL) / (MAX_ZOOM_LEVEL - MIN_ZOOM_LEVEL)) * 100}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { setZoomLevel((value) => clampZoomLevel(value + (value >= 100 ? 50 : 10))); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{Math.round(zoomLevel)}%</span></div>
           </div>
         </section>
-        <Inspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? selectedEntityParts[0]?.colorOverride : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={Object.fromEntries(project.materials.map((material) => [material.id, material.color]))} copyPreview={copyPreview} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportEntityFile={exportSelectedEntityFile} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => setCopyPreview(null)} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} />
+        <Inspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? selectedEntityParts[0]?.colorOverride : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={Object.fromEntries(project.materials.map((material) => [material.id, material.color]))} copyPreview={copyPreview} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportEntityFile={exportSelectedEntityFile} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => setCopyPreview(null)} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} />
       </main>
       {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null) }} onImportScene={() => sceneLibraryImportInputRef.current?.click()} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} />}
       {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
@@ -2958,7 +2973,7 @@ function ToolButton({ icon, label, description, active, onClick }: { icon: React
   return <button className={`tool-button ${active ? 'active' : ''}`} data-tooltip={description} aria-label={label} onClick={onClick} title={description}>{icon}</button>
 }
 
-function Inspector({ entityName, source, selectedAsset, selectedPart, selectedParts, editEntityId, position, transformEditable, selectedColor, previewColor, previewVoxelColors, previewMaterialColors, copyPreview, onChangeTransform, onChangeColor, onMirror, onRotate, onExport, onExportEntityFile, onDuplicate, onChangeCopyDirection, onConfirmDuplicate, onCancelDuplicate, onDelete, onResetTransform, onSaveAsAsset }: { entityName: string; source: string; selectedAsset?: VoxelAsset; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; editEntityId: string | null; position: number[]; transformEditable: boolean; selectedColor: string; previewColor?: string; previewVoxelColors: Record<string, string>; previewMaterialColors: Record<string, string>; copyPreview: CopyPreviewState | null; onChangeTransform: (axis: number, value: number) => void; onChangeColor: (color: string) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onExport: () => void; onExportEntityFile: () => void; onDuplicate: (count: number) => void; onChangeCopyDirection: (axis: CopyDirectionAxis, sign: 1 | -1) => void; onConfirmDuplicate: () => void; onCancelDuplicate: () => void; onDelete: () => void; onResetTransform: () => void; onSaveAsAsset: () => void }) {
+function Inspector({ entityName, source, selectedAsset, selectedPart, selectedParts, editEntityId, position, transformEditable, selectedColor, previewColor, previewVoxelColors, previewMaterialColors, copyPreview, onChangeTransform, onChangeColor, onMirror, onRotate, onExport, onExportEntityFile, onDuplicate, onChangeCopyDirection, onChangeCopyGap, onConfirmDuplicate, onCancelDuplicate, onDelete, onResetTransform, onSaveAsAsset }: { entityName: string; source: string; selectedAsset?: VoxelAsset; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; editEntityId: string | null; position: number[]; transformEditable: boolean; selectedColor: string; previewColor?: string; previewVoxelColors: Record<string, string>; previewMaterialColors: Record<string, string>; copyPreview: CopyPreviewState | null; onChangeTransform: (axis: number, value: number) => void; onChangeColor: (color: string) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onExport: () => void; onExportEntityFile: () => void; onDuplicate: (count: number) => void; onChangeCopyDirection: (axis: CopyDirectionAxis, sign: 1 | -1) => void; onChangeCopyGap: (gap: number) => void; onConfirmDuplicate: () => void; onCancelDuplicate: () => void; onDelete: () => void; onResetTransform: () => void; onSaveAsAsset: () => void }) {
   const [copyCount, setCopyCount] = useState(1)
   const [mirrorAxis, setMirrorAxis] = useState<'x' | 'y' | 'z'>('x')
   const [rotateAxis, setRotateAxis] = useState<'x' | 'y' | 'z'>('z')
@@ -2984,7 +2999,7 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
       <div className="section-heading"><span>实体操作</span><span className="instance-label">{selectedParts.length} 个实体</span></div>
       <div className="entity-actions">
         <div className="entity-transform-operation copy-entity-row"><span className="copy-entity-label">复制实体</span><div className="copy-count-choice"><button disabled={Boolean(copyPreview)} onClick={() => setCopyCount((value) => Math.max(1, value - 1))} title="减少复制数量">−</button><span className="copy-entity-count">{copyPreview?.count ?? copyCount}</span><button disabled={Boolean(copyPreview)} onClick={() => setCopyCount((value) => Math.min(99, value + 1))} title="增加复制数量">＋</button></div>{copyPreview ? <button className="operation-confirm copy-confirm" onClick={onCancelDuplicate}>取消</button> : <button className="operation-confirm copy-confirm" onClick={() => onDuplicate(copyCount)}>预览</button>}</div>
-        {copyPreview && <div className="copy-preview-panel"><div className="copy-preview-title">复制方向</div><div className="copy-preview-axis">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={copyPreview.axis === axis ? 'active' : ''} onClick={() => onChangeCopyDirection(axis, copyPreview.sign)}>{axis.toUpperCase()}</button>)}<button className={copyPreview.sign === 1 ? 'active' : ''} onClick={() => onChangeCopyDirection(copyPreview.axis, 1)}>正向 +</button><button className={copyPreview.sign === -1 ? 'active' : ''} onClick={() => onChangeCopyDirection(copyPreview.axis, -1)}>负向 −</button></div><div className={`copy-preview-status ${copyPreview.valid ? 'valid' : 'invalid'}`}>{copyPreview.valid ? `预览有效 · 将生成 ${copyPreview.count} 个复制实体` : copyPreview.invalidReason === 'collision' ? '预览与已有实体重叠，无法生成' : '预览超出场景边界，无法生成'}</div><button className="operation-confirm copy-preview-generate" onClick={onConfirmDuplicate}>生成复制实体</button></div>}
+        {copyPreview && <div className="copy-preview-panel"><div className="copy-preview-title">复制方向</div><div className="copy-preview-axis">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={copyPreview.axis === axis ? 'active' : ''} onClick={() => onChangeCopyDirection(axis, copyPreview.sign)}>{axis.toUpperCase()}</button>)}<button className={copyPreview.sign === 1 ? 'active' : ''} onClick={() => onChangeCopyDirection(copyPreview.axis, 1)}>正向 +</button><button className={copyPreview.sign === -1 ? 'active' : ''} onClick={() => onChangeCopyDirection(copyPreview.axis, -1)}>负向 −</button></div><div className="copy-preview-gap"><span>实体间隔</span><button disabled={copyPreview.gap <= 0} onClick={() => onChangeCopyGap(copyPreview.gap - 1)}>−</button><strong>{copyPreview.gap}</strong><button disabled={copyPreview.gap >= 99} onClick={() => onChangeCopyGap(copyPreview.gap + 1)}>＋</button><em>体素</em></div><div className={`copy-preview-status ${copyPreview.valid ? 'valid' : 'invalid'}`}>{copyPreview.valid ? `预览有效 · 将生成 ${copyPreview.count} 个复制实体` : copyPreview.invalidReason === 'collision' ? '预览与已有实体重叠，无法生成' : '预览超出场景边界，无法生成'}</div><button className="operation-confirm copy-preview-generate" onClick={onConfirmDuplicate}>生成复制实体</button></div>}
         <div className="entity-transform-operation"><span>镜像实体</span><div className="axis-choice">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={mirrorAxis === axis ? 'active' : ''} onClick={() => setMirrorAxis(axis)}>{axis.toUpperCase()}</button>)}</div><button className="operation-confirm" onClick={() => onMirror(mirrorAxis)}>执行</button></div>
         <div className="entity-transform-operation"><span>旋转实体</span><div className="axis-choice">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={rotateAxis === axis ? 'active' : ''} onClick={() => setRotateAxis(axis)}>{axis.toUpperCase()}</button>)}</div><div className="degree-choice">{([90, 180, 270] as const).map((degrees) => <button key={degrees} className={rotateDegrees === degrees ? 'active' : ''} onClick={() => setRotateDegrees(degrees)}>{degrees}°</button>)}</div><button className="operation-confirm" onClick={() => onRotate(rotateAxis, rotateDegrees)}>执行</button></div>
         <button onClick={onSaveAsAsset}><Save size={14} /> 保存为模板实体</button>
