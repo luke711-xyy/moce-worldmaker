@@ -147,6 +147,11 @@ type ModelImportDialogState = {
   busy: boolean
 }
 
+type PendingEntityImport = {
+  asset: VoxelAsset
+  entityCount: number
+}
+
 type SceneFileRef = {
   name: string
   libraryId?: string
@@ -569,6 +574,7 @@ function App() {
   const [dragAxis, setDragAxis] = useState<'horizontal' | 'vertical'>('horizontal')
   const [editEntityId, setEditEntityId] = useState<string | null>(null)
   const [placementAssetId, setPlacementAssetId] = useState<string | null>(null)
+  const [pendingEntityImport, setPendingEntityImport] = useState<PendingEntityImport | null>(null)
   const [zoomLevel, setZoomLevel] = useState(100)
   const [cameraControlApi, setCameraControlApi] = useState<CameraControlApi | null>(null)
   const [copyPreview, setCopyPreview] = useState<CopyPreviewState | null>(null)
@@ -1150,6 +1156,7 @@ function App() {
 
   const beginPlacement = (asset: VoxelAsset) => {
     interactionActiveRef.current = true
+    setPendingEntityImport(null)
     setPlacementAssetId(asset.id)
     setNotice(`正在拖动资产 · ${asset.name}`)
   }
@@ -1193,6 +1200,7 @@ function App() {
   const endPlacement = () => {
     interactionActiveRef.current = false
     setPlacementAssetId(null)
+    setPendingEntityImport(null)
   }
 
   const assetWithinSceneBoundary = (asset: VoxelAsset, x: number, y: number, z: number) => {
@@ -1202,14 +1210,14 @@ function App() {
   }
 
   const previewPlacementAt = (assetId: string, x: number, z: number): PlacementPreview | null => {
-    const asset = projectRef.current.assets.find((item) => item.id === assetId)
+    const asset = projectRef.current.assets.find((item) => item.id === assetId) ?? (pendingEntityImport?.asset.id === assetId ? pendingEntityImport.asset : undefined)
     if (!asset) return null
     const position = { assetId, x: snapAssetOrigin(x, asset.width), y: 0, z: snapAssetOrigin(z, asset.depth) }
     return { ...position, valid: assetWithinSceneBoundary(asset, position.x, position.y, position.z) && !hasAssetCollisionAt(asset, position.x, position.y, position.z) }
   }
 
   const placeAssetAt = (assetId: string, x: number, z: number) => {
-    const asset = projectRef.current.assets.find((item) => item.id === assetId)
+    const asset = projectRef.current.assets.find((item) => item.id === assetId) ?? (pendingEntityImport?.asset.id === assetId ? pendingEntityImport.asset : undefined)
     if (!asset) return
     const position = { x: snapAssetOrigin(x, asset.width), y: 0, z: snapAssetOrigin(z, asset.depth) }
     const outsideBoundary = !assetWithinSceneBoundary(asset, position.x, position.y, position.z)
@@ -1587,92 +1595,83 @@ function App() {
       return
     }
     const batchId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    const localAssets: VoxelAsset[] = []
-    const existingNames = [...projectRef.current.assets]
-    const entityToAssetId = new Map<string, string>()
-    const entityToInstanceId = new Map<string, string>()
+    const existingAssets = projectRef.current.assets
+    const importedNames: VoxelAsset[] = []
+    const entityPartIds = new Map<string, string>()
+    const minGrid = {
+      x: Math.min(...portable.entities.map((entity) => entity.gridPosition.x)),
+      y: Math.min(...portable.entities.map((entity) => entity.gridPosition.y)),
+      z: Math.min(...portable.entities.map((entity) => entity.gridPosition.z)),
+    }
+    const sourceVoxels: Voxel[] = []
+    const partVoxels: Record<string, Voxel[]> = {}
     portable.entities.forEach((entity, index) => {
-      const asset = structuredClone(entity.asset)
-      const assetId = `entity-import-${batchId}-${index + 1}`
-      asset.id = assetId
-      asset.name = uniqueAssetName([...existingNames, ...localAssets], entity.name || asset.name)
-      asset.source = '普通实体文件导入'
-      asset.isTemplate = false
-      asset.categoryPath = undefined
-      localAssets.push(asset)
-      entityToAssetId.set(entity.id, assetId)
-      entityToInstanceId.set(entity.id, `instance-${batchId}-${index + 1}`)
+      const sourceName = entity.name || entity.asset.name || '导入实体'
+      const uniqueName = uniqueAssetName([...existingAssets, ...importedNames], sourceName)
+      importedNames.push({ ...structuredClone(entity.asset), id: `entity-name-${index}`, name: uniqueName })
+      const partId = uniqueName
+      entityPartIds.set(entity.id, partId)
+      const entityColor = entity.asset.templateColor ?? entity.asset.color
+      const voxels = entity.asset.voxels.map((voxel) => ({
+        x: voxel.x + entity.gridPosition.x - minGrid.x,
+        y: voxel.y + entity.gridPosition.y - minGrid.y,
+        z: voxel.z + entity.gridPosition.z - minGrid.z,
+        // Portable ordinary entities may carry a whole-entity template color.
+        // Flatten it into voxel colors before combining the import preview so
+        // one imported entity cannot recolor its siblings.
+        materialId: entity.asset.templateColor
+          ? entityColor
+          : voxel.materialId === 'primary'
+            ? entity.asset.color
+            : voxel.materialId === 'accent'
+              ? entity.asset.accent
+              : voxel.materialId,
+      }))
+      partVoxels[partId] = voxels
+      sourceVoxels.push(...voxels)
     })
-    const baseInstances = portable.entities.map((entity) => ({
-      id: entityToInstanceId.get(entity.id)!,
-      assetId: entityToAssetId.get(entity.id)!,
-      x: voxelToWorld(entity.gridPosition.x),
-      y: voxelToWorld(entity.gridPosition.y),
-      z: voxelToWorld(entity.gridPosition.z),
-      rotation: 0,
-      style: entity.asset.style,
-      visible: true,
-      overrides: [],
-    }))
-    const existingAssetMap = new Map(projectRef.current.assets.map((asset) => [asset.id, asset]))
-    const existingVoxelKeys = new Set(projectRef.current.customVoxels.map(sceneVoxelKey))
-    projectRef.current.instances.forEach((instance) => {
-      const asset = existingAssetMap.get(instance.assetId)
-      if (asset) resolveInstanceSceneVoxels(instance, asset).forEach((voxel) => existingVoxelKeys.add(sceneVoxelKey(voxel)))
-    })
-    const candidateFits = (offsetX: number, offsetZ: number) => {
-      const candidateInstances = baseInstances.map((instance) => ({ ...instance, x: snapWorld(instance.x + offsetX), z: snapWorld(instance.z + offsetZ) }))
-      const occupied = new Set(existingVoxelKeys)
-      for (const instance of candidateInstances) {
-        const asset = localAssets.find((item) => item.id === instance.assetId)
-        if (!asset) return false
-        const voxels = resolveInstanceSceneVoxels(instance, asset)
-        if (!sceneVoxelsWithinBounds(voxels, sceneBoundsForProject(projectRef.current))) return false
-        for (const voxel of voxels) {
-          const key = sceneVoxelKey(voxel)
-          if (occupied.has(key)) return false
-          occupied.add(key)
-        }
-      }
-      return true
-    }
-    let placementOffset = { x: 0, z: 0 }
-    let foundPlacement = candidateFits(0, 0)
-    for (let radius = 1; !foundPlacement && radius <= 40; radius += 1) {
-      const candidates = [
-        { x: radius, z: 0 }, { x: -radius, z: 0 }, { x: 0, z: radius }, { x: 0, z: -radius },
-        { x: radius, z: radius }, { x: -radius, z: radius }, { x: radius, z: -radius }, { x: -radius, z: -radius },
-      ]
-      const candidate = candidates.find((item) => candidateFits(voxelToWorld(item.x), voxelToWorld(item.z)))
-      if (candidate) {
-        placementOffset = { x: voxelToWorld(candidate.x), z: voxelToWorld(candidate.z) }
-        foundPlacement = true
-      }
-    }
-    if (!foundPlacement) {
-      setNotice('普通实体导入失败 · 场景没有足够的无碰撞空间')
-      return
-    }
-    const instances = baseInstances.map((instance) => ({ ...instance, x: snapWorld(instance.x + placementOffset.x), z: snapWorld(instance.z + placementOffset.z) }))
-    const assemblyIdMap = new Map(portable.assemblies.map((assembly) => [assembly.id, `assembly-${batchId}-${assembly.id}`]))
-    const assemblies: SceneAssembly[] = portable.assemblies.map((assembly) => ({
+    const maxX = Math.max(...sourceVoxels.map((voxel) => voxel.x))
+    const maxY = Math.max(...sourceVoxels.map((voxel) => voxel.y))
+    const maxZ = Math.max(...sourceVoxels.map((voxel) => voxel.z))
+    const assemblyIdMap = new Map(portable.assemblies.map((assembly) => [assembly.id, `import-assembly-${batchId}-${assembly.id}`]))
+    const assemblyNodes: AssetAssembly['nodes'] = portable.assemblies.map((assembly) => ({
       id: assemblyIdMap.get(assembly.id)!,
-      name: assembly.name,
-      nameMode: assembly.nameMode,
-      memberKeys: assembly.memberKeys.map((memberKey) => {
-        if (memberKey.startsWith('entity:')) return `asset:${entityToInstanceId.get(memberKey.slice('entity:'.length)) ?? memberKey}`
-        if (memberKey.startsWith('assembly:')) return `assembly:${assemblyIdMap.get(memberKey.slice('assembly:'.length)) ?? memberKey.slice('assembly:'.length)}`
-        return memberKey
+      name: assembly.name ?? '装配体',
+      memberKeys: assembly.memberKeys.flatMap((memberKey) => {
+        if (memberKey.startsWith('entity:')) {
+          const partId = entityPartIds.get(memberKey.slice('entity:'.length))
+          return partId ? [`part:${partId}`] : []
+        }
+        if (memberKey.startsWith('assembly:')) {
+          const childId = assemblyIdMap.get(memberKey.slice('assembly:'.length))
+          return childId ? [`assembly:${childId}`] : []
+        }
+        return []
       }),
     }))
-    updateProject((draft) => {
-      draft.assets.push(...localAssets)
-      draft.instances.push(...instances)
-      draft.assemblies = [...(draft.assemblies ?? []), ...assemblies]
-    })
-    setCheckedTreePartIds([])
-    setSelectedId(assemblies[0] ? `assembly:${assemblies[0].id}` : instances[0]?.id ?? '')
-    setNotice(`已导入普通实体文件 · ${localAssets.length} 个实体${placementOffset.x || placementOffset.z ? ' · 已自动寻找空闲位置' : ''}`)
+    const childAssemblyIds = new Set(portable.assemblies.flatMap((assembly) => assembly.memberKeys.filter((key) => key.startsWith('assembly:')).map((key) => key.slice('assembly:'.length))))
+    const rootAssembly = portable.assemblies.find((assembly) => !childAssemblyIds.has(assembly.id))
+    const previewAsset: VoxelAsset = {
+      id: `entity-import-preview-${batchId}`,
+      name: uniqueAssetName([...existingAssets, ...importedNames], portable.name || '导入实体'),
+      style: '导入实体',
+      kind: 'imported',
+      color: importedNames[0]?.color ?? '#6c827d',
+      accent: importedNames[0]?.accent ?? '#d2a354',
+      width: maxX + 1,
+      depth: maxZ + 1,
+      height: maxY + 1,
+      parts: Object.keys(partVoxels),
+      partVoxels,
+      voxels: sourceVoxels,
+      source: '普通实体文件导入预览',
+      isTemplate: false,
+      assembly: rootAssembly && assemblyNodes.length ? { name: rootAssembly.name ?? '装配体', rootId: assemblyIdMap.get(rootAssembly.id)!, nodes: assemblyNodes } : undefined,
+    }
+    setPendingEntityImport({ asset: previewAsset, entityCount: portable.entities.length })
+    setPlacementAssetId(previewAsset.id)
+    interactionActiveRef.current = true
+    setNotice(`已导入普通实体文件 · ${portable.entities.length} 个实体 · 请在场景中手动选择放置位置`)
   }
 
   const importEntityFileFromDisk = async (file: File) => {
@@ -2768,7 +2767,7 @@ function App() {
               </div>}
             </div>
           </div>
-          <VoxelViewport project={project} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} tool={tool} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={(value) => setZoomLevel(clampZoomLevel(value))} onCameraApiChange={setCameraControlApi} onInteractionChange={(active) => { interactionActiveRef.current = active }} onRaycastVoxel={raycastSceneVoxel} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onCancelPendingEntityOperation={() => setCopyPreview(null)} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onEditInstanceVoxel={editInstanceVoxel} onPreviewScenePartsMove={previewScenePartsMove} onCommitScenePartsMove={commitScenePartsMove} onPreviewPlacement={previewPlacementAt} onPlaceAsset={placeAssetAt} onNotice={setNotice} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
+          <VoxelViewport project={project} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} tool={tool} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={(value) => setZoomLevel(clampZoomLevel(value))} onCameraApiChange={setCameraControlApi} onInteractionChange={(active) => { interactionActiveRef.current = active }} onRaycastVoxel={raycastSceneVoxel} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onCancelPendingEntityOperation={() => setCopyPreview(null)} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onEditInstanceVoxel={editInstanceVoxel} onPreviewScenePartsMove={previewScenePartsMove} onCommitScenePartsMove={commitScenePartsMove} onPreviewPlacement={previewPlacementAt} onPlaceAsset={placeAssetAt} onNotice={setNotice} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
             <SceneTreePanel items={sceneTreeItems} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} expandedAssemblies={expandedAssemblies} contextMenu={treeContextMenu} onToggleExpanded={(assemblyId) => setExpandedAssemblies((current) => ({ ...current, [assemblyId]: !(current[assemblyId] ?? true) }))} onSelect={selectTreeItem} onToggleChecked={toggleTreeChecked} onAssemble={assembleCheckedTreeParts} onDissolve={dissolveSceneAssembly} onEnterEdit={enterEditMode} onRename={renameSceneEntity} onDelete={deleteSceneTreeEntity} onToggleLock={toggleTreeLock} onContextMenu={(targetId, x, y, assemblyId) => { if (!editEntityId || targetId === editEntityId) setTreeContextMenu({ targetId, assemblyId, x, y }) }} />
           </VoxelViewport>
           <div className="viewport-footer">
