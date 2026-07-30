@@ -3610,7 +3610,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   const pointerRef = useRef(new THREE.Vector2())
   const controlsRef = useRef<OrbitControls | null>(null)
   const onZoomChangeRef = useRef(onZoomChange)
-  const zoomReportFrameRef = useRef<number | null>(null)
+  const zoomReportTimerRef = useRef<number | null>(null)
   const cameraZoomLevelRef = useRef(100)
   const cameraFitZoomRef = useRef(1)
   const invalidateRenderRef = useRef<(durationMs?: number) => void>(() => {})
@@ -3639,11 +3639,17 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   const toSceneWorld = (x: number, y: number, z: number) => new THREE.Vector3(x, z, y)
 
   const scheduleZoomReport = () => {
-    if (zoomReportFrameRef.current !== null) return
-    zoomReportFrameRef.current = requestAnimationFrame(() => {
-      zoomReportFrameRef.current = null
+    if (zoomReportTimerRef.current !== null) window.clearTimeout(zoomReportTimerRef.current)
+    zoomReportTimerRef.current = window.setTimeout(() => {
+      zoomReportTimerRef.current = null
       onZoomChangeRef.current(cameraZoomLevelRef.current)
-    })
+    }, 120)
+  }
+
+  const reportZoomImmediately = () => {
+    if (zoomReportTimerRef.current !== null) window.clearTimeout(zoomReportTimerRef.current)
+    zoomReportTimerRef.current = null
+    onZoomChangeRef.current(cameraZoomLevelRef.current)
   }
 
   // This is the single imperative zoom path. Wheel/trackpad input and the
@@ -3734,7 +3740,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     cameras.perspective.updateProjectionMatrix()
   }
 
-  const setCameraZoomLevel = (requestedZoom: number, force = false) => {
+  const setCameraZoomLevel = (requestedZoom: number, force = false, reportImmediately = false) => {
     const cameras = camerasRef.current
     const controls = controlsRef.current
     const nextZoom = clampZoomLevel(requestedZoom)
@@ -3755,7 +3761,8 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     cameras.perspective.fov = 38
     cameras.perspective.updateProjectionMatrix()
     controls.update()
-    scheduleZoomReport()
+    if (reportImmediately) reportZoomImmediately()
+    else scheduleZoomReport()
     invalidateRenderRef.current(220)
   }
 
@@ -4002,7 +4009,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     setReady(true)
     return () => {
       cancelAnimationFrame(frame)
-      if (zoomReportFrameRef.current !== null) cancelAnimationFrame(zoomReportFrameRef.current)
+      if (zoomReportTimerRef.current !== null) window.clearTimeout(zoomReportTimerRef.current)
       invalidateRenderRef.current = () => {}
       observer.disconnect()
       renderer.domElement.removeEventListener('wheel', applyWheelZoom)
@@ -4107,7 +4114,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     cameras.perspective.updateProjectionMatrix()
     controls.target.copy(target)
     controls.update()
-    scheduleZoomReport()
+    reportZoomImmediately()
     invalidateRenderRef.current(220)
   }
 
@@ -4130,8 +4137,8 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         // it must not depend on the next animation frame being delivered.
         onZoomChangeRef.current(100)
       },
-      zoomIn: () => setCameraZoomLevel(cameraZoomLevelRef.current + (cameraZoomLevelRef.current >= 100 ? 50 : 10)),
-      zoomOut: () => setCameraZoomLevel(cameraZoomLevelRef.current - (cameraZoomLevelRef.current > 100 ? 50 : 10)),
+      zoomIn: () => setCameraZoomLevel(cameraZoomLevelRef.current + (cameraZoomLevelRef.current >= 100 ? 50 : 10), false, true),
+      zoomOut: () => setCameraZoomLevel(cameraZoomLevelRef.current - (cameraZoomLevelRef.current > 100 ? 50 : 10), false, true),
     })
     return () => onCameraApiChange(null)
   }, [onCameraApiChange, project.sceneBounds?.x, project.sceneBounds?.y, project.sceneBounds?.z, project.sceneSizeCm])
