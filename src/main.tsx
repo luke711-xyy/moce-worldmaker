@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, CircleUserRound, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
@@ -189,6 +189,10 @@ function clampZoomLevel(value: number): number {
   return Math.max(MIN_ZOOM_LEVEL, Math.min(MAX_ZOOM_LEVEL, value))
 }
 
+function formatVoxelSizeMm(value: number): string {
+  return normalizeVoxelSizeMm(value).toString()
+}
+
 function scenePartBaseName(project: ProjectState, part: SceneEntityPart): string {
   if (part.kind === 'custom') return part.label ?? '手动体素实体'
   const instance = part.instanceId ? project.instances.find((item) => item.id === part.instanceId) : undefined
@@ -232,6 +236,7 @@ function normalizeStoredProject(loaded: ProjectState): ProjectState {
   const defaultAssets = new Map(makeDefaultProject().assets.map((asset) => [asset.id, asset]))
   const normalized: ProjectState = {
     ...loaded,
+    voxelSizeMm: normalizeVoxelSizeMm(loaded.voxelSizeMm),
     sceneBounds: sceneBoundsForProject(loaded),
     assets: (loaded.assets ?? []).map((asset) => ({
       ...asset,
@@ -590,6 +595,8 @@ function App() {
   const [showBoundary, setShowBoundary] = useState(true)
   const [boundaryOpen, setBoundaryOpen] = useState(false)
   const [boundaryDraft, setBoundaryDraft] = useState<SceneBounds>(() => sceneBoundsForProject(makeDefaultProject()))
+  const [voxelSizeOpen, setVoxelSizeOpen] = useState(false)
+  const [voxelSizeDraft, setVoxelSizeDraft] = useState<number>(() => makeDefaultProject().voxelSizeMm)
   const [dragAxis, setDragAxis] = useState<'horizontal' | 'vertical'>('horizontal')
   const [editEntityId, setEditEntityId] = useState<string | null>(null)
   const [placementAssetId, setPlacementAssetId] = useState<string | null>(null)
@@ -664,6 +671,14 @@ function App() {
     setBoundaryDraft(next)
     setBoundaryOpen(false)
     setNotice(`已应用场地边界 · XY ${next.x} × ${next.y} · Z ${next.z} 体素`)
+  }
+
+  const applyVoxelSize = (value = voxelSizeDraft) => {
+    const next = normalizeVoxelSizeMm(value)
+    updateProject((draft) => { draft.voxelSizeMm = next })
+    setVoxelSizeDraft(next)
+    setVoxelSizeOpen(false)
+    setNotice(`已设置体素边长 · ${formatVoxelSizeMm(next)} mm · 将在 STL 导出时生效`)
   }
 
   const sceneParts = useMemo(() => sceneEntityParts(project), [project])
@@ -1722,7 +1737,7 @@ function App() {
     }
     const exportName = selectedAsset?.name ?? selectedEntityParts[0]?.label ?? '选中实体'
     const exportAsset = makeAssetFromSceneParts(`export-${Date.now()}`, exportName, selectedEntityParts, selectedAsset?.color ?? '#6c827d', selectedAsset?.accent ?? '#d2a354')
-    const { stl, diagnostics } = makeStlWithDiagnostics(exportAsset)
+    const { stl, diagnostics } = makeStlWithDiagnostics(exportAsset, projectRef.current.voxelSizeMm)
     const blob = new Blob([stl], { type: 'model/stl' })
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
@@ -1740,7 +1755,7 @@ function App() {
       return
     }
     const sceneAsset = makeAssetFromSceneParts(`scene-export-${Date.now()}`, projectRef.current.name || '莫测造境场景', allParts, '#6c827d', '#d2a354')
-    const { stl, diagnostics } = makeStlWithDiagnostics(sceneAsset)
+    const { stl, diagnostics } = makeStlWithDiagnostics(sceneAsset, projectRef.current.voxelSizeMm)
     const blob = new Blob([stl], { type: 'model/stl' })
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
@@ -2814,15 +2829,25 @@ function App() {
         <input ref={sceneLibraryImportInputRef} className="hidden-input" type="file" accept=".json,.moceworld" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) void importSceneFileToLibrary(file) }} />
       </header>
 
-      <main className={`workspace ${assetSidebarCollapsed ? 'asset-sidebar-collapsed' : ''}`} onClick={() => { if (treeContextMenu) setTreeContextMenu(null); if (assetContextMenu) setAssetContextMenu(null); if (assetCategoryContextMenu) setAssetCategoryContextMenu(null); if (sceneLibraryContextMenu) setSceneLibraryContextMenu(null) }}>
+      <main className={`workspace ${assetSidebarCollapsed ? 'asset-sidebar-collapsed' : ''}`} onClick={() => { if (treeContextMenu) setTreeContextMenu(null); if (assetContextMenu) setAssetContextMenu(null); if (assetCategoryContextMenu) setAssetCategoryContextMenu(null); if (sceneLibraryContextMenu) setSceneLibraryContextMenu(null); if (voxelSizeOpen) setVoxelSizeOpen(false) }}>
         <AssetSidebar assets={filteredAssets} categoryPaths={assetCategoryPaths} query={query} setQuery={setQuery} selectedAssetIds={selectedAssetIds} onToggleAssetSelection={(assetId) => setSelectedAssetIds((current) => current.includes(assetId) ? current.filter((id) => id !== assetId) : [...current, assetId])} onClearAssetSelection={() => setSelectedAssetIds([])} onExportAssets={exportTemplateAssets} collapsed={assetSidebarCollapsed} onToggleCollapsed={() => setAssetSidebarCollapsed((value) => !value)} onNotice={setNotice} onBeginPlacement={beginPlacement} onEndPlacement={endPlacement} onContextMenu={(assetId, x, y) => { setAssetContextMenu({ assetId, x, y }); setAssetCategoryContextMenu(null) }} contextMenu={assetContextMenu} categoryContextMenu={assetCategoryContextMenu} onCategoryContextMenu={(path, x, y) => { setAssetCategoryContextMenu({ path, x, y }); setAssetContextMenu(null) }} onCreateCategory={createAssetCategory} onDeleteCategory={deleteAssetCategory} onRenameAsset={renameTemplateAsset} onDuplicateAsset={duplicateTemplateAsset} onDeleteAsset={deleteTemplateAsset} onChangeAssetColor={changeTemplateAssetColor} />
         <section className="viewport-panel">
           <div className="viewport-toolbar">
             <div className="view-toggle">{(['正交', '透视'] as const).map((mode) => <button key={mode} className={viewMode === mode ? 'active' : ''} onClick={() => { setViewMode(mode); setNotice(`已切换视图 · ${mode}`) }}>{mode}</button>)}</div>
             <div className="toolbar-spacer" />
-            <button className="micro-control" onClick={() => setNotice('当前体素单位 · 1 mm')}><Grid3X3 size={14} /> 1 mm体素 <ChevronDown size={13} /></button>
+            <div className="voxel-size-control-wrap" onClick={(event) => event.stopPropagation()}>
+              <button className={`micro-control ${voxelSizeOpen ? 'active' : ''}`} onClick={() => { setVoxelSizeDraft(project.voxelSizeMm); setVoxelSizeOpen((value) => !value); setBoundaryOpen(false) }}><Grid3X3 size={14} /> {formatVoxelSizeMm(project.voxelSizeMm)} mm体素 <ChevronDown size={13} /></button>
+              {voxelSizeOpen && <div className="voxel-size-popover" onClick={(event) => event.stopPropagation()}>
+                <div className="boundary-popover-title">体素边长</div>
+                <div className="boundary-popover-subtitle">每个体素导出 STL 后代表的实际边长</div>
+                <div className="voxel-size-options">{[0.25, 0.5, 1, 2, 3, 5].map((value) => <button key={value} className={voxelSizeDraft === value ? 'active' : ''} onClick={() => { setVoxelSizeDraft(value); applyVoxelSize(value) }}>{formatVoxelSizeMm(value)} mm</button>)}</div>
+                <label className="boundary-field voxel-size-field"><span>自定义</span><input type="number" min={0.1} max={100} step={0.1} value={voxelSizeDraft} onChange={(event) => setVoxelSizeDraft(Number(event.target.value) || 0.1)} /><em>mm</em></label>
+                <div className="boundary-limit">允许范围：0.1–100 mm</div>
+                <div className="boundary-actions"><button onClick={() => { setVoxelSizeDraft(project.voxelSizeMm); setVoxelSizeOpen(false) }}>取消</button><button className="primary" onClick={() => applyVoxelSize()}>应用</button></div>
+              </div>}
+            </div>
             <div className="boundary-control-wrap">
-              <button className={`micro-control ${boundaryOpen ? 'active' : ''}`} onClick={() => { setBoundaryDraft(currentSceneBounds); setBoundaryOpen((value) => !value) }}><SlidersHorizontal size={14} /> 边界 <ChevronDown size={13} /></button>
+              <button className={`micro-control ${boundaryOpen ? 'active' : ''}`} onClick={() => { setBoundaryDraft(currentSceneBounds); setBoundaryOpen((value) => !value); setVoxelSizeOpen(false) }}><SlidersHorizontal size={14} /> 边界 <ChevronDown size={13} /></button>
               {boundaryOpen && <div className="boundary-popover" onClick={(event) => event.stopPropagation()}>
                 <div className="boundary-popover-title">场景边界</div>
                 <div className="boundary-popover-subtitle">按体素设置地面尺寸与 Z 轴限高</div>
@@ -3587,6 +3612,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   const onZoomChangeRef = useRef(onZoomChange)
   const zoomReportFrameRef = useRef<number | null>(null)
   const cameraZoomLevelRef = useRef(100)
+  const cameraFitZoomRef = useRef(1)
   const invalidateRenderRef = useRef<(durationMs?: number) => void>(() => {})
   const perspectiveBaseDistanceRef = useRef(Math.sqrt(16 ** 2 + 18 ** 2 + 18 ** 2))
   const editRenderStateRef = useRef<{ active: boolean; partIds: Set<string> }>({ active: false, partIds: new Set() })
@@ -3623,7 +3649,92 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   // This is the single imperative zoom path. Wheel/trackpad input and the
   // footer buttons both call it; React only receives the coalesced value for
   // the percentage ruler and never drives the camera during a gesture.
-  const setCameraZoomLevel = (requestedZoom: number) => {
+  const sceneViewTarget = (bounds: SceneBounds) => new THREE.Vector3(0, 0, bounds.z * VOXEL_WORLD_SIZE / 2)
+
+  // Keep the orthographic camera outside the scene volume. Orthographic
+  // projection does not need a distance for framing, but it still has a near
+  // clipping plane. A fixed camera position therefore enters a large scene
+  // (for example a 1000 mm boundary) and clips the ground plane into a
+  // diagonal polygon even when the projected corners fit the viewport.
+  const cameraDistanceForBounds = (bounds: SceneBounds) => {
+    const width = bounds.x * VOXEL_WORLD_SIZE
+    const depth = bounds.y * VOXEL_WORLD_SIZE
+    const height = bounds.z * VOXEL_WORLD_SIZE
+    return Math.max(28, Math.hypot(width, depth, height) * 1.2 + 2)
+  }
+
+  const calculateCameraFit = (position: THREE.Vector3, up: THREE.Vector3, bounds: SceneBounds, target = sceneViewTarget(bounds)) => {
+    const cameras = camerasRef.current
+    if (!cameras) return { orthographicZoom: 1, perspectiveDistance: perspectiveBaseDistanceRef.current }
+
+    const width = bounds.x * VOXEL_WORLD_SIZE
+    const depth = bounds.y * VOXEL_WORLD_SIZE
+    const height = bounds.z * VOXEL_WORLD_SIZE
+    const corners = [
+      new THREE.Vector3(-width / 2, -depth / 2, 0),
+      new THREE.Vector3(width / 2, -depth / 2, 0),
+      new THREE.Vector3(width / 2, depth / 2, 0),
+      new THREE.Vector3(-width / 2, depth / 2, 0),
+      new THREE.Vector3(-width / 2, -depth / 2, height),
+      new THREE.Vector3(width / 2, -depth / 2, height),
+      new THREE.Vector3(width / 2, depth / 2, height),
+      new THREE.Vector3(-width / 2, depth / 2, height),
+    ]
+
+    // Use a probe camera so calculating the fit never changes the live camera
+    // during a gesture. The projected rectangle is evaluated in camera space,
+    // which keeps the fit correct for the oblique default view and all view-cube
+    // orientations.
+    const orthographicProbe = cameras.orthographic.clone()
+    orthographicProbe.position.copy(position)
+    orthographicProbe.up.copy(up)
+    orthographicProbe.lookAt(target)
+    orthographicProbe.updateMatrixWorld(true)
+    let maxCameraX = 0
+    let maxCameraY = 0
+    for (const corner of corners) {
+      const cameraPoint = corner.clone().applyMatrix4(orthographicProbe.matrixWorldInverse)
+      maxCameraX = Math.max(maxCameraX, Math.abs(cameraPoint.x))
+      maxCameraY = Math.max(maxCameraY, Math.abs(cameraPoint.y))
+    }
+    const halfWidth = Math.abs(orthographicProbe.right - orthographicProbe.left) / 2
+    const halfHeight = Math.abs(orthographicProbe.top - orthographicProbe.bottom) / 2
+    const orthographicZoom = Math.max(0.02, Math.min(1, (halfWidth / Math.max(maxCameraX, 0.0001)) * 0.9, (halfHeight / Math.max(maxCameraY, 0.0001)) * 0.9))
+
+    const perspectiveProbe = cameras.perspective.clone()
+    perspectiveProbe.position.copy(position)
+    perspectiveProbe.up.copy(up)
+    perspectiveProbe.lookAt(target)
+    perspectiveProbe.updateMatrixWorld(true)
+    maxCameraX = 0
+    maxCameraY = 0
+    for (const corner of corners) {
+      const cameraPoint = corner.clone().applyMatrix4(perspectiveProbe.matrixWorldInverse)
+      maxCameraX = Math.max(maxCameraX, Math.abs(cameraPoint.x))
+      maxCameraY = Math.max(maxCameraY, Math.abs(cameraPoint.y))
+    }
+    const halfFov = THREE.MathUtils.degToRad(perspectiveProbe.fov / 2)
+    const perspectiveDistance = Math.max(28, maxCameraY / Math.tan(halfFov) * 1.12, maxCameraX / (Math.tan(halfFov) * Math.max(perspectiveProbe.aspect, 0.0001)) * 1.12)
+    return { orthographicZoom, perspectiveDistance }
+  }
+
+  const refreshCameraFit = () => {
+    const cameras = camerasRef.current
+    const camera = cameraRef.current
+    if (!cameras || !camera) return
+    const bounds = sceneBoundsForProject(project)
+    const controls = controlsRef.current
+    const target = controls?.target.clone() ?? sceneViewTarget(bounds)
+    const fit = calculateCameraFit(camera.position.clone(), camera.up.clone(), bounds, target)
+    cameraFitZoomRef.current = fit.orthographicZoom
+    perspectiveBaseDistanceRef.current = fit.perspectiveDistance
+    cameras.orthographic.far = Math.max(1000, Math.hypot(bounds.x, bounds.y, bounds.z) * VOXEL_WORLD_SIZE * 4)
+    cameras.perspective.far = cameras.orthographic.far
+    cameras.orthographic.updateProjectionMatrix()
+    cameras.perspective.updateProjectionMatrix()
+  }
+
+  const setCameraZoomLevel = (requestedZoom: number, force = false) => {
     const cameras = camerasRef.current
     const controls = controlsRef.current
     const nextZoom = clampZoomLevel(requestedZoom)
@@ -3631,14 +3742,14 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       onZoomChangeRef.current(nextZoom)
       return
     }
-    if (Math.abs(cameraZoomLevelRef.current - nextZoom) < 0.001) return
+    if (!force && Math.abs(cameraZoomLevelRef.current - nextZoom) < 0.001) return
     cameraZoomLevelRef.current = nextZoom
-    const factor = nextZoom / 100
-    cameras.orthographic.zoom = factor
+    const zoomFactor = nextZoom / 100
+    cameras.orthographic.zoom = cameraFitZoomRef.current * zoomFactor
     cameras.orthographic.updateProjectionMatrix()
     const direction = cameras.perspective.position.clone().sub(controls.target)
     if (direction.lengthSq() > 0.000001) {
-      cameras.perspective.position.copy(controls.target).add(direction.normalize().multiplyScalar(perspectiveBaseDistanceRef.current / factor))
+      cameras.perspective.position.copy(controls.target).add(direction.normalize().multiplyScalar(perspectiveBaseDistanceRef.current / zoomFactor))
     }
     cameras.perspective.zoom = 1
     cameras.perspective.fov = 38
@@ -3764,6 +3875,8 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       perspective.aspect = aspect
       perspective.updateProjectionMatrix()
       renderer.setSize(width, height, false)
+      refreshCameraFit()
+      setCameraZoomLevel(cameraZoomLevelRef.current, true)
       invalidateRender()
     }
     resize()
@@ -3942,6 +4055,14 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     invalidateRenderRef.current()
   }, [project.sceneBounds?.x, project.sceneBounds?.y, project.sceneBounds?.z, project.sceneSizeCm, showGrid, showBoundary])
 
+  useEffect(() => {
+    // A boundary change changes the meaning of the 100% ruler. Recenter and
+    // refit the camera so a newly enlarged ground plane is not left showing
+    // only its diagonal edge in the viewport.
+    if (!camerasRef.current || !controlsRef.current) return
+    applyCameraView('default', cameraZoomLevelRef.current)
+  }, [project.sceneBounds?.x, project.sceneBounds?.y, project.sceneBounds?.z, project.sceneSizeCm])
+
   const applyCameraView = (view: CameraView, requestedZoom = cameraZoomLevelRef.current) => {
     const cameras = camerasRef.current
     const controls = controlsRef.current
@@ -3952,26 +4073,32 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     controls.enableDamping = false
     controls.update()
     controls.enableDamping = dampingEnabled
-    const target = new THREE.Vector3(0, 0, 0)
-    const distance = 28
-    let position = new THREE.Vector3(16, 18, 18)
+    const sceneBounds = sceneBoundsForProject(project)
+    const target = sceneViewTarget(sceneBounds)
+    let direction = new THREE.Vector3(16, 18, 18).normalize()
     let up = new THREE.Vector3(0, 0, 1)
     if (view !== 'default') {
       const option = cameraViewOptions.find((item) => item.id === view)
-      if (option) position = new THREE.Vector3(...option.direction).normalize().multiplyScalar(distance)
+      if (option) direction = new THREE.Vector3(...option.direction).normalize()
     }
-    perspectiveBaseDistanceRef.current = position.length()
     const nextZoom = clampZoomLevel(requestedZoom)
     cameraZoomLevelRef.current = nextZoom
-    const zoomFactor = nextZoom / 100
-    const perspectivePosition = position.clone().divideScalar(zoomFactor)
     if (view === 'top') {
       up = new THREE.Vector3(0, 1, 0)
     } else if (view === 'bottom') {
       up = new THREE.Vector3(0, -1, 0)
     }
-    cameras.orthographic.position.copy(position)
-    cameras.perspective.position.copy(perspectivePosition)
+    const probePosition = target.clone().add(direction.clone().multiplyScalar(cameraDistanceForBounds(sceneBounds)))
+    const fit = calculateCameraFit(probePosition, up, sceneBounds, target)
+    cameraFitZoomRef.current = fit.orthographicZoom
+    perspectiveBaseDistanceRef.current = fit.perspectiveDistance
+    const zoomFactor = nextZoom / 100
+    const cameraFar = Math.max(1000, Math.hypot(sceneBounds.x, sceneBounds.y, sceneBounds.z) * VOXEL_WORLD_SIZE * 4)
+    cameras.orthographic.far = cameraFar
+    cameras.perspective.far = cameraFar
+    cameras.orthographic.zoom = fit.orthographicZoom * zoomFactor
+    cameras.orthographic.position.copy(probePosition)
+    cameras.perspective.position.copy(target.clone().add(direction.clone().multiplyScalar(fit.perspectiveDistance / zoomFactor)))
     cameras.orthographic.up.copy(up)
     cameras.perspective.up.copy(up)
     cameras.orthographic.lookAt(target)
@@ -4007,7 +4134,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       zoomOut: () => setCameraZoomLevel(cameraZoomLevelRef.current - (cameraZoomLevelRef.current > 100 ? 50 : 10)),
     })
     return () => onCameraApiChange(null)
-  }, [onCameraApiChange])
+  }, [onCameraApiChange, project.sceneBounds?.x, project.sceneBounds?.y, project.sceneBounds?.z, project.sceneSizeCm])
 
   useEffect(() => {
     const group = groupRef.current

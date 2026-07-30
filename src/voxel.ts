@@ -71,7 +71,7 @@ export type SceneInstance = {
 export type ProjectState = {
   version: 1
   name: string
-  voxelSizeMm: 1
+  voxelSizeMm: number
   sceneSizeCm: number
   /** Scene envelope in project voxels: X/Y are the ground plane, Z is height. */
   sceneBounds?: SceneBounds
@@ -192,6 +192,15 @@ export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEn
 // Therefore one project voxel (1 mm) occupies 0.1 viewport units everywhere.
 export const WORLD_UNITS_PER_MM = 0.1
 export const VOXEL_WORLD_SIZE = WORLD_UNITS_PER_MM
+export const DEFAULT_VOXEL_SIZE_MM = 1
+export const MIN_VOXEL_SIZE_MM = 0.1
+export const MAX_VOXEL_SIZE_MM = 100
+
+export function normalizeVoxelSizeMm(value: unknown): number {
+  const numeric = typeof value === 'number' && Number.isFinite(value) ? value : DEFAULT_VOXEL_SIZE_MM
+  const clamped = Math.max(MIN_VOXEL_SIZE_MM, Math.min(MAX_VOXEL_SIZE_MM, numeric))
+  return Number(clamped.toFixed(2))
+}
 
 export function sceneBoundsForProject(project: Pick<ProjectState, 'sceneSizeCm' | 'sceneBounds'>): SceneBounds {
   const fallback = Math.max(1, Math.round((project.sceneSizeCm ?? 20) / VOXEL_WORLD_SIZE))
@@ -818,7 +827,7 @@ export function makeDefaultProject(): ProjectState {
     { id: 'inst-tree-a', assetId: 'tree-basic', x: -9, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
     { id: 'inst-tree-b', assetId: 'tree-basic', x: 8, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
   ]
-  return { version: 1, name: '莫测里·第一街区', voxelSizeMm: 1, sceneSizeCm: 20, sceneBounds: { x: 200, y: 200, z: 200 }, materials: MATERIALS, assets, instances, customVoxels: [], customColors: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
+  return { version: 1, name: '莫测里·第一街区', voxelSizeMm: DEFAULT_VOXEL_SIZE_MM, sceneSizeCm: 20, sceneBounds: { x: 200, y: 200, z: 200 }, materials: MATERIALS, assets, instances, customVoxels: [], customColors: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
 }
 
 type StlPoint = [number, number, number]
@@ -969,16 +978,17 @@ function stlNormal(vertices: StlPoint[], [a, b, c]: StlTriangle): StlPoint {
   return length ? normal.map((value) => value / length) as StlPoint : [0, 0, 0]
 }
 
-export function makeStlWithDiagnostics(asset: VoxelAsset): { stl: string; diagnostics: StlExportDiagnostics } {
+export function makeStlWithDiagnostics(asset: VoxelAsset, voxelSizeMm = DEFAULT_VOXEL_SIZE_MM): { stl: string; diagnostics: StlExportDiagnostics } {
   const union = voxelBooleanUnion(asset.voxels)
   const beforeRepair = stlMeshFromVoxels(union)
   const repaired = repairDiagonalVoxelContacts(union)
   const mesh = stlMeshFromVoxels(repaired.voxels)
+  const outputVoxelSizeMm = normalizeVoxelSizeMm(voxelSizeMm)
   const lines: string[] = [`solid ${asset.id}`]
   mesh.triangles.forEach((triangle) => {
     const normal = stlNormal(mesh.vertices, triangle).map((value) => value.toFixed(6)).join(' ')
     lines.push(`facet normal ${normal}`, ' outer loop')
-    triangle.forEach((vertexId) => lines.push(`  vertex ${mesh.vertices[vertexId].map((value) => value.toFixed(6)).join(' ')}`))
+    triangle.forEach((vertexId) => lines.push(`  vertex ${mesh.vertices[vertexId].map((value) => (value * outputVoxelSizeMm).toFixed(6)).join(' ')}`))
     lines.push(' endloop', 'endfacet')
   })
   lines.push(`endsolid ${asset.id}`)
@@ -996,6 +1006,6 @@ export function makeStlWithDiagnostics(asset: VoxelAsset): { stl: string; diagno
   }
 }
 
-export function makeStl(asset: VoxelAsset): string {
-  return makeStlWithDiagnostics(asset).stl
+export function makeStl(asset: VoxelAsset, voxelSizeMm = DEFAULT_VOXEL_SIZE_MM): string {
+  return makeStlWithDiagnostics(asset, voxelSizeMm).stl
 }

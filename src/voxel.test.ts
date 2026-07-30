@@ -51,6 +51,13 @@ describe('莫测造境体素核心数据', () => {
     expect((stl.match(/facet normal/g) ?? []).length).toBe(12)
   })
 
+  it('scales STL coordinates by the configured voxel edge length in millimeters', () => {
+    const voxel = { x: 0, y: 0, z: 0, materialId: 'stone' }
+    const stl = makeStl({ ...makeDefaultProject().assets[0], voxels: [voxel] }, 2)
+    expect(stl).toContain('vertex 2.000000 2.000000 2.000000')
+    expect(stl).toContain('vertex 0.000000 0.000000 0.000000')
+  })
+
   it('welds vertices, unions cells, and bridges diagonal voxel contacts before STL export', () => {
     const asset = { ...makeDefaultProject().assets[0], voxels: [
       { x: 0, y: 0, z: 0, materialId: 'stone' },

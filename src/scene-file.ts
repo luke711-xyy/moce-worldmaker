@@ -1,4 +1,4 @@
-import { ProjectState, SceneAssembly, SceneBounds, SceneInstance, Voxel, VoxelAsset, VoxelOverride, sceneBoundsForProject } from './voxel'
+import { DEFAULT_VOXEL_SIZE_MM, MAX_VOXEL_SIZE_MM, MIN_VOXEL_SIZE_MM, ProjectState, SceneAssembly, SceneBounds, SceneInstance, Voxel, VoxelAsset, VoxelOverride, normalizeVoxelSizeMm, sceneBoundsForProject } from './voxel'
 
 export const MOCE_SCENE_FORMAT = 'moce-scene' as const
 export const MOCE_SCENE_FORMAT_VERSION = 1 as const
@@ -80,7 +80,7 @@ function validateSceneState(value: unknown): asserts value is PortableSceneState
   if (scene.version !== 1) throw new SceneFileError('scene.version不受支持')
   requireString(scene.name, 'scene.name')
   const voxelSizeMm = requireNumber(scene.voxelSizeMm, 'scene.voxelSizeMm')
-  if (voxelSizeMm !== 1) throw new SceneFileError('当前只支持1mm体素场景')
+  if (voxelSizeMm < MIN_VOXEL_SIZE_MM || voxelSizeMm > MAX_VOXEL_SIZE_MM) throw new SceneFileError(`scene.voxelSizeMm必须在${MIN_VOXEL_SIZE_MM}到${MAX_VOXEL_SIZE_MM}mm之间`)
   requireNumber(scene.sceneSizeCm, 'scene.sceneSizeCm')
   const bounds = requirePlainObject(scene.sceneBounds, 'scene.sceneBounds') as unknown as SceneBounds
   for (const axis of ['x', 'y', 'z'] as const) {
@@ -140,6 +140,7 @@ export function createSceneFile(project: ProjectState): MoceSceneFile {
   const missingAssetId = project.instances.find((instance) => !project.assets.some((asset) => asset.id === instance.assetId))?.assetId
   if (missingAssetId) throw new SceneFileError(`当前场景引用了不存在的资产：${missingAssetId}`)
   const { assets: _assets, ...scene } = structuredClone(project)
+  scene.voxelSizeMm = normalizeVoxelSizeMm(scene.voxelSizeMm ?? DEFAULT_VOXEL_SIZE_MM)
   scene.sceneBounds = scene.sceneBounds ?? sceneBoundsForProject(project)
   scene.materials = scene.materials ?? []
   scene.customVoxels = scene.customVoxels ?? []

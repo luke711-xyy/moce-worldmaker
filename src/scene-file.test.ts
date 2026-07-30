@@ -14,6 +14,7 @@ describe('莫测造境场景文件', () => {
 
   it('round-trips scene entities, instances, assemblies and colors', () => {
     const project = makeDefaultProject()
+    project.voxelSizeMm = 2.5
     project.customVoxels = [{ x: 2, y: 3, z: 4, materialId: '#c96043', entityId: 'custom-1' }]
     project.customColors = { 'custom-1': '#c96043' }
     project.assemblies = [{ id: 'assembly-1', name: '装配体 1', memberKeys: ['voxel:custom-1'] }]
@@ -23,6 +24,7 @@ describe('莫测造境场景文件', () => {
     expect(restored.customColors).toEqual(project.customColors)
     expect(restored.assemblies).toEqual(project.assemblies)
     expect(restored.instances[0].colorOverride).toBe('#123456')
+    expect(restored.voxelSizeMm).toBe(2.5)
   })
 
   it('rejects unsupported versions, malformed data and missing asset references', () => {
