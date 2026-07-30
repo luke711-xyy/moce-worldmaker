@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, CircleUserRound, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
@@ -4255,6 +4255,15 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     return hit.object.userData[legacyKey] as Voxel | undefined
   }
 
+  const sceneVoxelFromHit = (hit: THREE.Intersection<THREE.Object3D>): Voxel | undefined => {
+    const localVoxel = intersectionVoxel(hit, 'instanceVoxels', 'instanceVoxel')
+    const instanceId = hit.object.userData.instanceId as string | undefined
+    if (!localVoxel || !instanceId) return intersectionVoxel(hit, 'customVoxels', 'customVoxel')
+    const instance = project.instances.find((candidate) => candidate.id === instanceId)
+    const asset = instance ? project.assets.find((candidate) => candidate.id === instance.assetId) : undefined
+    return instance && asset ? instanceLocalVoxelToSceneVoxel(instance, asset, localVoxel) : undefined
+  }
+
   const applyEditAtPointer = (event: React.PointerEvent<HTMLDivElement>) => {
     const context = getPointerContext(event)
     if (!context) return
@@ -4277,8 +4286,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         return hasVoxel
       })
       if (firstVoxelHit && !belongsToEditEntity(firstVoxelHit.object)) {
-        const hitVoxel = intersectionVoxel(firstVoxelHit, 'instanceVoxels', 'instanceVoxel')
-          ?? intersectionVoxel(firstVoxelHit, 'customVoxels', 'customVoxel')
+        const hitVoxel = sceneVoxelFromHit(firstVoxelHit)
         if (tool === 'brush' && hitVoxel && firstVoxelHit.face) {
           const displayNormal = firstVoxelHit.face.normal.clone().transformDirection(firstVoxelHit.object.matrixWorld)
           onAddVoxel(adjacentVoxel(hitVoxel, { x: displayNormal.x, y: displayNormal.z, z: displayNormal.y }, activeMaterial))
@@ -4291,9 +4299,11 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     const instanceHit = hits.find((item) => item.object.userData.instanceId && intersectionVoxel(item, 'instanceVoxels', 'instanceVoxel') && belongsToEditEntity(item.object))
     if (instanceHit?.object.userData.instanceId) {
       const instanceId = instanceHit.object.userData.instanceId as string
-      const hitVoxel = intersectionVoxel(instanceHit, 'instanceVoxels', 'instanceVoxel')
-      if (!hitVoxel) return
+      const localHitVoxel = intersectionVoxel(instanceHit, 'instanceVoxels', 'instanceVoxel')
+      if (!localHitVoxel) return
       if (!editEntityId) {
+        const hitVoxel = sceneVoxelFromHit(instanceHit)
+        if (!hitVoxel) return
         if (tool === 'brush' && instanceHit.face) {
           const displayNormal = instanceHit.face.normal.clone().transformDirection(instanceHit.object.matrixWorld)
           onAddVoxel(adjacentVoxel(hitVoxel, { x: displayNormal.x, y: displayNormal.z, z: displayNormal.y }, activeMaterial))
@@ -4303,9 +4313,9 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       } else if (tool === 'brush') {
         if (!instanceHit.face) return
         const displayNormal = instanceHit.face.normal.clone().transformDirection(instanceHit.object.matrixWorld)
-        onEditInstanceVoxel(instanceId, adjacentVoxel(hitVoxel, { x: displayNormal.x, y: displayNormal.z, z: displayNormal.y }, activeMaterial), 'add')
+        onEditInstanceVoxel(instanceId, adjacentVoxel(localHitVoxel, { x: displayNormal.x, y: displayNormal.z, z: displayNormal.y }, activeMaterial), 'add')
       } else {
-        onEditInstanceVoxel(instanceId, hitVoxel, 'remove')
+        onEditInstanceVoxel(instanceId, localHitVoxel, 'remove')
       }
       return
     }

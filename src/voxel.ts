@@ -445,6 +445,16 @@ export function resolveInstanceSceneVoxels(instance: SceneInstance, asset: Voxel
   return resolveInstanceComponents(asset, instance.overrides ?? []).flatMap(({ partId, voxels }) => resolveInstanceComponentSceneVoxels(instance, asset, voxels, partId, x, z, y))
 }
 
+/** Convert a voxel returned by an asset mesh raycast from asset-local space to scene space. */
+export function instanceLocalVoxelToSceneVoxel(instance: SceneInstance, asset: VoxelAsset, localVoxel: Pick<Voxel, 'x' | 'y' | 'z'>): Voxel | undefined {
+  for (const { partId, voxels } of resolveInstanceComponents(asset, instance.overrides ?? [])) {
+    const localIndex = voxels.findIndex((voxel) => voxel.x === localVoxel.x && voxel.y === localVoxel.y && voxel.z === localVoxel.z)
+    if (localIndex < 0) continue
+    return resolveInstanceComponentSceneVoxels(instance, asset, voxels, partId)[localIndex]
+  }
+  return undefined
+}
+
 export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
   const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
   const assemblies = project.assemblies ?? []

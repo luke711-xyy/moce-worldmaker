@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
@@ -108,6 +108,16 @@ describe('莫测造境体素核心数据', () => {
     expect(findInstanceVoxelAtSceneVoxel(instance, asset, { x: -3, y: 0, z: -3 })).toEqual(expect.objectContaining({ x: 0, y: 0, z: 0 }))
     const rotated = { ...instance, rotation: 90 }
     expect(findInstanceVoxelAtSceneVoxel(rotated, asset, { x: -3, y: 0, z: 3 })).toEqual(expect.objectContaining({ x: 0, y: 0, z: 0 }))
+  })
+
+  it('converts an asset raycast voxel back to scene coordinates before drawing', () => {
+    const project = makeDefaultProject()
+    const asset = project.assets.find((item) => item.id === 'house-chinese')!
+    const instance = { ...project.instances[0], assetId: asset.id, x: snapAssetOrigin(3, asset.width), z: snapAssetOrigin(-2, asset.depth), rotation: 90 }
+    const localVoxel = asset.voxels[0]
+    const sceneVoxel = instanceLocalVoxelToSceneVoxel(instance, asset, localVoxel)
+    expect(sceneVoxel).toBeDefined()
+    expect(findInstanceVoxelAtSceneVoxel(instance, asset, sceneVoxel!)).toEqual(expect.objectContaining({ x: localVoxel.x, y: localVoxel.y, z: localVoxel.z }))
   })
 
   it('groups only face-connected voxels into one draggable component', () => {
