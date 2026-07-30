@@ -9,6 +9,8 @@ import {
 } from './runtime-coordinates'
 import { SceneOccupancyIndex } from './spatial-index'
 import { AssetTransformCache } from './asset-transform-cache'
+import { buildGreedyMesh } from './greedy-mesher'
+import { raycastVoxelDda } from './voxel-dda'
 
 const voxel = (x: number, y: number, z: number, materialId = 'stone'): Voxel => ({ x, y, z, materialId })
 
@@ -129,5 +131,46 @@ describe('AssetTransformCache', () => {
     const cache = new AssetTransformCache()
     expect(cache.get({ ...instance, mirror: { x: true, y: false, z: false } }, asset)).not.toBe(cache.get(instance, asset))
     expect(cache.get({ ...instance, rotation: 90 }, asset)).not.toBe(cache.get(instance, asset))
+  })
+})
+
+describe('greedy mesher', () => {
+  it('emits six quads for one voxel and never emits internal faces', () => {
+    expect(buildGreedyMesh([{ gx: 0, gy: 0, gz: 0, materialId: 1 }]).quadCount).toBe(6)
+    const twoVoxelMesh = buildGreedyMesh([
+      { gx: 0, gy: 0, gz: 0, materialId: 1 },
+      { gx: 1, gy: 0, gz: 0, materialId: 1 },
+    ])
+    expect(twoVoxelMesh.quadCount).toBe(6)
+    expect(twoVoxelMesh.indices.length).toBe(36)
+  })
+
+  it('does not merge adjacent visible faces with different materials', () => {
+    const mesh = buildGreedyMesh([
+      { gx: 0, gy: 0, gz: 0, materialId: 1 },
+      { gx: 1, gy: 0, gz: 0, materialId: 2 },
+    ])
+    expect(mesh.quadCount).toBe(10)
+  })
+})
+
+describe('voxel DDA', () => {
+  it('returns the first occupied voxel and the entered face normal', () => {
+    const hit = raycastVoxelDda(
+      { x: -2.5, y: 0.5, z: 0.5 },
+      { x: 1, y: 0, z: 0 },
+      (candidate) => ({ occupied: candidate.gx === 0 && candidate.gy === 0 && candidate.gz === 0, ownerIds: ['target'] }),
+      10,
+    )
+    expect(hit).toEqual({
+      voxel: { gx: 0, gy: 0, gz: 0 },
+      normal: { gx: -1, gy: 0, gz: 0 },
+      distance: 2.5,
+      ownerIds: ['target'],
+    })
+  })
+
+  it('returns null when the ray leaves the query distance without a hit', () => {
+    expect(raycastVoxelDda({ x: 0.5, y: 0.5, z: 0.5 }, { x: 0, y: 0, z: 1 }, () => ({ occupied: false, ownerIds: [] }), 3)).toBeNull()
   })
 })
