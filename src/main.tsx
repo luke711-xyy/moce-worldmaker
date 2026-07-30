@@ -2213,9 +2213,13 @@ function App() {
       }
     }
     const previewAsset = makeAssetFromSceneParts('copy-preview', '复制预览', sourceParts, '#6c827d', '#d2a354', (voxel, part) => scenePartVoxelDisplayColor(sourceProject, part, voxel))
-    const previewMinX = Math.min(...previewAsset.voxels.map((voxel) => voxel.x), 0)
-    const previewMinY = Math.min(...previewAsset.voxels.map((voxel) => voxel.y), 0)
-    const previewMinZ = Math.min(...previewAsset.voxels.map((voxel) => voxel.z), 0)
+    // The preview asset may retain empty coordinate space before its first
+    // voxel (makeAssetFromSceneParts deliberately keeps the scene origin for
+    // positive coordinates). Use the actual non-empty local minima here, not
+    // zero, otherwise the source position gets added a second time.
+    const previewMinX = Math.min(...previewAsset.voxels.map((voxel) => voxel.x))
+    const previewMinY = Math.min(...previewAsset.voxels.map((voxel) => voxel.y))
+    const previewMinZ = Math.min(...previewAsset.voxels.map((voxel) => voxel.z))
     // Keep this origin in the same argument order as toSceneWorld:
     // editor X, editor Z (vertical), editor Y (the second ground-plane axis).
     // The previous order put the scene's horizontal Z into Three.js' vertical
