@@ -821,30 +821,181 @@ export function makeDefaultProject(): ProjectState {
   return { version: 1, name: '莫测里·第一街区', voxelSizeMm: 1, sceneSizeCm: 20, sceneBounds: { x: 200, y: 200, z: 200 }, materials: MATERIALS, assets, instances, customVoxels: [], customColors: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
 }
 
-export function makeStl(asset: VoxelAsset): string {
-  const lines: string[] = [`solid ${asset.id}`]
-  const face = (a: [number, number, number], b: [number, number, number], c: [number, number, number], d: [number, number, number]) => {
-    const normal = '0 0 0'
-    lines.push(`facet normal ${normal}`, ' outer loop', `  vertex ${a.join(' ')}`, `  vertex ${b.join(' ')}`, `  vertex ${c.join(' ')}`, ' endloop', 'endfacet')
-    lines.push(`facet normal ${normal}`, ' outer loop', `  vertex ${a.join(' ')}`, `  vertex ${c.join(' ')}`, `  vertex ${d.join(' ')}`, ' endloop', 'endfacet')
+type StlPoint = [number, number, number]
+type StlTriangle = [number, number, number]
+
+export type StlExportDiagnostics = {
+  inputVoxelCount: number
+  unionVoxelCount: number
+  bridgeVoxelCount: number
+  weldedVertexCount: number
+  triangleCount: number
+  nonManifoldEdgesBefore: number
+  nonManifoldEdgesAfter: number
+}
+
+const stlFaceDefinitions: Array<{ dx: number; dy: number; dz: number; corners: StlPoint[] }> = [
+  { dx: 1, dy: 0, dz: 0, corners: [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]] },
+  { dx: -1, dy: 0, dz: 0, corners: [[0, 0, 1], [0, 1, 1], [0, 1, 0], [0, 0, 0]] },
+  { dx: 0, dy: 1, dz: 0, corners: [[0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0]] },
+  { dx: 0, dy: -1, dz: 0, corners: [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]] },
+  { dx: 0, dy: 0, dz: 1, corners: [[1, 0, 1], [1, 1, 1], [0, 1, 1], [0, 0, 1]] },
+  { dx: 0, dy: 0, dz: -1, corners: [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]] },
+]
+
+const stlDiagonalOffsets: StlPoint[] = []
+for (let dx = -1; dx <= 1; dx += 1) for (let dy = -1; dy <= 1; dy += 1) for (let dz = -1; dz <= 1; dz += 1) {
+  const distance = Math.abs(dx) + Math.abs(dy) + Math.abs(dz)
+  const canonical = dx > 0 || (dx === 0 && dy > 0) || (dx === 0 && dy === 0 && dz > 0)
+  if (distance > 1 && canonical) stlDiagonalOffsets.push([dx, dy, dz])
+}
+
+function stlVoxelKey(x: number, y: number, z: number): string {
+  return `${x},${y},${z}`
+}
+
+function voxelBooleanUnion(voxels: Voxel[]): Voxel[] {
+  // Voxel-cell union is the exact boolean union for the editor's 1 mm grid:
+  // duplicate cells disappear and the remaining cells form one occupancy set.
+  return deduplicateVoxels(voxels)
+}
+
+function stlPathCandidates(offset: StlPoint): StlPoint[][] {
+  const axes = (['x', 'y', 'z'] as const).filter((axis) => offset[axis === 'x' ? 0 : axis === 'y' ? 1 : 2] !== 0)
+  const paths: StlPoint[][] = []
+  const visit = (remaining: string[], current: StlPoint, path: StlPoint[]) => {
+    if (!remaining.length) {
+      paths.push(path)
+      return
+    }
+    remaining.forEach((axis, index) => {
+      const next = [...current] as StlPoint
+      const component = axis === 'x' ? 0 : axis === 'y' ? 1 : 2
+      next[component] += offset[component]
+      visit([...remaining.slice(0, index), ...remaining.slice(index + 1)], next, [...path, next])
+    })
   }
-  const voxels = deduplicateVoxels(asset.voxels)
-  const occupied = new Set(voxels.map((v) => `${v.x},${v.y},${v.z}`))
-  const faces: Array<{ dx: number; dy: number; dz: number; corners: Array<[number, number, number]> }> = [
-    { dx: 1, dy: 0, dz: 0, corners: [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]] },
-    { dx: -1, dy: 0, dz: 0, corners: [[0, 0, 1], [0, 1, 1], [0, 1, 0], [0, 0, 0]] },
-    { dx: 0, dy: 1, dz: 0, corners: [[0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0]] },
-    { dx: 0, dy: -1, dz: 0, corners: [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]] },
-    { dx: 0, dy: 0, dz: 1, corners: [[1, 0, 1], [1, 1, 1], [0, 1, 1], [0, 0, 1]] },
-    { dx: 0, dy: 0, dz: -1, corners: [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]] },
-  ]
+  visit(axes as string[], [0, 0, 0], [])
+  return paths
+}
+
+function repairDiagonalVoxelContacts(voxels: Voxel[]): { voxels: Voxel[]; bridgeVoxelCount: number } {
+  const union = voxelBooleanUnion(voxels)
+  const occupied = new Map(union.map((voxel) => [stlVoxelKey(voxel.x, voxel.y, voxel.z), voxel]))
+  let bridgeVoxelCount = 0
+
+  // A pair of cells that only touches at an edge or corner can create an STL
+  // edge shared by four surface faces. Add the shortest grid-aligned bridge so
+  // the resulting solid has a regular 6-connected voxel topology.
+  for (let pass = 0; pass < 4; pass += 1) {
+    let changed = false
+    const snapshot = [...occupied.values()]
+    for (const voxel of snapshot) {
+      for (const offset of stlDiagonalOffsets) {
+        const targetKey = stlVoxelKey(voxel.x + offset[0], voxel.y + offset[1], voxel.z + offset[2])
+        if (!occupied.has(targetKey)) continue
+        const paths = stlPathCandidates(offset).map((path) => path.map(([x, y, z]) => [x + voxel.x, y + voxel.y, z + voxel.z] as StlPoint))
+        const completePath = paths.find((path) => path.every(([x, y, z]) => occupied.has(stlVoxelKey(x, y, z))))
+        if (completePath) continue
+        const bestPath = paths.sort((left, right) => right.filter(([x, y, z]) => occupied.has(stlVoxelKey(x, y, z))).length - left.filter(([x, y, z]) => occupied.has(stlVoxelKey(x, y, z))).length)[0]
+        bestPath.forEach(([x, y, z]) => {
+          const key = stlVoxelKey(x, y, z)
+          if (occupied.has(key) || key === targetKey) return
+          occupied.set(key, { x, y, z, materialId: voxel.materialId })
+          bridgeVoxelCount += 1
+          changed = true
+        })
+      }
+    }
+    if (!changed) break
+  }
+  return { voxels: [...occupied.values()], bridgeVoxelCount }
+}
+
+function stlMeshFromVoxels(voxels: Voxel[]): { vertices: StlPoint[]; triangles: StlTriangle[] } {
+  const vertices: StlPoint[] = []
+  const vertexIds = new Map<string, number>()
+  const triangles: StlTriangle[] = []
+  const triangleIds = new Set<string>()
+  const vertex = (point: StlPoint) => {
+    const key = point.join(',')
+    const existing = vertexIds.get(key)
+    if (existing !== undefined) return existing
+    const id = vertices.length
+    vertices.push(point)
+    vertexIds.set(key, id)
+    return id
+  }
+  const triangle = (a: StlPoint, b: StlPoint, c: StlPoint) => {
+    const ids: StlTriangle = [vertex(a), vertex(b), vertex(c)]
+    if (new Set(ids).size < 3) return
+    const key = [...ids].sort((left, right) => left - right).join(':')
+    if (triangleIds.has(key)) return
+    triangleIds.add(key)
+    triangles.push(ids)
+  }
+  const occupied = new Set(voxels.map((voxel) => stlVoxelKey(voxel.x, voxel.y, voxel.z)))
   for (const voxel of voxels) {
-    for (const { dx, dy, dz, corners } of faces) {
-      if (occupied.has(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`)) continue
-      const points = corners.map(([x, y, z]) => [voxel.x + x, voxel.y + y, voxel.z + z] as [number, number, number])
-      face(points[0], points[1], points[2], points[3])
+    for (const { dx, dy, dz, corners } of stlFaceDefinitions) {
+      if (occupied.has(stlVoxelKey(voxel.x + dx, voxel.y + dy, voxel.z + dz))) continue
+      const points = corners.map(([x, y, z]) => [voxel.x + x, voxel.y + y, voxel.z + z] as StlPoint)
+      triangle(points[0], points[1], points[2])
+      triangle(points[0], points[2], points[3])
     }
   }
+  return { vertices, triangles }
+}
+
+function stlEdgeKey(left: number, right: number): string {
+  return left < right ? `${left}:${right}` : `${right}:${left}`
+}
+
+function countNonManifoldEdges(mesh: { triangles: StlTriangle[] }): number {
+  const edges = new Map<string, number>()
+  mesh.triangles.forEach(([a, b, c]) => {
+    for (const [left, right] of [[a, b], [b, c], [c, a]]) {
+      const key = stlEdgeKey(left, right)
+      edges.set(key, (edges.get(key) ?? 0) + 1)
+    }
+  })
+  return [...edges.values()].filter((count) => count !== 2).length
+}
+
+function stlNormal(vertices: StlPoint[], [a, b, c]: StlTriangle): StlPoint {
+  const ab = vertices[b].map((value, index) => value - vertices[a][index]) as StlPoint
+  const ac = vertices[c].map((value, index) => value - vertices[a][index]) as StlPoint
+  const normal: StlPoint = [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]]
+  const length = Math.hypot(...normal)
+  return length ? normal.map((value) => value / length) as StlPoint : [0, 0, 0]
+}
+
+export function makeStlWithDiagnostics(asset: VoxelAsset): { stl: string; diagnostics: StlExportDiagnostics } {
+  const union = voxelBooleanUnion(asset.voxels)
+  const beforeRepair = stlMeshFromVoxels(union)
+  const repaired = repairDiagonalVoxelContacts(union)
+  const mesh = stlMeshFromVoxels(repaired.voxels)
+  const lines: string[] = [`solid ${asset.id}`]
+  mesh.triangles.forEach((triangle) => {
+    const normal = stlNormal(mesh.vertices, triangle).map((value) => value.toFixed(6)).join(' ')
+    lines.push(`facet normal ${normal}`, ' outer loop')
+    triangle.forEach((vertexId) => lines.push(`  vertex ${mesh.vertices[vertexId].map((value) => value.toFixed(6)).join(' ')}`))
+    lines.push(' endloop', 'endfacet')
+  })
   lines.push(`endsolid ${asset.id}`)
-  return lines.join('\n')
+  return {
+    stl: lines.join('\n'),
+    diagnostics: {
+      inputVoxelCount: asset.voxels.length,
+      unionVoxelCount: union.length,
+      bridgeVoxelCount: repaired.bridgeVoxelCount,
+      weldedVertexCount: mesh.vertices.length,
+      triangleCount: mesh.triangles.length,
+      nonManifoldEdgesBefore: countNonManifoldEdges(beforeRepair),
+      nonManifoldEdgesAfter: countNonManifoldEdges(mesh),
+    },
+  }
+}
+
+export function makeStl(asset: VoxelAsset): string {
+  return makeStlWithDiagnostics(asset).stl
 }

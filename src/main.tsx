@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, CircleUserRound, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
@@ -1722,7 +1722,7 @@ function App() {
     }
     const exportName = selectedAsset?.name ?? selectedEntityParts[0]?.label ?? '选中实体'
     const exportAsset = makeAssetFromSceneParts(`export-${Date.now()}`, exportName, selectedEntityParts, selectedAsset?.color ?? '#6c827d', selectedAsset?.accent ?? '#d2a354')
-    const stl = makeStl(exportAsset)
+    const { stl, diagnostics } = makeStlWithDiagnostics(exportAsset)
     const blob = new Blob([stl], { type: 'model/stl' })
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
@@ -1730,7 +1730,7 @@ function App() {
     anchor.download = `${exportName}-选中实体.stl`
     anchor.click()
     URL.revokeObjectURL(url)
-    setNotice(`已导出选中实体 · ${exportName} · ${selectedEntityParts.length} 个实体`)
+    setNotice(`已导出选中实体 · ${exportName} · ${selectedEntityParts.length} 个实体${diagnostics.bridgeVoxelCount ? ` · 已补连接 ${diagnostics.bridgeVoxelCount} 个体素` : ''}${diagnostics.nonManifoldEdgesAfter ? ` · 仍有 ${diagnostics.nonManifoldEdgesAfter} 条非流形边` : ''}`)
   }
 
   const exportSceneStl = () => {
@@ -1740,7 +1740,7 @@ function App() {
       return
     }
     const sceneAsset = makeAssetFromSceneParts(`scene-export-${Date.now()}`, projectRef.current.name || '莫测造境场景', allParts, '#6c827d', '#d2a354')
-    const stl = makeStl(sceneAsset)
+    const { stl, diagnostics } = makeStlWithDiagnostics(sceneAsset)
     const blob = new Blob([stl], { type: 'model/stl' })
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
@@ -1748,7 +1748,7 @@ function App() {
     anchor.download = `${projectRef.current.name || '莫测造境场景'}-完整场景.stl`
     anchor.click()
     URL.revokeObjectURL(url)
-    setNotice(`已导出完整场景 STL · ${allParts.length} 个实体`)
+    setNotice(`已导出完整场景 STL · ${allParts.length} 个实体${diagnostics.bridgeVoxelCount ? ` · 已补连接 ${diagnostics.bridgeVoxelCount} 个体素` : ''}${diagnostics.nonManifoldEdgesAfter ? ` · 仍有 ${diagnostics.nonManifoldEdgesAfter} 条非流形边` : ''}`)
   }
 
   const exportSelectedEntityFile = () => {

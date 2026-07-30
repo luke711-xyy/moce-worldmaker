@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
@@ -49,6 +49,19 @@ describe('莫测造境体素核心数据', () => {
     expect(deduplicateVoxels([voxel, voxel])).toEqual([voxel])
     const stl = makeStl({ ...makeDefaultProject().assets[0], voxels: [voxel, voxel] })
     expect((stl.match(/facet normal/g) ?? []).length).toBe(12)
+  })
+
+  it('welds vertices, unions cells, and bridges diagonal voxel contacts before STL export', () => {
+    const asset = { ...makeDefaultProject().assets[0], voxels: [
+      { x: 0, y: 0, z: 0, materialId: 'stone' },
+      { x: 1, y: 1, z: 0, materialId: 'stone' },
+    ] }
+    const { diagnostics } = makeStlWithDiagnostics(asset)
+    expect(diagnostics.unionVoxelCount).toBe(2)
+    expect(diagnostics.bridgeVoxelCount).toBeGreaterThan(0)
+    expect(diagnostics.weldedVertexCount).toBeGreaterThan(0)
+    expect(diagnostics.nonManifoldEdgesBefore).toBeGreaterThan(0)
+    expect(diagnostics.nonManifoldEdgesAfter).toBe(0)
   })
 
   it('stacks a new voxel above the highest voxel in the column', () => {
