@@ -3391,10 +3391,38 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   const [expanded, setExpanded] = useState(false)
   const [joystickOffset, setJoystickOffset] = useState({ x: 0, y: 0 })
   const joystickRef = useRef<{ pointerId: number; lastX: number; lastY: number } | null>(null)
+  const joystickButtonRef = useRef<HTMLButtonElement | null>(null)
   const stopControlPointer = (event: React.SyntheticEvent) => event.stopPropagation()
+  const resetJoystick = (pointerId = joystickRef.current?.pointerId) => {
+    const button = joystickButtonRef.current
+    joystickRef.current = null
+    if (button && pointerId !== undefined && button.hasPointerCapture(pointerId)) button.releasePointerCapture(pointerId)
+    setJoystickOffset({ x: 0, y: 0 })
+  }
+  useEffect(() => {
+    // Pointer capture normally keeps the drag on the knob, but a very fast
+    // trackpad/mouse gesture can still lose the element-level pointerup. A
+    // window-level cleanup guarantees that the knob cannot remain latched to
+    // the ring wall after release, cancellation, or window deactivation.
+    const finishJoystick = (event: PointerEvent) => {
+      if (joystickRef.current?.pointerId === event.pointerId) resetJoystick(event.pointerId)
+    }
+    const cancelJoystick = () => {
+      if (joystickRef.current) resetJoystick()
+    }
+    window.addEventListener('pointerup', finishJoystick, true)
+    window.addEventListener('pointercancel', finishJoystick, true)
+    window.addEventListener('blur', cancelJoystick)
+    return () => {
+      window.removeEventListener('pointerup', finishJoystick, true)
+      window.removeEventListener('pointercancel', finishJoystick, true)
+      window.removeEventListener('blur', cancelJoystick)
+    }
+  }, [])
   const startJoystick = (event: React.PointerEvent<HTMLButtonElement>) => {
     event.preventDefault()
     event.stopPropagation()
+    joystickButtonRef.current = event.currentTarget
     event.currentTarget.setPointerCapture(event.pointerId)
     joystickRef.current = { pointerId: event.pointerId, lastX: event.clientX, lastY: event.clientY }
   }
@@ -3418,11 +3446,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
     gesture.lastY = event.clientY
   }
   const endJoystick = (event: React.PointerEvent<HTMLButtonElement>) => {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
-    if (joystickRef.current?.pointerId === event.pointerId) {
-      joystickRef.current = null
-      setJoystickOffset({ x: 0, y: 0 })
-    }
+    if (joystickRef.current?.pointerId === event.pointerId) resetJoystick(event.pointerId)
   }
   return <div className="viewport-camera-controls" onPointerDown={stopControlPointer} onPointerMove={stopControlPointer} onPointerUp={stopControlPointer} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}>
     {showActions && <>
@@ -3430,7 +3454,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
       <button className="camera-cube-button" aria-label="展开六个标准视角" aria-expanded={expanded} title="六个标准视角" onClick={() => setExpanded((value) => !value)}><Box size={18} strokeWidth={1.8} /></button>
       <button className="camera-reset-button" aria-label="视角回中" title="视角回中" onClick={onReset}><RotateCcw size={14} /></button>
     </>}
-    {showJoystick && <div className="camera-joystick" aria-label="按住拖动旋转视角"><div className="camera-joystick-ring"><button className="camera-joystick-knob" style={{ transform: `translate(${joystickOffset.x}px, ${joystickOffset.y}px)` }} aria-label="拖动摇杆旋转视角" onPointerDown={startJoystick} onPointerMove={moveJoystick} onPointerUp={endJoystick} onPointerCancel={endJoystick} /></div></div>}
+    {showJoystick && <div className="camera-joystick" aria-label="按住拖动旋转视角"><div className="camera-joystick-ring"><button className="camera-joystick-knob" style={{ transform: `translate(${joystickOffset.x}px, ${joystickOffset.y}px)` }} aria-label="拖动摇杆旋转视角" onPointerDown={startJoystick} onPointerMove={moveJoystick} onPointerUp={endJoystick} onPointerCancel={endJoystick} onLostPointerCapture={() => resetJoystick()} /></div></div>}
   </div>
 }
 
