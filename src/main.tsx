@@ -2213,7 +2213,22 @@ function App() {
       }
     }
     const previewAsset = makeAssetFromSceneParts('copy-preview', '复制预览', sourceParts, '#6c827d', '#d2a354', (voxel, part) => scenePartVoxelDisplayColor(sourceProject, part, voxel))
-    return { count, gap, axis, sign, sourceInstanceIds: [...new Set(sourceParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))], sourceCustomIds: [...new Set(sourceParts.filter((part) => part.kind === 'custom').map((part) => part.partId))], asset: previewAsset, origin: { x: (minX + dimensions.x / 2) * VOXEL_WORLD_SIZE, y: (minZ + dimensions.z / 2) * VOXEL_WORLD_SIZE, z: minY * VOXEL_WORLD_SIZE }, offsets, valid: !invalidReason, invalidReason }
+    const previewMinX = Math.min(...previewAsset.voxels.map((voxel) => voxel.x), 0)
+    const previewMinY = Math.min(...previewAsset.voxels.map((voxel) => voxel.y), 0)
+    const previewMinZ = Math.min(...previewAsset.voxels.map((voxel) => voxel.z), 0)
+    // Keep this origin in the same argument order as toSceneWorld:
+    // editor X, editor Z (vertical), editor Y (the second ground-plane axis).
+    // The previous order put the scene's horizontal Z into Three.js' vertical
+    // coordinate, which made a ground-level copy preview appear high in the air.
+    // Account for the preview asset's own local minimum as well. Some source
+    // entities are already elevated in the scene; using minY directly there
+    // would apply that height twice because the asset snapshot retains it.
+    const origin = {
+      x: (minX - previewMinX + previewAsset.width / 2) * VOXEL_WORLD_SIZE,
+      y: (minY - previewMinY) * VOXEL_WORLD_SIZE,
+      z: (minZ - previewMinZ + previewAsset.depth / 2) * VOXEL_WORLD_SIZE,
+    }
+    return { count, gap, axis, sign, sourceInstanceIds: [...new Set(sourceParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))], sourceCustomIds: [...new Set(sourceParts.filter((part) => part.kind === 'custom').map((part) => part.partId))], asset: previewAsset, origin, offsets, valid: !invalidReason, invalidReason }
   }
 
   const startDuplicatePreview = (requestedCount: number) => {
