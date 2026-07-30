@@ -306,6 +306,15 @@ button { border: 0; cursor: pointer; color: inherit; }
 .copy-count-choice button:hover { color: #fff0df; background: #2c2523; border-color: #ae5b44; }
 .copy-entity-row .copy-confirm { min-height: 25px; min-width: 31px; margin-left: 0; padding: 0 5px; color: #fff0df; background: #a9523c; border-color: #c46b50; font-size: 8px; }
 .copy-entity-row .copy-confirm:hover { background: #c66c50; }
+.copy-preview-panel { margin: 1px 0 4px; padding: 7px; border: 1px solid #3d494b; background: #1a2022; }
+.copy-preview-title { color: #b8c1bd; font-size: 9px; }
+.copy-preview-axis { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.copy-preview-axis button { min-height: 24px; min-width: 28px; padding: 0 6px; color: #8f9b98; background: #1a2022; border: 1px solid #384244; font-size: 8px; }
+.copy-preview-axis button:hover, .copy-preview-axis button.active { color: #fff0df; background: #a9523c; border-color: #c46b50; }
+.copy-preview-status { margin-top: 6px; color: #9bb6a4; font-size: 8px; line-height: 1.5; }
+.copy-preview-status.invalid { color: #e58a76; }
+.copy-preview-generate { width: 100%; min-height: 25px; margin-top: 7px; color: #fff0df; background: #a9523c; border-color: #c46b50; font-size: 8px; }
+.copy-preview-generate:hover { background: #c66c50; }
 .entity-transform-operation { display: flex; align-items: center; gap: 5px; min-height: 31px; color: #b8c1bd; font-size: 9px; }
 .entity-transform-operation > span { min-width: 49px; }
 .axis-choice, .degree-choice { display: flex; gap: 2px; }
