@@ -661,6 +661,8 @@ function App() {
   }, [sceneParts, selectedScenePart, selectedAssemblyId, selectedId, checkedTreePartIds])
   const singleAssemblySelected = Boolean(selectedAssemblyId && (!checkedTreePartIds.length || (checkedTreePartIds.length === 1 && checkedTreePartIds[0] === `assembly:${selectedAssemblyId}`)))
   const multipleSelected = selectedEntityParts.length > 1 && !singleAssemblySelected
+  const selectedEntityRootIds = new Set(selectedEntityParts.map((part) => part.instanceId ? `instance:${part.instanceId}` : part.id))
+  const canEnterSelectedEditMode = Boolean(selectedId && selectedEntityParts.length && !editEntityId && (Boolean(selectedAssemblyId) || selectedEntityRootIds.size === 1))
   const selectedDisplayName = multipleSelected ? '多个实体' : (selectedAssembly?.name?.trim() || (selectedScenePart ? sceneEntityTreeName(project, selectedScenePart) : selectedAsset?.name ?? (selectedEntityParts[0] ? sceneEntityTreeName(project, selectedEntityParts[0]) : '未选择')))
   const selectedSourceAssets = [...new Map(selectedEntityParts
     .filter((part) => part.kind === 'asset' && part.instanceId)
@@ -2726,7 +2728,7 @@ function App() {
             <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { if (cameraControlApi) cameraControlApi.zoomOut(); else setZoomLevel((value) => clampZoomLevel(value - (value > 100 ? 50 : 10))); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${((zoomLevel - MIN_ZOOM_LEVEL) / (MAX_ZOOM_LEVEL - MIN_ZOOM_LEVEL)) * 100}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { if (cameraControlApi) cameraControlApi.zoomIn(); else setZoomLevel((value) => clampZoomLevel(value + (value >= 100 ? 50 : 10))); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{Math.round(zoomLevel)}%</span></div>
           </div>
         </section>
-        <Inspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? selectedEntityParts[0]?.colorOverride : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={Object.fromEntries(project.materials.map((material) => [material.id, material.color]))} copyPreview={copyPreview} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportEntityFile={exportSelectedEntityFile} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => setCopyPreview(null)} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} />
+        <Inspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? selectedEntityParts[0]?.colorOverride : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={Object.fromEntries(project.materials.map((material) => [material.id, material.color]))} copyPreview={copyPreview} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportEntityFile={exportSelectedEntityFile} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => setCopyPreview(null)} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
       </main>
       {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null) }} onImportScene={() => sceneLibraryImportInputRef.current?.click()} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} />}
       {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
@@ -2999,7 +3001,7 @@ function ToolButton({ icon, label, description, active, onClick }: { icon: React
   return <button className={`tool-button ${active ? 'active' : ''}`} data-tooltip={description} aria-label={label} onClick={onClick} title={description}>{icon}</button>
 }
 
-function Inspector({ entityName, source, selectedAsset, selectedPart, selectedParts, editEntityId, position, transformEditable, selectedColor, previewColor, previewVoxelColors, previewMaterialColors, copyPreview, onChangeTransform, onChangeColor, onMirror, onRotate, onExport, onExportEntityFile, onDuplicate, onChangeCopyDirection, onChangeCopyGap, onConfirmDuplicate, onCancelDuplicate, onDelete, onResetTransform, onSaveAsAsset }: { entityName: string; source: string; selectedAsset?: VoxelAsset; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; editEntityId: string | null; position: number[]; transformEditable: boolean; selectedColor: string; previewColor?: string; previewVoxelColors: Record<string, string>; previewMaterialColors: Record<string, string>; copyPreview: CopyPreviewState | null; onChangeTransform: (axis: number, value: number) => void; onChangeColor: (color: string) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onExport: () => void; onExportEntityFile: () => void; onDuplicate: (count: number) => void; onChangeCopyDirection: (axis: CopyDirectionAxis, sign: 1 | -1) => void; onChangeCopyGap: (gap: number) => void; onConfirmDuplicate: () => void; onCancelDuplicate: () => void; onDelete: () => void; onResetTransform: () => void; onSaveAsAsset: () => void }) {
+function Inspector({ entityName, source, selectedAsset, selectedPart, selectedParts, editEntityId, canEnterEditMode, editTargetId, position, transformEditable, selectedColor, previewColor, previewVoxelColors, previewMaterialColors, copyPreview, onChangeTransform, onChangeColor, onMirror, onRotate, onExport, onExportEntityFile, onDuplicate, onChangeCopyDirection, onChangeCopyGap, onConfirmDuplicate, onCancelDuplicate, onDelete, onResetTransform, onSaveAsAsset, onEnterEditMode }: { entityName: string; source: string; selectedAsset?: VoxelAsset; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; editEntityId: string | null; canEnterEditMode: boolean; editTargetId: string; position: number[]; transformEditable: boolean; selectedColor: string; previewColor?: string; previewVoxelColors: Record<string, string>; previewMaterialColors: Record<string, string>; copyPreview: CopyPreviewState | null; onChangeTransform: (axis: number, value: number) => void; onChangeColor: (color: string) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onExport: () => void; onExportEntityFile: () => void; onDuplicate: (count: number) => void; onChangeCopyDirection: (axis: CopyDirectionAxis, sign: 1 | -1) => void; onChangeCopyGap: (gap: number) => void; onConfirmDuplicate: () => void; onCancelDuplicate: () => void; onDelete: () => void; onResetTransform: () => void; onSaveAsAsset: () => void; onEnterEditMode: (entityId: string) => void }) {
   const [copyCount, setCopyCount] = useState(1)
   const [mirrorAxis, setMirrorAxis] = useState<'x' | 'y' | 'z'>('x')
   const [rotateAxis, setRotateAxis] = useState<'x' | 'y' | 'z'>('z')
@@ -3020,12 +3022,13 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
       <div className="field-label">选中实体</div><div className="select-field entity-name-field">{entityName}</div>
       <div className="field-label">来源</div><div className="input-field muted-field">{source}</div>
       <div className="entity-preview"><VoxelMiniPreview voxels={previewVoxels} asset={selectedAsset} colorOverride={previewColor} voxelColors={previewVoxelColors} materialColors={previewMaterialColors} /></div>
+      {canEnterEditMode && <button className="enter-edit-button" onClick={() => onEnterEditMode(editTargetId)}>进入编辑模式</button>}
     </div>
-    <div className="inspector-section">
+    {selectedParts.length > 0 && <div className="inspector-section">
       <div className="section-heading"><span>变换</span><button className="tiny-icon" onClick={onResetTransform} title="重置变换"><RotateCcw size={13} /></button></div>
       <TransformRow icon={<Move3d size={14} />} label="位置" values={position} editable={transformEditable} onChange={onChangeTransform} />
-      {!transformEditable && <div className="transform-hint">多选实体时不可直接编辑单一位置</div>}
-    </div>
+      {selectedParts.length > 1 && !transformEditable && <div className="transform-hint">多选实体时不可直接编辑单一位置</div>}
+    </div>}
     <div className="inspector-section color-section">
       <div className="section-heading"><span>颜色</span><span className="instance-label">实体覆盖色</span></div>
       <ColorEditor color={selectedColor} disabled={!selectedParts.length} onChange={onChangeColor} />
@@ -3574,7 +3577,6 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     resize()
     const observer = new ResizeObserver(resize)
     observer.observe(mount)
-    const occlusionRaycaster = new THREE.Raycaster()
     let renderCount = 0
     const updateAxisGizmo = () => {
       const svg = axisGizmoRef.current
@@ -3612,48 +3614,9 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         }
       })
     }
-    const updateEditOcclusion = () => {
-      const editState = editRenderStateRef.current
-      const currentCamera = cameraRef.current
-      if (!editState.active || !currentCamera || !group.children.length) return
-      const occludedPartIds = new Set<string>()
-      const targetMeshes: THREE.Mesh[] = []
-      group.traverse((object) => {
-        if (object instanceof THREE.Mesh && !object.userData.selectionGlow && editState.partIds.has(object.userData.scenePartId as string)) targetMeshes.push(object)
-      })
-      const origin = currentCamera.getWorldPosition(new THREE.Vector3())
-      targetMeshes.forEach((targetMesh) => {
-        const targetPosition = targetMesh.getWorldPosition(new THREE.Vector3())
-        const rayDirection = targetPosition.clone().sub(origin)
-        const targetDistance = rayDirection.length()
-        if (targetDistance <= 0.001) return
-        rayDirection.normalize()
-        occlusionRaycaster.set(origin, rayDirection)
-        occlusionRaycaster.near = 0.001
-        occlusionRaycaster.far = Math.max(0.001, targetDistance - 0.002)
-        const occluder = occlusionRaycaster.intersectObject(group, true).find((hit) => {
-          const scenePartId = hit.object.userData.scenePartId as string | undefined
-          return Boolean(scenePartId && !editState.partIds.has(scenePartId) && !hit.object.userData.selectionGlow)
-        })
-        const scenePartId = occluder?.object.userData.scenePartId as string | undefined
-        if (scenePartId) occludedPartIds.add(scenePartId)
-      })
-      group.traverse((object) => {
-        const scenePartId = object.userData.scenePartId as string | undefined
-        if (!(object instanceof THREE.Mesh) || !scenePartId || editState.partIds.has(scenePartId)) return
-        const glowParts = object.userData.selectionGlowParts as THREE.Object3D[] | undefined
-        const occluded = occludedPartIds.has(scenePartId)
-        const meshMaterial = object.material as THREE.MeshStandardMaterial
-        meshMaterial.transparent = occluded
-        meshMaterial.opacity = occluded ? 0 : 1
-        meshMaterial.depthWrite = !occluded
-        glowParts?.forEach((part) => { part.visible = occluded })
-      })
-    }
     animate = () => {
       frame = 0
       const controlsAnimating = controls.update()
-      updateEditOcclusion()
       updateAxisGizmo()
       const currentCamera = cameraRef.current ?? camera
       renderer.render(scene, currentCamera)
