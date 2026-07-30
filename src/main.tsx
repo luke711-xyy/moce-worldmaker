@@ -477,6 +477,13 @@ type AssetCategoryNode = {
   assets: VoxelAsset[]
 }
 
+type ProjectHistoryEntry = {
+  project: ProjectState
+  editEntityId: string | null
+  selectedId: string
+  checkedTreePartIds: string[]
+}
+
 function assetCategoryKey(path: string[]): string {
   return path.join('\u001f')
 }
@@ -546,7 +553,7 @@ function assetCategoryTreeFromAssetsAndPaths(assets: VoxelAsset[], paths: string
 function App() {
   const [project, setProject] = useState<ProjectState>(() => normalizeStoredProject(makeDefaultProject()))
   const projectRef = useRef(project)
-  const historyRef = useRef<{ past: ProjectState[]; future: ProjectState[] }>({ past: [], future: [] })
+  const historyRef = useRef<{ past: ProjectHistoryEntry[]; future: ProjectHistoryEntry[] }>({ past: [], future: [] })
   const [historyRevision, setHistoryRevision] = useState(0)
   const [selectedId, setSelectedId] = useState('inst-chinese')
   const [tool, setTool] = useState<Tool>('select')
@@ -728,7 +735,12 @@ function App() {
   const commitProject = (next: ProjectState, trackHistory = true) => {
     const normalizedNext = normalizeStoredProject(next)
     if (trackHistory) {
-      historyRef.current.past = [...historyRef.current.past, structuredClone(projectRef.current)].slice(-50)
+      historyRef.current.past = [...historyRef.current.past, {
+        project: structuredClone(projectRef.current),
+        editEntityId,
+        selectedId,
+        checkedTreePartIds: [...checkedTreePartIds],
+      }].slice(-50)
       historyRef.current.future = []
     }
     sceneOccupancyRef.current?.syncParts(sceneEntityParts(normalizedNext))
@@ -924,10 +936,18 @@ function App() {
       setNotice('没有可撤销的操作')
       return
     }
-    historyRef.current.future.push(structuredClone(projectRef.current))
-    sceneOccupancyRef.current?.syncParts(sceneEntityParts(previous))
-    projectRef.current = previous
-    setProject(previous)
+    historyRef.current.future.push({
+      project: structuredClone(projectRef.current),
+      editEntityId,
+      selectedId,
+      checkedTreePartIds: [...checkedTreePartIds],
+    })
+    sceneOccupancyRef.current?.syncParts(sceneEntityParts(previous.project))
+    projectRef.current = previous.project
+    setProject(previous.project)
+    setEditEntityId(previous.editEntityId)
+    setSelectedId(previous.selectedId)
+    setCheckedTreePartIds([...previous.checkedTreePartIds])
     setHistoryRevision((value) => value + 1)
     setNotice('已撤销')
   }
@@ -938,10 +958,18 @@ function App() {
       setNotice('没有可重做的操作')
       return
     }
-    historyRef.current.past.push(structuredClone(projectRef.current))
-    sceneOccupancyRef.current?.syncParts(sceneEntityParts(next))
-    projectRef.current = next
-    setProject(next)
+    historyRef.current.past.push({
+      project: structuredClone(projectRef.current),
+      editEntityId,
+      selectedId,
+      checkedTreePartIds: [...checkedTreePartIds],
+    })
+    sceneOccupancyRef.current?.syncParts(sceneEntityParts(next.project))
+    projectRef.current = next.project
+    setProject(next.project)
+    setEditEntityId(next.editEntityId)
+    setSelectedId(next.selectedId)
+    setCheckedTreePartIds([...next.checkedTreePartIds])
     setHistoryRevision((value) => value + 1)
     setNotice('已重做')
   }
@@ -963,10 +991,6 @@ function App() {
         && (part.id === editEntityId || Boolean(editAssemblyId && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(editAssemblyId)))
         && part.voxels.some((candidate) => neighbors.some((neighbor) => sceneVoxelKey(candidate) === sceneVoxelKey(neighbor))))
       : undefined
-    const touchingCustomIds = editingCustomId
-      && currentProject.customVoxels.some((candidate) => voxelEntityId(candidate) === editingCustomId && neighbors.some((neighbor) => sceneVoxelKey(candidate) === sceneVoxelKey(neighbor)))
-      ? [editingCustomId]
-      : []
     if (editAssemblyId) {
       const entityId = `voxel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       updateProject((draft) => {
@@ -979,7 +1003,7 @@ function App() {
       setNotice(`装配体编辑模式 · 已新建子实体并加入当前装配体 · ${voxel.x}, ${voxel.y}, ${voxel.z}`)
       return
     }
-    if (assetNeighbor?.instanceId) {
+    if (assetNeighbor?.instanceId && editEntityId) {
       const instance = currentProject.instances.find((item) => item.id === assetNeighbor.instanceId)
       const asset = instance ? currentProject.assets.find((item) => item.id === instance.assetId) : undefined
       const sceneNeighbor = assetNeighbor.voxels.find((candidate) => neighbors.some((neighbor) => sceneVoxelKey(candidate) === sceneVoxelKey(neighbor)))
@@ -1003,20 +1027,19 @@ function App() {
       setNotice('当前处于实体编辑模式 · 请点击当前实体表面或相邻面进行修改')
       return
     }
-    const entityId = touchingCustomIds[0] ?? editingCustomId ?? voxel.entityId ?? `voxel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    // Outside edit mode every brush stroke starts a new user entity, even if
+    // the new voxel touches an existing custom entity. Only an explicit edit
+    // target is allowed to reuse an existing entity id.
+    const entityId = editingCustomId ?? `voxel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     updateProject((draft) => {
       const exists = draft.customVoxels.some((item) => item.x === voxel.x && item.y === voxel.y && item.z === voxel.z)
       if (exists) return
-      draft.customVoxels = draft.customVoxels.map((item) => touchingCustomIds.includes(voxelEntityId(item)) ? { ...item, entityId } : item)
       draft.customVoxels.push({ ...voxel, entityId })
-      if (touchingCustomIds.length > 1) {
-        draft.assemblies = (draft.assemblies ?? []).filter((assembly) => !assembly.memberKeys.some((memberKey) => touchingCustomIds.some((id) => memberKey === `voxel:${id}`)))
-      }
     })
     const customEntitySelectionId = `custom:${entityId}`
     setSelectedId(customEntitySelectionId)
-    if (!touchingCustomIds.length && !editingCustomId) setEditEntityId(customEntitySelectionId)
-    setNotice(touchingCustomIds.length || editingCustomId ? `已在用户实体上添加体素 · ${voxel.x}, ${voxel.y}, ${voxel.z}` : `已新建用户实体并进入编辑模式 · ${voxel.x}, ${voxel.y}, ${voxel.z}`)
+    if (!editingCustomId) setEditEntityId(customEntitySelectionId)
+    setNotice(editingCustomId ? `已在当前用户实体上添加体素 · ${voxel.x}, ${voxel.y}, ${voxel.z}` : `已新建用户实体并进入编辑模式 · ${voxel.x}, ${voxel.y}, ${voxel.z}`)
   }
 
   const removeVoxel = (voxel: Voxel) => {
@@ -2128,6 +2151,11 @@ function App() {
     const asset = assemblyAsset
       ? { ...assemblyAsset, name: baseName, color: templateColor }
       : makeAssetFromSceneParts(`asset-custom-${Date.now()}`, baseName, colorizedParts, templateColor, templateAccent)
+    // A multi-selection is a set of independently colored parts. Keep those
+    // resolved colors in each voxel's materialId and never add a whole-asset
+    // templateColor, otherwise the first selected entity recolors the entire
+    // saved template when it is rendered later.
+    if (multipleSelected) delete asset.templateColor
     setAssetCategorySave({ asset: { ...asset, isTemplate: true } })
   }
 
@@ -3846,12 +3874,21 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     if (project.customVoxels.length) {
       const custom = new THREE.Group()
       custom.name = 'custom-voxels'
-      for (const component of voxelComponents(project.customVoxels)) {
+      // Rendering ownership must follow the persisted entityId, not geometric
+      // connectivity. Two independent user entities are allowed to touch; if
+      // they are rendered as one connected component, the first voxel's id and
+      // color leak into the other entity and selection/highlight becomes wrong.
+      const voxelsByEntity = new Map<string, Voxel[]>()
+      project.customVoxels.forEach((voxel) => {
+        const entityId = voxelEntityId(voxel)
+        voxelsByEntity.set(entityId, [...(voxelsByEntity.get(entityId) ?? []), voxel])
+      })
+      for (const [entityId, component] of voxelsByEntity) {
         const componentGroup = new THREE.Group()
-        const componentScenePartId = `custom:${voxelEntityId(component[0])}`
+        const componentScenePartId = `custom:${entityId}`
         componentGroup.userData.scenePartId = componentScenePartId
         const occupied = new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
-        const componentColor = project.customColors?.[voxelEntityId(component[0])]
+        const componentColor = project.customColors?.[entityId]
         const greedyColorIds = new Map<string, number>()
         const greedyColors: string[] = ['#ffffff']
         const greedyVoxels = component.map((voxel) => {
@@ -4069,12 +4106,12 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     pointerRef.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
     pointerRef.current.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
     raycasterRef.current.setFromCamera(pointerRef.current, camera)
-    const rawHits = tool !== 'select' && !placementAsset && groupRef.current ? raycasterRef.current.intersectObject(groupRef.current, true) : []
+    const rawHits = !placementAsset && groupRef.current ? raycasterRef.current.intersectObject(groupRef.current, true) : []
     const hits = editEntityId ? rawHits.filter((item) => belongsToEditEntity(item.object)) : rawHits
     const voxelHit = onRaycastVoxel(raycasterRef.current.ray.origin, raycasterRef.current.ray.direction)
     const floor = scene.getObjectByName('editing-floor')
     const floorHit = floor ? raycasterRef.current.intersectObject(floor, false)[0] : undefined
-    return { hits, voxelHit, floorPoint: floorHit?.point ?? null }
+    return { rawHits, hits, voxelHit, floorPoint: floorHit?.point ?? null }
   }
 
   const makeVerticalPlane = (anchor: THREE.Vector3) => {
@@ -4191,7 +4228,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   const applyEditAtPointer = (event: React.PointerEvent<HTMLDivElement>) => {
     const context = getPointerContext(event)
     if (!context) return
-    const { hits, floorPoint } = context
+    const { rawHits, hits, floorPoint } = context
     const hit = hits[0]
     if (tool === 'select' && editEntityId) return
     if (tool === 'select' && hit?.object.userData.scenePartId && belongsToEditEntity(hit.object)) {
@@ -4199,12 +4236,33 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       return
     }
     if (tool !== 'brush' && tool !== 'erase') return
+    // Edit mode changes rendering emphasis, not physical occupancy. If a
+    // different entity is the first visible voxel hit, stop here instead of
+    // filtering it out and falling through to the edited entity or the floor.
+    // This keeps hidden geometry from being painted through.
+    if (editEntityId) {
+      const firstVoxelHit = rawHits.find((item) => {
+        const hasVoxel = Boolean(intersectionVoxel(item, 'instanceVoxels', 'instanceVoxel') || intersectionVoxel(item, 'customVoxels', 'customVoxel'))
+        return hasVoxel
+      })
+      if (firstVoxelHit && !belongsToEditEntity(firstVoxelHit.object)) {
+        onNotice('当前实体被其他实体遮挡 · 绘制不能穿透已有实体')
+        return
+      }
+    }
     const instanceHit = hits.find((item) => item.object.userData.instanceId && intersectionVoxel(item, 'instanceVoxels', 'instanceVoxel') && belongsToEditEntity(item.object))
     if (instanceHit?.object.userData.instanceId) {
       const instanceId = instanceHit.object.userData.instanceId as string
       const hitVoxel = intersectionVoxel(instanceHit, 'instanceVoxels', 'instanceVoxel')
       if (!hitVoxel) return
-      if (tool === 'brush') {
+      if (!editEntityId) {
+        if (tool === 'brush' && instanceHit.face) {
+          const displayNormal = instanceHit.face.normal.clone().transformDirection(instanceHit.object.matrixWorld)
+          onAddVoxel(adjacentVoxel(hitVoxel, { x: displayNormal.x, y: displayNormal.z, z: displayNormal.y }, activeMaterial))
+        } else {
+          onNotice('非编辑模式下不能擦除资产实体 · 请先进入编辑模式')
+        }
+      } else if (tool === 'brush') {
         if (!instanceHit.face) return
         const displayNormal = instanceHit.face.normal.clone().transformDirection(instanceHit.object.matrixWorld)
         onEditInstanceVoxel(instanceId, adjacentVoxel(hitVoxel, { x: displayNormal.x, y: displayNormal.z, z: displayNormal.y }, activeMaterial), 'add')
@@ -4249,7 +4307,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     if (occupiedAsset) {
       const asset = assetMap.get(occupiedAsset.assetId)
       const localVoxel = asset ? findInstanceVoxelAtSceneVoxel(occupiedAsset, asset, sceneVoxel) : undefined
-      if (tool === 'erase' && localVoxel) onEditInstanceVoxel(occupiedAsset.id, localVoxel, 'remove')
+      if (editEntityId && tool === 'erase' && localVoxel) onEditInstanceVoxel(occupiedAsset.id, localVoxel, 'remove')
       else onNotice('目标网格已有资产体素 · 请点击资产表面编辑')
       return
     }
