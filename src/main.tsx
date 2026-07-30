@@ -3290,6 +3290,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   const onZoomChangeRef = useRef(onZoomChange)
   const zoomReportFrameRef = useRef<number | null>(null)
   const cameraZoomLevelRef = useRef(100)
+  const lastReportedZoomLevelRef = useRef(100)
   const invalidateRenderRef = useRef<(durationMs?: number) => void>(() => {})
   const perspectiveBaseDistanceRef = useRef(Math.sqrt(16 ** 2 + 18 ** 2 + 18 ** 2))
   const editRenderStateRef = useRef<{ active: boolean; partIds: Set<string> }>({ active: false, partIds: new Set() })
@@ -3399,6 +3400,12 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         ? orthographic.zoom
         : perspectiveBaseDistanceRef.current / Math.max(0.0001, perspective.position.distanceTo(controls.target))
       const nextZoom = clampZoomLevel(factor * 100)
+      // OrbitControls emits `change` for camera rotation/pan as well. Do not
+      // feed every identical (or floating-point-noise) zoom value through
+      // React, otherwise the controlled zoom effect can repeatedly touch the
+      // camera while a wheel gesture is still in progress.
+      if (Math.abs(lastReportedZoomLevelRef.current - nextZoom) < 0.01) return
+      lastReportedZoomLevelRef.current = nextZoom
       cameraZoomLevelRef.current = nextZoom
       if (zoomReportFrameRef.current !== null) return
       zoomReportFrameRef.current = requestAnimationFrame(() => {
@@ -3653,6 +3660,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     const nextZoom = clampZoomLevel(zoomLevel)
     if (Math.abs(cameraZoomLevelRef.current - nextZoom) < 0.05) return
     cameraZoomLevelRef.current = nextZoom
+    lastReportedZoomLevelRef.current = nextZoom
     const factor = nextZoom / 100
     cameras.orthographic.zoom = factor
     cameras.orthographic.updateProjectionMatrix()
@@ -3663,7 +3671,6 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     }
     cameras.perspective.fov = 38
     cameras.perspective.updateProjectionMatrix()
-    controls.update()
     invalidateRenderRef.current(120)
   }, [zoomLevel])
 
