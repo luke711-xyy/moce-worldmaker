@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneEntityParts, snapWorld, uniqueAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel } from './voxel'
+import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
     const project = makeDefaultProject()
     expect(project.voxelSizeMm).toBe(1)
     expect(project.sceneSizeCm).toBe(20)
+    expect(sceneBoundsForProject(project)).toEqual({ x: 200, y: 200, z: 200 })
     expect(project.instances.filter((instance) => instance.style !== '基础件')).toHaveLength(4)
   })
 
@@ -17,6 +18,21 @@ describe('莫测造境体素核心数据', () => {
     expect(voxelCenterToWorld(2)).toBe(0.25)
     expect(worldToVoxel(1)).toBe(10)
     expect(snapWorld(0.30000000000000004)).toBe(0.3)
+  })
+
+  it('keeps grid lines at cell boundaries and voxel centers inside cells', () => {
+    expect(worldToVoxelCell(0.01)).toBe(0)
+    expect(worldToVoxelCell(-0.01)).toBe(-1)
+    expect(worldToVoxelCenter(0.05)).toBe(0)
+    expect(worldToVoxelCenter(-0.05)).toBe(-1)
+    expect(snapAssetOrigin(0, 1)).toBe(0.05)
+    expect(snapAssetOrigin(0, 2)).toBe(0)
+    expect(snapAssetOrigin(0.37, 3)).toBe(0.35)
+  })
+
+  it('derives backward-compatible scene bounds from legacy scene size', () => {
+    expect(sceneBoundsForProject({ sceneSizeCm: 12 })).toEqual({ x: 120, y: 120, z: 120 })
+    expect(sceneBoundsForProject({ sceneSizeCm: 12, sceneBounds: { x: 300, y: 240, z: 80 } })).toEqual({ x: 300, y: 240, z: 80 })
   })
 
   it('exports a voxel asset as ASCII STL with a solid boundary', () => {
@@ -88,7 +104,7 @@ describe('莫测造境体素核心数据', () => {
   it('maps scene grid cells to centered asset voxels, including rotated instances', () => {
     const project = makeDefaultProject()
     const asset = project.assets.find((item) => item.id === 'house-chinese')!
-    const instance = { ...project.instances[0], assetId: asset.id, x: 0, z: 0, rotation: 0 }
+    const instance = { ...project.instances[0], assetId: asset.id, x: snapAssetOrigin(0, asset.width), z: snapAssetOrigin(0, asset.depth), rotation: 0 }
     expect(findInstanceVoxelAtSceneVoxel(instance, asset, { x: -3, y: 0, z: -3 })).toEqual(expect.objectContaining({ x: 0, y: 0, z: 0 }))
     const rotated = { ...instance, rotation: 90 }
     expect(findInstanceVoxelAtSceneVoxel(rotated, asset, { x: -3, y: 0, z: 3 })).toEqual(expect.objectContaining({ x: 0, y: 0, z: 0 }))
@@ -212,5 +228,13 @@ describe('莫测造境体素核心数据', () => {
     const project = makeDefaultProject()
     expect(uniqueAssetName(project.assets, '街角树')).toBe('街角树 2')
     expect(uniqueAssetName(project.assets, '全新实体')).toBe('全新实体')
+  })
+
+  it('uses parenthesized suffixes for template asset name collisions', () => {
+    const project = makeDefaultProject()
+    expect(uniqueTemplateAssetName(project.assets, '街角树')).toBe('街角树 (1)')
+    const withCopy = [...project.assets, { ...project.assets.find((asset) => asset.name === '街角树')!, id: 'tree-copy', name: '街角树 (1)' }]
+    expect(uniqueTemplateAssetName(withCopy, '街角树')).toBe('街角树 (2)')
+    expect(uniqueTemplateAssetName(project.assets, '街角树', 'tree-basic')).toBe('街角树')
   })
 })

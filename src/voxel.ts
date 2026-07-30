@@ -22,10 +22,14 @@ export type VoxelOverride = Voxel & {
 export type VoxelAsset = {
   id: string
   name: string
+  /** Hierarchical asset-library category, from root to leaf. */
+  categoryPath?: string[]
   style: string
   kind: 'house' | 'road' | 'public' | 'nature' | 'character' | 'imported'
   color: string
   accent: string
+  /** Optional whole-asset color saved by the template editor. */
+  templateColor?: string
   width: number
   depth: number
   height: number
@@ -36,6 +40,8 @@ export type VoxelAsset = {
   assembly?: AssetAssembly
   /** Only template assets appear in the left asset library. */
   isTemplate?: boolean
+  /** Stable link back to the template used to create a scene snapshot. */
+  templateSourceId?: string
 }
 
 export type AssetAssembly = {
@@ -66,7 +72,9 @@ export type ProjectState = {
   version: 1
   name: string
   voxelSizeMm: 1
-  sceneSizeCm: 20
+  sceneSizeCm: number
+  /** Scene envelope in project voxels: X/Y are the ground plane, Z is height. */
+  sceneBounds?: SceneBounds
   materials: Material[]
   assets: VoxelAsset[]
   instances: SceneInstance[]
@@ -83,6 +91,23 @@ export type ProjectState = {
   childSequenceCounters?: Record<string, number>
   assemblies?: SceneAssembly[]
   lockedMemberKeys?: string[]
+}
+
+export const DEFAULT_ASSET_CATEGORY = '未命名类别'
+
+export function normalizeAssetCategoryPath(path: unknown): string[] {
+  if (!Array.isArray(path)) return [DEFAULT_ASSET_CATEGORY]
+  const normalized = path
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => value.trim())
+    .filter(Boolean)
+  return normalized.length ? normalized : [DEFAULT_ASSET_CATEGORY]
+}
+
+export type SceneBounds = {
+  x: number
+  y: number
+  z: number
 }
 
 export type SceneAssembly = {
@@ -118,6 +143,15 @@ export function uniqueAssetName(assets: VoxelAsset[], requestedName: string): st
   let index = 2
   while (existing.has(`${baseName} ${index}`)) index += 1
   return `${baseName} ${index}`
+}
+
+export function uniqueTemplateAssetName(assets: VoxelAsset[], requestedName: string, excludedAssetId?: string): string {
+  const baseName = requestedName.trim() || '未命名实体'
+  const existing = new Set(assets.filter((asset) => asset.id !== excludedAssetId).map((asset) => asset.name.trim()))
+  if (!existing.has(baseName)) return baseName
+  let index = 1
+  while (existing.has(`${baseName} (${index})`)) index += 1
+  return `${baseName} (${index})`
 }
 
 export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEntityPart[], color = '#6c827d', accent = '#d2a354'): VoxelAsset {
@@ -156,6 +190,15 @@ export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEn
 export const WORLD_UNITS_PER_MM = 0.1
 export const VOXEL_WORLD_SIZE = WORLD_UNITS_PER_MM
 
+export function sceneBoundsForProject(project: Pick<ProjectState, 'sceneSizeCm' | 'sceneBounds'>): SceneBounds {
+  const fallback = Math.max(1, Math.round((project.sceneSizeCm ?? 20) / VOXEL_WORLD_SIZE))
+  return {
+    x: Math.max(1, Math.round(project.sceneBounds?.x ?? fallback)),
+    y: Math.max(1, Math.round(project.sceneBounds?.y ?? fallback)),
+    z: Math.max(1, Math.round(project.sceneBounds?.z ?? fallback)),
+  }
+}
+
 function roundWorld(value: number): number {
   return Number(value.toFixed(3))
 }
@@ -170,6 +213,31 @@ export function voxelCenterToWorld(value: number): number {
 
 export function worldToVoxel(value: number): number {
   return Math.round(value / VOXEL_WORLD_SIZE)
+}
+
+/** Convert a world-space point on the ground into the cell index it falls in. */
+export function worldToVoxelCell(value: number): number {
+  return Math.floor(value / VOXEL_WORLD_SIZE)
+}
+
+/** Convert a world-space voxel center back into its integer cell index. */
+export function worldToVoxelCenter(value: number): number {
+  return Math.round(value / VOXEL_WORLD_SIZE - 0.5)
+}
+
+/**
+ * Return the canonical origin for an asset whose bounding box must land on
+ * integer ground-grid boundaries. Odd-sized assets have a half-cell origin;
+ * even-sized assets have an integer origin.
+ */
+export function snapAssetOrigin(value: number, dimension: number): number {
+  const halfCell = dimension % 2 ? VOXEL_WORLD_SIZE / 2 : 0
+  return roundWorld((Math.round((value - halfCell) / VOXEL_WORLD_SIZE) * VOXEL_WORLD_SIZE) + halfCell)
+}
+
+export function assetOriginGridCoordinate(value: number, dimension: number): number {
+  const halfCell = dimension % 2 ? 0.5 : 0
+  return Math.round(value / VOXEL_WORLD_SIZE - halfCell)
 }
 
 export function snapWorld(value: number): number {
@@ -363,9 +431,9 @@ function resolveInstanceComponentSceneVoxels(instance: SceneInstance, asset: Vox
     }, rotationX, rotationY, rotationZ)
     return {
       ...voxel,
-      x: worldToVoxel(x + local.x),
+      x: worldToVoxelCenter(x + local.x),
       y: Math.round((local.z + y) / VOXEL_WORLD_SIZE - 0.5),
-      z: worldToVoxel(z + local.y),
+      z: worldToVoxelCenter(z + local.y),
     }
   })
 }
@@ -737,7 +805,7 @@ export function makeDefaultProject(): ProjectState {
     { id: 'inst-tree-a', assetId: 'tree-basic', x: -9, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
     { id: 'inst-tree-b', assetId: 'tree-basic', x: 8, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
   ]
-  return { version: 1, name: '莫测里·第一街区', voxelSizeMm: 1, sceneSizeCm: 20, materials: MATERIALS, assets, instances, customVoxels: [], customColors: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
+  return { version: 1, name: '莫测里·第一街区', voxelSizeMm: 1, sceneSizeCm: 20, sceneBounds: { x: 200, y: 200, z: 200 }, materials: MATERIALS, assets, instances, customVoxels: [], customColors: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
 }
 
 export function makeStl(asset: VoxelAsset): string {

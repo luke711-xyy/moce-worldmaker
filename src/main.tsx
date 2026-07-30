@@ -2,10 +2,12 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { Box, Brush, ChevronDown, ChevronRight, CircleUserRound, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, SquareDashedMousePointer, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, MATERIALS, Material, ProjectState, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, findInstanceVoxelAtSceneVoxel, highestVoxelAt, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneEntityParts, snapWorld, uniqueAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel } from './voxel'
-import { importModelAsVoxelAsset } from './model-import'
-import { LibraryResponse, loadAsset, loadLibrary, loadScene, saveAsset, saveScene } from './persistence'
+import { Box, Brush, ChevronDown, ChevronRight, CircleUserRound, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, makeAssetFromSceneParts, makeDefaultProject, makeStl, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
+import { LibraryResponse, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
+import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
+import { importModelAsVoxelAssetInWorker, ModelImportResult, VoxelizeMode } from './model-import'
 import './styles.css'
 
 type Tool = 'select' | 'brush' | 'erase'
@@ -67,6 +69,51 @@ type TreeContextMenuState = {
   y: number
 } | null
 
+type AssetContextMenuState = {
+  assetId: string
+  x: number
+  y: number
+} | null
+
+type AssetCategoryContextMenuState = {
+  path: string[]
+  x: number
+  y: number
+} | null
+
+type SceneLibraryContextMenuState = {
+  sceneId: string
+  x: number
+  y: number
+} | null
+
+type SceneEntityContextMenuState = {
+  assetId: string
+  x: number
+  y: number
+} | null
+
+type AssetCategorySaveState = {
+  asset: VoxelAsset
+} | null
+
+type ModelImportDialogState = {
+  file: File
+  result: ModelImportResult | null
+  error: string
+  progress: number
+  progressLabel: string
+  busy: boolean
+}
+
+type SceneFileRef = {
+  name: string
+  libraryId?: string
+  fileHandle?: FileSystemFileHandle
+}
+
+type UnsavedDecision = 'cancel' | 'save' | 'discard'
+
 type SceneTreeItem = {
   id: string
   label: string
@@ -78,6 +125,12 @@ type SceneTreeItem = {
 
 const CURRENT_SCENE_ID = 'scene-main'
 type PersistenceStatus = 'loading' | 'saved' | 'offline'
+const MIN_ZOOM_LEVEL = 50
+const MAX_ZOOM_LEVEL = 2000
+
+function clampZoomLevel(value: number): number {
+  return Math.max(MIN_ZOOM_LEVEL, Math.min(MAX_ZOOM_LEVEL, value))
+}
 
 function scenePartBaseName(project: ProjectState, part: SceneEntityPart): string {
   if (part.kind === 'custom') return part.label ?? '手动体素实体'
@@ -86,12 +139,38 @@ function scenePartBaseName(project: ProjectState, part: SceneEntityPart): string
   return `${asset?.name ?? '场景实体'}${part.label && part.label !== part.partId ? ` · ${part.label}` : ''}`
 }
 
+function sceneEntityTreeName(project: ProjectState, part: SceneEntityPart): string {
+  const storedName = project.entityNames?.[part.memberKey]
+  if (storedName) return storedName
+  return scenePartBaseName(project, part)
+}
+
+function materialColorForVoxel(project: ProjectState, voxel: Voxel, asset?: VoxelAsset): string {
+  if (voxel.materialId.startsWith('#')) return voxel.materialId
+  if (voxel.materialId === 'primary') return asset?.color ?? '#6c827d'
+  if (voxel.materialId === 'accent') return asset?.accent ?? '#d2a354'
+  return project.materials.find((material) => material.id === voxel.materialId)?.color
+    ?? MATERIALS.find((material) => material.id === voxel.materialId)?.color
+    ?? asset?.color
+    ?? '#6c827d'
+}
+
+function scenePartsDisplayColor(project: ProjectState, parts: SceneEntityPart[], asset?: VoxelAsset): string {
+  const override = parts.map((part) => part.colorOverride).find(Boolean)
+  if (override) return override!
+  if (asset?.templateColor) return asset.templateColor
+  const firstVoxel = parts.flatMap((part) => part.voxels)[0]
+  return firstVoxel ? materialColorForVoxel(project, firstVoxel, asset) : asset?.color ?? '#6c827d'
+}
+
 function normalizeStoredProject(loaded: ProjectState): ProjectState {
   const defaultAssets = new Map(makeDefaultProject().assets.map((asset) => [asset.id, asset]))
   const normalized: ProjectState = {
     ...loaded,
+    sceneBounds: sceneBoundsForProject(loaded),
     assets: (loaded.assets ?? []).map((asset) => ({
       ...asset,
+      categoryPath: normalizeAssetCategoryPath(asset.categoryPath),
       partVoxels: asset.partVoxels ?? defaultAssets.get(asset.id)?.partVoxels,
       isTemplate: asset.isTemplate ?? (!asset.source || asset.source === '场景实体保存' || (asset.kind !== 'imported' && !asset.source.includes('拆分子实体'))),
     })),
@@ -106,9 +185,25 @@ function normalizeStoredProject(loaded: ProjectState): ProjectState {
     assemblyChildSequence: { ...(loaded.assemblyChildSequence ?? {}) },
     childSequenceCounters: { ...(loaded.childSequenceCounters ?? {}) },
     assemblies: (loaded.assemblies ?? []).map((assembly) => ({ ...assembly, memberKeys: [...assembly.memberKeys] })),
-    instances: (loaded.instances ?? []).map((instance) => ({ ...instance, x: snapWorld(instance.x), y: snapWorld(instance.y ?? 0), z: snapWorld(instance.z), overrides: instance.overrides ?? [], partOffsets: instance.partOffsets ?? {} })),
+    instances: [],
     lockedMemberKeys: [...new Set(loaded.lockedMemberKeys ?? [])],
   }
+  const assetMap = new Map(normalized.assets.map((asset) => [asset.id, asset]))
+  normalized.instances = (loaded.instances ?? []).map((instance) => {
+    const asset = assetMap.get(instance.assetId)
+    return {
+      ...instance,
+      x: snapAssetOrigin(instance.x, asset?.width ?? 1),
+      y: snapWorld(instance.y ?? 0),
+      z: snapAssetOrigin(instance.z, asset?.depth ?? 1),
+      overrides: instance.overrides ?? [],
+      partOffsets: Object.fromEntries(Object.entries(instance.partOffsets ?? {}).map(([partId, offset]) => [partId, {
+        x: snapWorld(offset.x),
+        y: snapWorld(offset.y),
+        z: snapWorld(offset.z),
+      }])),
+    }
+  })
   return normalizeProjectNaming(normalized)
 }
 
@@ -120,6 +215,137 @@ function scenePartIsLocked(project: ProjectState, part: SceneEntityPart): boolea
     const assembly = project.assemblies?.find((item) => item.id === assemblyId)
     return Boolean(assembly?.memberKeys.some((memberKey) => lockedKeys.has(memberKey) || memberKey === part.memberKey))
   })
+}
+
+function sceneVoxelWithinBounds(voxel: Voxel, bounds: SceneBounds): boolean {
+  const halfVoxel = VOXEL_WORLD_SIZE / 2
+  const width = bounds.x * VOXEL_WORLD_SIZE
+  const depth = bounds.y * VOXEL_WORLD_SIZE
+  const height = bounds.z * VOXEL_WORLD_SIZE
+  const centerX = voxelCenterToWorld(voxel.x)
+  const centerY = voxelCenterToWorld(voxel.z)
+  const centerZ = voxelCenterToWorld(voxel.y)
+  return Math.abs(centerX) + halfVoxel <= width / 2 + 0.0001
+    && Math.abs(centerY) + halfVoxel <= depth / 2 + 0.0001
+    && centerZ - halfVoxel >= -0.0001
+    && centerZ + halfVoxel <= height + 0.0001
+}
+
+function sceneVoxelsWithinBounds(voxels: Voxel[], bounds: SceneBounds): boolean {
+  return voxels.every((voxel) => sceneVoxelWithinBounds(voxel, bounds))
+}
+
+function disposeThreeObject(object: THREE.Object3D) {
+  object.traverse((child) => {
+    if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
+      child.geometry.dispose()
+      const material = child.material
+      if (Array.isArray(material)) material.forEach((item) => item.dispose())
+      else material.dispose()
+    }
+  })
+}
+
+function createGroundGrid(bounds: SceneBounds) {
+  const width = bounds.x * VOXEL_WORLD_SIZE
+  const depth = bounds.y * VOXEL_WORLD_SIZE
+  const grid = new THREE.Group()
+  grid.name = 'editing-grid'
+  // Keep a layer just above and just below the floor. Both layers use normal
+  // depth testing, so the upper grid cannot draw through objects from above,
+  // while the lower layer remains available when viewing the scene from below.
+  for (const gridZ of [-0.006, 0.006]) {
+    const positions: number[] = []
+    for (let index = 0; index <= bounds.x; index += 1) {
+      const x = -width / 2 + index * VOXEL_WORLD_SIZE
+      positions.push(x, -depth / 2, gridZ, x, depth / 2, gridZ)
+    }
+    for (let index = 0; index <= bounds.y; index += 1) {
+      const y = -depth / 2 + index * VOXEL_WORLD_SIZE
+      positions.push(-width / 2, y, gridZ, width / 2, y, gridZ)
+    }
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+    const material = new THREE.LineBasicMaterial({ color: '#354449', transparent: true, opacity: 0.9, depthTest: true, depthWrite: false })
+    const layer = new THREE.LineSegments(geometry, material)
+    layer.name = 'editing-grid-layer'
+    layer.renderOrder = 1
+    grid.add(layer)
+  }
+  return grid
+}
+
+function createGroundBoundary(bounds: SceneBounds) {
+  const width = bounds.x * VOXEL_WORLD_SIZE
+  const depth = bounds.y * VOXEL_WORLD_SIZE
+  const group = new THREE.Group()
+  group.name = 'editing-ground-boundary'
+  const material = new THREE.MeshBasicMaterial({ color: '#d47a5b', transparent: true, opacity: 0.95, side: THREE.DoubleSide, depthTest: true, depthWrite: false })
+  const thickness = Math.max(0.045, VOXEL_WORLD_SIZE * 0.42)
+  const bars = [
+    { width: width + thickness, depth: thickness, x: 0, y: -depth / 2 },
+    { width: width + thickness, depth: thickness, x: 0, y: depth / 2 },
+    { width: thickness, depth: depth - thickness, x: -width / 2, y: 0 },
+    { width: thickness, depth: depth - thickness, x: width / 2, y: 0 },
+  ]
+  bars.forEach((bar) => {
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(bar.width, bar.depth), material.clone())
+    mesh.position.set(bar.x, bar.y, 0.014)
+    mesh.name = 'editing-ground-boundary-edge'
+    mesh.renderOrder = 1
+    group.add(mesh)
+  })
+  return group
+}
+
+function createBoundaryBox(bounds: SceneBounds) {
+  const width = bounds.x * VOXEL_WORLD_SIZE
+  const depth = bounds.y * VOXEL_WORLD_SIZE
+  const height = bounds.z * VOXEL_WORLD_SIZE
+  const x0 = -width / 2
+  const x1 = width / 2
+  const y0 = -depth / 2
+  const y1 = depth / 2
+  const z0 = 0.02
+  const z1 = height
+  const positions: number[] = []
+  const edge = (a: [number, number, number], b: [number, number, number]) => positions.push(...a, ...b)
+  ;[
+    [[x0, y0, z0], [x1, y0, z0]], [[x1, y0, z0], [x1, y1, z0]], [[x1, y1, z0], [x0, y1, z0]], [[x0, y1, z0], [x0, y0, z0]],
+    [[x0, y0, z1], [x1, y0, z1]], [[x1, y0, z1], [x1, y1, z1]], [[x1, y1, z1], [x0, y1, z1]], [[x0, y1, z1], [x0, y0, z1]],
+    [[x0, y0, z0], [x0, y0, z1]], [[x1, y0, z0], [x1, y0, z1]], [[x1, y1, z0], [x1, y1, z1]], [[x0, y1, z0], [x0, y1, z1]],
+  ].forEach(([a, b]) => edge(a as [number, number, number], b as [number, number, number]))
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  const material = new THREE.LineBasicMaterial({ color: '#58676a', transparent: true, opacity: 0.82, depthTest: true, depthWrite: false })
+  const box = new THREE.LineSegments(geometry, material)
+  box.name = 'editing-boundary-box'
+  box.renderOrder = 2
+  return box
+}
+
+function updateEditingBoundsVisuals(scene: THREE.Scene, bounds: SceneBounds) {
+  const floor = scene.getObjectByName('editing-floor') as THREE.Mesh | undefined
+  if (floor) {
+    floor.geometry.dispose()
+    floor.geometry = new THREE.PlaneGeometry(bounds.x * VOXEL_WORLD_SIZE, bounds.y * VOXEL_WORLD_SIZE)
+  }
+  const oldGrid = scene.getObjectByName('editing-grid')
+  if (oldGrid) {
+    scene.remove(oldGrid)
+    disposeThreeObject(oldGrid)
+  }
+  const oldBoundary = scene.getObjectByName('editing-ground-boundary')
+  if (oldBoundary) {
+    scene.remove(oldBoundary)
+    disposeThreeObject(oldBoundary)
+  }
+  const oldBox = scene.getObjectByName('editing-boundary-box')
+  if (oldBox) {
+    scene.remove(oldBox)
+    disposeThreeObject(oldBox)
+  }
+  scene.add(createGroundGrid(bounds), createGroundBoundary(bounds), createBoundaryBox(bounds))
 }
 
 function resolveGridMove(deltaX: number, deltaY: number, deltaZ: number, canOccupy: (deltaX: number, deltaY: number, deltaZ: number) => boolean): GridMoveResult {
@@ -190,6 +416,80 @@ const styleMaterialVariants: Record<string, { color: string; accent: string }> =
   日式风格: { color: '#20252a', accent: '#6c4b38' },
 }
 
+type AssetCategoryNode = {
+  name: string
+  path: string[]
+  key: string
+  children: AssetCategoryNode[]
+  assets: VoxelAsset[]
+}
+
+function assetCategoryKey(path: string[]): string {
+  return path.join('\u001f')
+}
+
+function buildAssetCategoryTree(paths: Array<{ path: string[]; asset?: VoxelAsset }>): AssetCategoryNode[] {
+  const roots: AssetCategoryNode[] = []
+  for (const entry of paths) {
+    const categoryPath = normalizeAssetCategoryPath(entry.path)
+    let children = roots
+    let node: AssetCategoryNode | undefined
+    const traversed: string[] = []
+    categoryPath.forEach((name) => {
+      traversed.push(name)
+      const key = assetCategoryKey(traversed)
+      node = children.find((candidate) => candidate.key === key)
+      if (!node) {
+        node = { name, path: [...traversed], key, children: [], assets: [] }
+        children.push(node)
+      }
+      children = node.children
+    })
+    if (entry.asset && node) node.assets.push(entry.asset)
+  }
+  return roots
+}
+
+function assetCategoryTreeFromAssets(assets: VoxelAsset[]): AssetCategoryNode[] {
+  return buildAssetCategoryTree(assets.map((asset) => ({ path: normalizeAssetCategoryPath(asset.categoryPath), asset })))
+}
+
+function assetCategoryTreeFromPaths(paths: string[][]): AssetCategoryNode[] {
+  return buildAssetCategoryTree(paths.map((path) => ({ path })))
+}
+
+function collectAssetCategoryPaths(assets: VoxelAsset[]): string[][] {
+  const paths = new Map<string, string[]>()
+  for (const asset of assets) {
+    if (asset.isTemplate === false) continue
+    const path = normalizeAssetCategoryPath(asset.categoryPath)
+    for (let index = 1; index <= path.length; index += 1) {
+      const prefix = path.slice(0, index)
+      paths.set(assetCategoryKey(prefix), prefix)
+    }
+  }
+  return [...paths.values()]
+}
+
+function normalizeAssetCategoryPaths(paths: string[][], assets: VoxelAsset[] = []): string[][] {
+  const merged = new Map<string, string[]>()
+  for (const path of [...paths, ...collectAssetCategoryPaths(assets)]) {
+    const normalized = normalizeAssetCategoryPath(path)
+    for (let index = 1; index <= normalized.length; index += 1) {
+      const prefix = normalized.slice(0, index)
+      merged.set(assetCategoryKey(prefix), prefix)
+    }
+  }
+  return [...merged.values()]
+}
+
+function assetCategoryTreeFromAssetsAndPaths(assets: VoxelAsset[], paths: string[][]): AssetCategoryNode[] {
+  return buildAssetCategoryTree([
+    ...paths.map((path) => ({ path })),
+    ...assets.map((asset) => ({ path: normalizeAssetCategoryPath(asset.categoryPath), asset })),
+  ])
+}
+
 function App() {
   const [project, setProject] = useState<ProjectState>(() => normalizeStoredProject(makeDefaultProject()))
   const projectRef = useRef(project)
@@ -197,14 +497,15 @@ function App() {
   const [historyRevision, setHistoryRevision] = useState(0)
   const [selectedId, setSelectedId] = useState('inst-chinese')
   const [tool, setTool] = useState<Tool>('select')
-  const [activeStyle, setActiveStyle] = useState('全部')
   const [activeMaterial, setActiveMaterial] = useState('terracotta')
   const [recentMaterialIds, setRecentMaterialIds] = useState(() => MATERIALS.slice(0, 8).map((material) => material.id))
   const [notice, setNotice] = useState('就绪 · 本地工程未保存')
   const [query, setQuery] = useState('')
   const [viewMode, setViewMode] = useState<'正交' | '透视'>('正交')
   const [showGrid, setShowGrid] = useState(true)
-  const [showGround, setShowGround] = useState(true)
+  const [showBoundary, setShowBoundary] = useState(true)
+  const [boundaryOpen, setBoundaryOpen] = useState(false)
+  const [boundaryDraft, setBoundaryDraft] = useState<SceneBounds>(() => sceneBoundsForProject(makeDefaultProject()))
   const [dragAxis, setDragAxis] = useState<'horizontal' | 'vertical'>('horizontal')
   const [editEntityId, setEditEntityId] = useState<string | null>(null)
   const [placementAssetId, setPlacementAssetId] = useState<string | null>(null)
@@ -213,15 +514,71 @@ function App() {
   const [cameraControlApi, setCameraControlApi] = useState<CameraControlApi | null>(null)
   const [persistenceStatus, setPersistenceStatus] = useState<PersistenceStatus>('loading')
   const [libraryOpen, setLibraryOpen] = useState(false)
-  const [library, setLibrary] = useState<LibraryResponse>({ assets: [], scenes: [] })
+  const [library, setLibrary] = useState<LibraryResponse>({ assets: [], scenes: [], assetCategories: [] })
   const [libraryBusy, setLibraryBusy] = useState(false)
+  const [sceneFileRef, setSceneFileRef] = useState<SceneFileRef | null>(null)
+  const [savedSceneSignature, setSavedSceneSignature] = useState<string | null>(null)
+  const [unsavedDialogOpen, setUnsavedDialogOpen] = useState(false)
+  const [sceneLibraryContextMenu, setSceneLibraryContextMenu] = useState<SceneLibraryContextMenuState>(null)
+  const [selectedLibrarySceneId, setSelectedLibrarySceneId] = useState<string | null>(null)
+  const [selectedLibrarySceneProject, setSelectedLibrarySceneProject] = useState<ProjectState | null>(null)
   const [assetSidebarCollapsed, setAssetSidebarCollapsed] = useState(false)
   const [expandedAssemblies, setExpandedAssemblies] = useState<Record<string, boolean>>({})
   const [checkedTreePartIds, setCheckedTreePartIds] = useState<string[]>([])
   const [treeContextMenu, setTreeContextMenu] = useState<TreeContextMenuState>(null)
+  const [assetContextMenu, setAssetContextMenu] = useState<AssetContextMenuState>(null)
+  const [assetCategoryContextMenu, setAssetCategoryContextMenu] = useState<AssetCategoryContextMenuState>(null)
+  const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([])
+  const [assetCategoryPaths, setAssetCategoryPaths] = useState<string[][]>(() => collectAssetCategoryPaths(makeDefaultProject().assets))
+  const [assetCategorySave, setAssetCategorySave] = useState<AssetCategorySaveState>(null)
   const persistenceReadyRef = useRef(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const modelInputRef = useRef<HTMLInputElement>(null)
+  const sceneLibraryImportInputRef = useRef<HTMLInputElement>(null)
+  const entityFileInputRef = useRef<HTMLInputElement>(null)
+  const modelImportInputRef = useRef<HTMLInputElement>(null)
+  const pendingSceneOperationRef = useRef<(() => Promise<void>) | null>(null)
+  const [modelImportDialog, setModelImportDialog] = useState<ModelImportDialogState | null>(null)
+  const [modelImportTargetSize, setModelImportTargetSize] = useState(32)
+  const [modelImportMode, setModelImportMode] = useState<VoxelizeMode>('solid')
+  const [modelImportPreserveParts, setModelImportPreserveParts] = useState(true)
+
+  const currentSceneBounds = sceneBoundsForProject(project)
+  const currentSceneSignature = useMemo(() => {
+    try {
+      return sceneContentSignature(project)
+    } catch {
+      return ''
+    }
+  }, [project])
+  const sceneDirty = savedSceneSignature !== null && currentSceneSignature !== savedSceneSignature
+
+  const sceneFitsBounds = (candidate: SceneBounds, source = projectRef.current) => {
+    if (!sceneVoxelsWithinBounds(source.customVoxels, candidate)) return false
+    const assetMap = new Map(source.assets.map((asset) => [asset.id, asset]))
+    return source.instances.every((instance) => {
+      const asset = assetMap.get(instance.assetId)
+      return !asset || sceneVoxelsWithinBounds(resolveInstanceSceneVoxels(instance, asset), candidate)
+    })
+  }
+
+  const applySceneBounds = () => {
+    const next: SceneBounds = {
+      x: Math.max(1, Math.min(1000, Math.round(boundaryDraft.x))),
+      y: Math.max(1, Math.min(1000, Math.round(boundaryDraft.y))),
+      z: Math.max(1, Math.min(1000, Math.round(boundaryDraft.z))),
+    }
+    if (!sceneFitsBounds(next)) {
+      setNotice('场地尺寸不能缩小：已有实体超出新的场景边界，请先移动实体后再应用。')
+      return
+    }
+    updateProject((draft) => {
+      draft.sceneBounds = next
+      draft.sceneSizeCm = Math.max(next.x, next.y) * VOXEL_WORLD_SIZE
+    })
+    setBoundaryDraft(next)
+    setBoundaryOpen(false)
+    setNotice(`已应用场地边界 · XY ${next.x} × ${next.y} · Z ${next.z} 体素`)
+  }
 
   const sceneParts = useMemo(() => sceneEntityParts(project), [project])
   const lockedPartIds = useMemo(() => new Set(sceneParts.filter((part) => scenePartIsLocked(project, part)).map((part) => part.id)), [project, sceneParts])
@@ -229,6 +586,7 @@ function App() {
   const selectedScenePart = sceneParts.find((part) => part.id === selectedId) ?? sceneParts.find((part) => part.instanceId === selectedId)
   const selectedInstance = selectedScenePart?.instanceId ? project.instances.find((instance) => instance.id === selectedScenePart.instanceId) : project.instances.find((instance) => instance.id === selectedId)
   const selectedAsset = selectedInstance ? project.assets.find((asset) => asset.id === selectedInstance.assetId) : undefined
+  const selectedAssembly = selectedAssemblyId ? project.assemblies?.find((assembly) => assembly.id === selectedAssemblyId) : undefined
   const selectedEntityParts = useMemo(() => {
     const checkedPartIds = new Set(checkedTreePartIds.filter((id) => !id.startsWith('assembly:')))
     const checkedAssemblyIds = new Set(checkedTreePartIds.filter((id) => id.startsWith('assembly:')).map((id) => id.slice('assembly:'.length)))
@@ -240,16 +598,28 @@ function App() {
     if (!checkedPartIds.size && !checkedAssemblyIds.size) return []
     return sceneParts.filter((part) => checkedPartIds.has(part.id) || (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).some((assemblyId) => checkedAssemblyIds.has(assemblyId)))
   }, [sceneParts, selectedScenePart, selectedAssemblyId, selectedId, checkedTreePartIds])
+  const singleAssemblySelected = Boolean(selectedAssemblyId && (!checkedTreePartIds.length || (checkedTreePartIds.length === 1 && checkedTreePartIds[0] === `assembly:${selectedAssemblyId}`)))
+  const multipleSelected = selectedEntityParts.length > 1 && !singleAssemblySelected
+  const selectedDisplayName = multipleSelected ? '多个实体' : (selectedAssembly?.name?.trim() || (selectedScenePart ? sceneEntityTreeName(project, selectedScenePart) : selectedAsset?.name ?? (selectedEntityParts[0] ? sceneEntityTreeName(project, selectedEntityParts[0]) : '未选择')))
+  const selectedSourceAssets = [...new Map(selectedEntityParts
+    .filter((part) => part.kind === 'asset' && part.instanceId)
+    .map((part) => project.instances.find((instance) => instance.id === part.instanceId))
+    .filter((instance): instance is SceneInstance => Boolean(instance))
+    .map((instance) => [instance.assetId, project.assets.find((asset) => asset.id === instance.assetId)])
+    .filter((entry): entry is [string, VoxelAsset] => Boolean(entry[1]))).values()]
+  const selectedSourceAsset = selectedAsset ?? (selectedSourceAssets.length === 1 ? selectedSourceAssets[0] : undefined)
+  const selectedTemplateSource = selectedSourceAsset?.isTemplate === true
+    ? selectedSourceAsset
+    : selectedSourceAsset?.templateSourceId
+      ? project.assets.find((asset) => asset.id === selectedSourceAsset.templateSourceId && asset.isTemplate === true)
+      : undefined
+  const selectedSource = multipleSelected
+    ? '多个来源'
+    : selectedTemplateSource
+    ? `资产库 · ${normalizeAssetCategoryPath(selectedTemplateSource.categoryPath).join(' / ')}`
+    : '还未保存到资产库'
   const sceneTreeItems = useMemo<SceneTreeItem[]>(() => {
-    const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
-    const baseNameForPart = (part: SceneEntityPart) => {
-      const storedName = project.entityNames?.[part.memberKey]
-      if (storedName) return storedName
-      if (part.kind === 'custom') return part.label ?? '手动体素实体'
-      const instance = part.instanceId ? project.instances.find((item) => item.id === part.instanceId) : undefined
-      const asset = instance ? assetMap.get(instance.assetId) : undefined
-      return `${asset?.name ?? '场景实体'}${part.label && part.label !== part.partId ? ` · ${part.label}` : ''}`
-    }
+    const baseNameForPart = (part: SceneEntityPart) => sceneEntityTreeName(project, part)
     const assemblies = project.assemblies ?? []
     const assemblyMap = new Map(assemblies.map((assembly) => [assembly.id, assembly]))
     const partMatchesMemberKey = (part: SceneEntityPart, memberKey: string) => part.memberKey === memberKey || (memberKey.startsWith('asset:') && part.memberKey.startsWith(`${memberKey}:`))
@@ -313,6 +683,107 @@ function App() {
     commitProject(structuredClone(next), trackHistory)
   }
 
+  const markSceneSaved = (savedProject: ProjectState, fileRef?: SceneFileRef | null) => {
+    setSavedSceneSignature(sceneContentSignature(savedProject))
+    if (fileRef !== undefined) setSceneFileRef(fileRef)
+  }
+
+  const requestSceneReplace = (operation: () => Promise<void>) => {
+    if (!sceneDirty) {
+      void operation()
+      return
+    }
+    pendingSceneOperationRef.current = operation
+    setUnsavedDialogOpen(true)
+  }
+
+  const downloadSceneFile = (sceneFile: MoceSceneFile, fileName: string) => {
+    const blob = new Blob([JSON.stringify(sceneFile, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = fileName.endsWith('.moceworld') ? fileName : `${fileName}.moceworld`
+    anchor.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const downloadPortableFile = (file: MoceAssetFile | MoceEntityFile, fileName: string, extension: '.moceasset' | '.moceentity') => {
+    const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = fileName.endsWith(extension) ? fileName : `${fileName}${extension}`
+    anchor.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const saveProjectAsFile = async (forceSaveAs = false): Promise<boolean> => {
+    const snapshot = structuredClone(projectRef.current)
+    let sceneFile: MoceSceneFile
+    try {
+      sceneFile = createSceneFile(snapshot)
+    } catch (error) {
+      setNotice(error instanceof Error ? `保存失败 · ${error.message}` : '保存失败 · 场景文件生成失败')
+      return false
+    }
+    const suggestedName = `${snapshot.name || '未命名场景'}.moceworld`
+    const pickerWindow = window as Window & { showSaveFilePicker?: (options?: unknown) => Promise<FileSystemFileHandle> }
+    let handle = !forceSaveAs ? sceneFileRef?.fileHandle : undefined
+    let fileName = sceneFileRef?.name || suggestedName
+    try {
+      if (!handle && pickerWindow.showSaveFilePicker) {
+        handle = await pickerWindow.showSaveFilePicker({
+          suggestedName,
+          types: [{ description: '莫测造境场景文件', accept: { 'application/json': ['.moceworld'] } }],
+        })
+        fileName = handle.name
+      }
+      if (handle) {
+        const writable = await handle.createWritable()
+        await writable.write(JSON.stringify(sceneFile, null, 2))
+        await writable.close()
+      } else {
+        downloadSceneFile(sceneFile, fileName)
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return false
+      setNotice(`保存文件失败 · ${error instanceof Error ? error.message : '无法写入文件'}`)
+      return false
+    }
+    const targetSceneId = forceSaveAs ? CURRENT_SCENE_ID : sceneFileRef?.libraryId ?? CURRENT_SCENE_ID
+    let persisted = true
+    try {
+      await saveScene(targetSceneId, sceneFile)
+      setPersistenceStatus('saved')
+    } catch {
+      persisted = false
+      setPersistenceStatus('offline')
+    }
+    markSceneSaved(snapshot, { name: fileName, libraryId: forceSaveAs ? undefined : sceneFileRef?.libraryId, fileHandle: handle })
+    setNotice(persisted ? `场景已保存 · ${fileName}` : `文件已保存 · 场景库同步失败 · ${fileName}`)
+    return true
+  }
+
+  const handleUnsavedDecision = async (decision: UnsavedDecision) => {
+    if (decision === 'cancel') {
+      pendingSceneOperationRef.current = null
+      setUnsavedDialogOpen(false)
+      return
+    }
+    const operation = pendingSceneOperationRef.current
+    if (!operation) {
+      setUnsavedDialogOpen(false)
+      return
+    }
+    if (decision === 'save') {
+      const saved = await saveProjectAsFile(false)
+      if (!saved) return
+    }
+    pendingSceneOperationRef.current = null
+    setUnsavedDialogOpen(false)
+    await operation()
+  }
+
   useEffect(() => {
     let cancelled = false
     loadScene(CURRENT_SCENE_ID).then((loaded) => {
@@ -323,19 +794,21 @@ function App() {
       setSelectedId(normalized.instances[0]?.id ?? sceneEntityParts(normalized)[0]?.id ?? '')
       persistenceReadyRef.current = true
       setPersistenceStatus('saved')
-      void saveScene(CURRENT_SCENE_ID, normalized).catch(() => setPersistenceStatus('offline'))
-      setNotice(`已加载后端场景 · ${normalized.name}`)
+      markSceneSaved(normalized, null)
+      void saveScene(CURRENT_SCENE_ID, createSceneFile(normalized)).catch(() => setPersistenceStatus('offline'))
+      setNotice(`已加载场景 · ${normalized.name}`)
     }).catch(async (error: unknown) => {
       if (cancelled) return
       if (error instanceof Error && error.message.includes('场景不存在')) {
         try {
-          await saveScene(CURRENT_SCENE_ID, projectRef.current)
+          await saveScene(CURRENT_SCENE_ID, createSceneFile(projectRef.current))
           persistenceReadyRef.current = true
           setPersistenceStatus('saved')
-          setNotice('已创建后端场景 · 莫测里·第一街区')
+          markSceneSaved(projectRef.current, null)
+          setNotice('已创建场景 · 莫测里·第一街区')
         } catch {
           setPersistenceStatus('offline')
-          setNotice('后端场景不可用 · 当前使用本地草稿')
+          setNotice('场景库不可用 · 当前使用本地草稿')
         }
       } else {
         setPersistenceStatus('offline')
@@ -346,9 +819,23 @@ function App() {
   }, [])
 
   useEffect(() => {
+    let cancelled = false
+    loadLibrary().then((loaded) => {
+      if (cancelled) return
+      setLibrary(loaded)
+      setAssetCategoryPaths(normalizeAssetCategoryPaths(loaded.assetCategories ?? [], projectRef.current.assets))
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
     if (!persistenceReadyRef.current) return
     const timer = window.setTimeout(() => {
-      saveScene(CURRENT_SCENE_ID, project).then(() => setPersistenceStatus('saved')).catch(() => setPersistenceStatus('offline'))
+      try {
+        saveScene(CURRENT_SCENE_ID, createSceneFile(project)).then(() => setPersistenceStatus('saved')).catch(() => setPersistenceStatus('offline'))
+      } catch {
+        setPersistenceStatus('offline')
+      }
     }, 350)
     return () => window.clearTimeout(timer)
   }, [project])
@@ -391,8 +878,15 @@ function App() {
       { x: voxel.x, y: voxel.y + 1, z: voxel.z }, { x: voxel.x, y: voxel.y - 1, z: voxel.z },
       { x: voxel.x, y: voxel.y, z: voxel.z + 1 }, { x: voxel.x, y: voxel.y, z: voxel.z - 1 },
     ]
-    const assetNeighbor = currentParts.find((part) => part.kind === 'asset' && part.voxels.some((candidate) => neighbors.some((neighbor) => sceneVoxelKey(candidate) === sceneVoxelKey(neighbor))))
-    const touchingCustomIds = [...new Set(currentProject.customVoxels.filter((candidate) => neighbors.some((neighbor) => sceneVoxelKey(candidate) === sceneVoxelKey(neighbor))).map(voxelEntityId))]
+    const assetNeighbor = editEntityId
+      ? currentParts.find((part) => part.kind === 'asset'
+        && (part.id === editEntityId || Boolean(editAssemblyId && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(editAssemblyId)))
+        && part.voxels.some((candidate) => neighbors.some((neighbor) => sceneVoxelKey(candidate) === sceneVoxelKey(neighbor))))
+      : undefined
+    const touchingCustomIds = editingCustomId
+      && currentProject.customVoxels.some((candidate) => voxelEntityId(candidate) === editingCustomId && neighbors.some((neighbor) => sceneVoxelKey(candidate) === sceneVoxelKey(neighbor)))
+      ? [editingCustomId]
+      : []
     if (editAssemblyId) {
       const entityId = `voxel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       updateProject((draft) => {
@@ -526,33 +1020,64 @@ function App() {
     setNotice(`正在拖动资产 · ${asset.name}`)
   }
 
+  const openModelImportDialog = (file: File) => {
+    setModelImportTargetSize(32)
+    setModelImportMode('solid')
+    setModelImportPreserveParts(true)
+    setModelImportDialog({ file, result: null, error: '', progress: 0, progressLabel: '等待开始', busy: false })
+  }
+
+  const runModelImport = async () => {
+    const current = modelImportDialog
+    if (!current || current.busy) return
+    setModelImportDialog((state) => state ? { ...state, result: null, error: '', busy: true, progress: 0, progressLabel: '准备体素化' } : state)
+    try {
+      const result = await importModelAsVoxelAssetInWorker(current.file, {
+        targetSizeMm: Math.max(1, Math.min(256, Math.round(modelImportTargetSize || 1))),
+        mode: modelImportMode,
+        materialId: activeMaterial,
+        palette: projectRef.current.materials,
+        preserveParts: modelImportPreserveParts,
+        onProgress: (progress, label) => setModelImportDialog((state) => state ? { ...state, progress, progressLabel: label } : state),
+      })
+      setModelImportDialog((state) => state ? { ...state, result, busy: false, progress: 1, progressLabel: '体素化完成' } : state)
+    } catch (error) {
+      setModelImportDialog((state) => state ? { ...state, busy: false, error: error instanceof Error ? error.message : '模型体素化失败', progressLabel: '体素化失败' } : state)
+    }
+  }
+
+  const confirmModelImport = () => {
+    const result = modelImportDialog?.result
+    if (!result) return
+    const asset = structuredClone(result.asset)
+    updateProject((draft) => { draft.assets.push(asset) })
+    setModelImportDialog(null)
+    beginPlacement(asset)
+    setNotice(`模型已转为 ${asset.voxels.length} 个 1 mm 体素 · 请拖动放置`)
+  }
+
   const endPlacement = () => {
     setPlacementAssetId(null)
     setPlacementPreview(null)
   }
 
   const assetWithinSceneBoundary = (asset: VoxelAsset, x: number, y: number, z: number) => {
-    const boundary = Math.max(1, projectRef.current.sceneSizeCm / 2)
+    const bounds = sceneBoundsForProject(projectRef.current)
     const previewInstance: SceneInstance = { id: 'placement-preview', assetId: asset.id, x, y, z, rotation: 0, style: asset.style, visible: true, overrides: [] }
-    return resolveInstanceSceneVoxels(previewInstance, asset).every((voxel) => {
-      const worldX = voxelToWorld(voxel.x)
-      const worldY = voxelCenterToWorld(voxel.y)
-      const worldZ = voxelToWorld(voxel.z)
-      return Math.abs(worldX) <= boundary && Math.abs(worldY) <= boundary && Math.abs(worldZ) <= boundary
-    })
+    return sceneVoxelsWithinBounds(resolveInstanceSceneVoxels(previewInstance, asset), bounds)
   }
 
   const updatePlacementPreview = (assetId: string, x: number, z: number) => {
     const asset = projectRef.current.assets.find((item) => item.id === assetId)
     if (!asset) return
-    const position = { assetId, x: snapWorld(x), y: 0, z: snapWorld(z) }
+    const position = { assetId, x: snapAssetOrigin(x, asset.width), y: 0, z: snapAssetOrigin(z, asset.depth) }
     setPlacementPreview({ ...position, valid: assetWithinSceneBoundary(asset, position.x, position.y, position.z) && !hasAssetCollisionAt(asset, position.x, position.y, position.z) })
   }
 
   const placeAssetAt = (assetId: string, x: number, z: number) => {
     const asset = projectRef.current.assets.find((item) => item.id === assetId)
     if (!asset) return
-    const position = { x: snapWorld(x), y: 0, z: snapWorld(z) }
+    const position = { x: snapAssetOrigin(x, asset.width), y: 0, z: snapAssetOrigin(z, asset.depth) }
     const outsideBoundary = !assetWithinSceneBoundary(asset, position.x, position.y, position.z)
     if (outsideBoundary || hasAssetCollisionAt(asset, position.x, position.y, position.z)) {
       setNotice(outsideBoundary ? `无法放置资产 · ${asset.name} 超出场景边界` : `无法放置资产 · ${asset.name} 与已有实体重叠`)
@@ -560,6 +1085,16 @@ function App() {
       return
     }
     const instanceId = `instance-${asset.id}-${Date.now()}`
+    // A placed scene instance must own an immutable snapshot. Otherwise later
+    // edits to the template asset (name, color, or geometry) leak into entities
+    // that already exist in the scene.
+    const sceneAsset: VoxelAsset = {
+      ...structuredClone(asset),
+      id: `scene-asset-${instanceId}`,
+      source: asset.isTemplate === true ? '资产库实例快照' : (asset.source ?? '场景实体实例快照'),
+      isTemplate: false,
+      templateSourceId: asset.isTemplate === true ? asset.id : asset.templateSourceId,
+    }
     let placedRootAssemblyId = ''
     let placedMemberKeys: string[] = []
     let editTargetAfterPlacement = editEntityId ?? ''
@@ -570,10 +1105,11 @@ function App() {
       ? editEntityId.slice('assembly:'.length)
       : editingPart?.assemblyIds?.[0]
     updateProject((draft) => {
-      draft.instances.push({ id: instanceId, assetId: asset.id, ...position, rotation: 0, style: asset.style, visible: true, overrides: [] })
-      if (asset.assembly) {
-        const nodeIds = new Map(asset.assembly.nodes.map((node) => [node.id, `assembly-${instanceId}-${node.id}`]))
-        asset.assembly.nodes.forEach((node) => {
+      draft.assets.push(sceneAsset)
+      draft.instances.push({ id: instanceId, assetId: sceneAsset.id, ...position, rotation: 0, style: sceneAsset.style, visible: true, overrides: [] })
+      if (sceneAsset.assembly) {
+        const nodeIds = new Map(sceneAsset.assembly.nodes.map((node) => [node.id, `assembly-${instanceId}-${node.id}`]))
+        sceneAsset.assembly.nodes.forEach((node) => {
           const memberKeys = [...new Set(node.memberKeys.flatMap((memberKey) => {
             if (memberKey.startsWith('assembly:')) {
               const mapped = nodeIds.get(memberKey.slice('assembly:'.length))
@@ -584,9 +1120,9 @@ function App() {
           }))]
           if (memberKeys.length < 2) return
           const sceneAssemblyId = nodeIds.get(node.id)!
-          draft.assemblies = [...(draft.assemblies ?? []), { id: sceneAssemblyId, name: node.name || asset.assembly?.name || '装配体', memberKeys }]
+          draft.assemblies = [...(draft.assemblies ?? []), { id: sceneAssemblyId, name: node.name || sceneAsset.assembly?.name || '装配体', memberKeys }]
         })
-        placedRootAssemblyId = nodeIds.get(asset.assembly.rootId) ?? ''
+        placedRootAssemblyId = nodeIds.get(sceneAsset.assembly.rootId) ?? ''
         placedMemberKeys = placedRootAssemblyId ? [`assembly:${placedRootAssemblyId}`] : []
       } else {
         placedMemberKeys = resolveInstanceComponents(asset, []).map(({ partId }) => `asset:${instanceId}:${partId}`)
@@ -618,20 +1154,25 @@ function App() {
   const moveInstance = (instanceId: string, x: number, y: number, z: number, trackHistory = true) => {
     const instance = projectRef.current.instances.find((item) => item.id === instanceId)
     if (!instance) return false
-    const currentX = worldToVoxel(instance.x)
+    const asset = projectRef.current.assets.find((item) => item.id === instance.assetId)
+    const currentX = assetOriginGridCoordinate(instance.x, asset?.width ?? 1)
     const currentY = worldToVoxel(instance.y ?? 0)
-    const currentZ = worldToVoxel(instance.z)
-    const requestedX = worldToVoxel(x) - currentX
+    const currentZ = assetOriginGridCoordinate(instance.z, asset?.depth ?? 1)
+    const requestedX = assetOriginGridCoordinate(x, asset?.width ?? 1) - currentX
     const requestedY = worldToVoxel(y) - currentY
-    const requestedZ = worldToVoxel(z) - currentZ
-    const result = resolveGridMove(requestedX, requestedY, requestedZ, (deltaX, deltaY, deltaZ) => !hasInstanceCollisionAt(instanceId, voxelToWorld(currentX + deltaX), voxelToWorld(currentY + deltaY), voxelToWorld(currentZ + deltaZ)))
+    const requestedZ = assetOriginGridCoordinate(z, asset?.depth ?? 1) - currentZ
+    const bounds = sceneBoundsForProject(projectRef.current)
+    const result = resolveGridMove(requestedX, requestedY, requestedZ, (deltaX, deltaY, deltaZ) => {
+      const candidate = { ...instance, x: snapAssetOrigin(instance.x + voxelToWorld(deltaX), asset?.width ?? 1), y: voxelToWorld(currentY + deltaY), z: snapAssetOrigin(instance.z + voxelToWorld(deltaZ), asset?.depth ?? 1) }
+      return (!asset || sceneVoxelsWithinBounds(resolveInstanceSceneVoxels(candidate, asset), bounds)) && !hasInstanceCollisionAt(instanceId, candidate.x, candidate.y ?? 0, candidate.z)
+    })
     if (!result.moved) {
       if (result.blocked) setNotice('资产已抵达碰撞边界 · 该方向无法继续')
       return false
     }
-    const nextX = voxelToWorld(currentX + result.deltaX)
+    const nextX = snapAssetOrigin(instance.x + voxelToWorld(result.deltaX), asset?.width ?? 1)
     const nextY = voxelToWorld(currentY + result.deltaY)
-    const nextZ = voxelToWorld(currentZ + result.deltaZ)
+    const nextZ = snapAssetOrigin(instance.z + voxelToWorld(result.deltaZ), asset?.depth ?? 1)
     updateProject((draft) => {
       const next = draft.instances.find((item) => item.id === instanceId)
       if (next) {
@@ -646,7 +1187,8 @@ function App() {
 
   const moveCustomComponent = (component: Voxel[], deltaX: number, deltaY: number, deltaZ: number, trackHistory = true): GridMoveResult => {
     if (!deltaX && !deltaY && !deltaZ) return { moved: false, blocked: false, deltaX: 0, deltaY: 0, deltaZ: 0 }
-    const result = resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => !hasCustomComponentCollisionAt(component, stepX, stepY, stepZ))
+    const bounds = sceneBoundsForProject(projectRef.current)
+    const result = resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => sceneVoxelsWithinBounds(component.map((voxel) => ({ ...voxel, x: voxel.x + stepX, y: voxel.y + stepY, z: voxel.z + stepZ })), bounds) && !hasCustomComponentCollisionAt(component, stepX, stepY, stepZ))
     if (!result.moved) {
       if (result.blocked) setNotice('体素实体已抵达碰撞边界 · 该方向无法继续')
       return result
@@ -671,7 +1213,11 @@ function App() {
     const movingVoxels = movableParts.flatMap((part) => part.voxels)
     const staticVoxels = currentParts.filter((part) => !movingIds.has(part.id)).flatMap((part) => part.voxels)
     const staticKeys = new Set(staticVoxels.map(sceneVoxelKey))
-    const result = resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => movingVoxels.every((voxel) => !staticKeys.has(sceneVoxelKey({ x: voxel.x + stepX, y: voxel.y + stepY, z: voxel.z + stepZ }))))
+    const bounds = sceneBoundsForProject(projectRef.current)
+    const result = resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => {
+      const movedVoxels = movingVoxels.map((voxel) => ({ ...voxel, x: voxel.x + stepX, y: voxel.y + stepY, z: voxel.z + stepZ }))
+      return sceneVoxelsWithinBounds(movedVoxels, bounds) && movedVoxels.every((voxel) => !staticKeys.has(sceneVoxelKey(voxel)))
+    })
     if (!result.moved) {
       if (result.blocked) setNotice('实体已抵达碰撞边界 · 该方向无法继续')
       return result
@@ -701,9 +1247,10 @@ function App() {
       const allParts = currentPartsByInstance.get(instanceId) ?? []
       const movesWholeInstance = allParts.length > 0 && selectedParts.length === allParts.length && allParts.every((part) => movingIds.has(part.id))
       if (movesWholeInstance) {
-        instance.x = voxelToWorld(worldToVoxel(instance.x) + result.deltaX)
+        const asset = nextProject.assets.find((item) => item.id === instance.assetId)
+        instance.x = snapAssetOrigin(instance.x + voxelToWorld(result.deltaX), asset?.width ?? 1)
         instance.y = voxelToWorld(worldToVoxel(instance.y ?? 0) + result.deltaY)
-        instance.z = voxelToWorld(worldToVoxel(instance.z) + result.deltaZ)
+        instance.z = snapAssetOrigin(instance.z + voxelToWorld(result.deltaZ), asset?.depth ?? 1)
         return
       }
       const offsets = instance.partOffsets ?? {}
@@ -857,45 +1404,159 @@ function App() {
     setTreeContextMenu(null)
   }
 
-  const saveProject = async () => {
-    let persisted = true
-    try {
-      await saveScene(CURRENT_SCENE_ID, project)
-      setPersistenceStatus('saved')
-    } catch {
-      persisted = false
-      setPersistenceStatus('offline')
-      setNotice('后端保存失败 · 仍将导出本地工程文件')
-    }
-    const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = `${project.name}.moceworld`
-    anchor.click()
-    URL.revokeObjectURL(url)
-    setNotice(persisted ? '工程已保存并导出 · 后端数据库 + .moceworld' : '工程已导出 · .moceworld')
+  const saveProject = () => saveProjectAsFile(false)
+
+  const saveProjectAs = () => saveProjectAsFile(true)
+
+  const mergeLocalTemplateAssets = (loaded: ProjectState): ProjectState => {
+    const loadedAssetIds = new Set(loaded.assets.map((asset) => asset.id))
+    const localTemplateAssets = projectRef.current.assets.filter((asset) => asset.isTemplate !== false && !loadedAssetIds.has(asset.id))
+    return { ...loaded, assets: [...loaded.assets, ...structuredClone(localTemplateAssets)] }
   }
 
-  const openProject = (file: File) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(String(reader.result)) as ProjectState
-        replaceProject(normalizeStoredProject({
-          ...parsed,
-          customVoxels: (parsed.customVoxels ?? []).map((voxel, index) => ({ ...voxel, entityId: voxel.entityId ?? `legacy-${voxel.x}-${voxel.y}-${voxel.z}-${index}` })),
-          assemblies: parsed.assemblies ?? [],
-          instances: parsed.instances.map((instance) => ({ ...instance, x: snapWorld(instance.x), y: snapWorld(instance.y ?? 0), z: snapWorld(instance.z), overrides: instance.overrides ?? [], partOffsets: instance.partOffsets ?? {} })),
-        }))
-        setRecentMaterialIds(parsed.materials.slice(0, 8).map((material) => material.id))
-        setSelectedId(sceneEntityParts(normalizeStoredProject(parsed))[0]?.id ?? parsed.instances[0]?.id ?? '')
-        setNotice(`已打开工程 · ${parsed.name}`)
-      } catch {
-        setNotice('打开失败 · 文件不是有效的莫测工程')
+  const applyOpenedProject = (loaded: ProjectState, fileRef: SceneFileRef | null, message: string) => {
+    const normalized = normalizeStoredProject(mergeLocalTemplateAssets(loaded))
+    replaceProject(normalized, false)
+    setRecentMaterialIds(normalized.materials.slice(0, 8).map((material) => material.id))
+    setSelectedId(normalized.instances[0]?.id ?? sceneEntityParts(normalized)[0]?.id ?? '')
+    setEditEntityId(null)
+    setCheckedTreePartIds([])
+    markSceneSaved(normalized, fileRef)
+    setNotice(message)
+  }
+
+  const openProject = async (file: File) => {
+    try {
+      const parsed = parseSceneFileText(await file.text())
+      const restored = restoreProject(parsed)
+      requestSceneReplace(async () => {
+        applyOpenedProject(restored, { name: file.name }, `已打开场景 · ${restored.name}`)
+      })
+    } catch (error) {
+      setNotice(`打开失败 · ${error instanceof Error ? error.message : '文件不是有效的莫测工程'}`)
+    }
+  }
+
+  const importPortableEntities = async (portable: MoceAssetFile | MoceEntityFile) => {
+    if (portable.format !== 'moce-entity') throw new PortableFileError('当前文件不是普通实体文件')
+    try {
+      await validateEntityFile(portable)
+    } catch {
+      setPersistenceStatus('offline')
+    }
+    if (!portable.entities.length) {
+      setNotice('普通实体文件中没有可导入的实体')
+      return
+    }
+    const batchId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const localAssets: VoxelAsset[] = []
+    const existingNames = [...projectRef.current.assets]
+    const entityToAssetId = new Map<string, string>()
+    const entityToInstanceId = new Map<string, string>()
+    portable.entities.forEach((entity, index) => {
+      const asset = structuredClone(entity.asset)
+      const assetId = `entity-import-${batchId}-${index + 1}`
+      asset.id = assetId
+      asset.name = uniqueAssetName([...existingNames, ...localAssets], entity.name || asset.name)
+      asset.source = '普通实体文件导入'
+      asset.isTemplate = false
+      asset.categoryPath = undefined
+      localAssets.push(asset)
+      entityToAssetId.set(entity.id, assetId)
+      entityToInstanceId.set(entity.id, `instance-${batchId}-${index + 1}`)
+    })
+    const baseInstances = portable.entities.map((entity) => ({
+      id: entityToInstanceId.get(entity.id)!,
+      assetId: entityToAssetId.get(entity.id)!,
+      x: voxelToWorld(entity.gridPosition.x),
+      y: voxelToWorld(entity.gridPosition.y),
+      z: voxelToWorld(entity.gridPosition.z),
+      rotation: 0,
+      style: entity.asset.style,
+      visible: true,
+      overrides: [],
+    }))
+    const existingAssetMap = new Map(projectRef.current.assets.map((asset) => [asset.id, asset]))
+    const existingVoxelKeys = new Set(projectRef.current.customVoxels.map(sceneVoxelKey))
+    projectRef.current.instances.forEach((instance) => {
+      const asset = existingAssetMap.get(instance.assetId)
+      if (asset) resolveInstanceSceneVoxels(instance, asset).forEach((voxel) => existingVoxelKeys.add(sceneVoxelKey(voxel)))
+    })
+    const candidateFits = (offsetX: number, offsetZ: number) => {
+      const candidateInstances = baseInstances.map((instance) => ({ ...instance, x: snapWorld(instance.x + offsetX), z: snapWorld(instance.z + offsetZ) }))
+      const occupied = new Set(existingVoxelKeys)
+      for (const instance of candidateInstances) {
+        const asset = localAssets.find((item) => item.id === instance.assetId)
+        if (!asset) return false
+        const voxels = resolveInstanceSceneVoxels(instance, asset)
+        if (!sceneVoxelsWithinBounds(voxels, sceneBoundsForProject(projectRef.current))) return false
+        for (const voxel of voxels) {
+          const key = sceneVoxelKey(voxel)
+          if (occupied.has(key)) return false
+          occupied.add(key)
+        }
+      }
+      return true
+    }
+    let placementOffset = { x: 0, z: 0 }
+    let foundPlacement = candidateFits(0, 0)
+    for (let radius = 1; !foundPlacement && radius <= 40; radius += 1) {
+      const candidates = [
+        { x: radius, z: 0 }, { x: -radius, z: 0 }, { x: 0, z: radius }, { x: 0, z: -radius },
+        { x: radius, z: radius }, { x: -radius, z: radius }, { x: radius, z: -radius }, { x: -radius, z: -radius },
+      ]
+      const candidate = candidates.find((item) => candidateFits(voxelToWorld(item.x), voxelToWorld(item.z)))
+      if (candidate) {
+        placementOffset = { x: voxelToWorld(candidate.x), z: voxelToWorld(candidate.z) }
+        foundPlacement = true
       }
     }
-    reader.readAsText(file)
+    if (!foundPlacement) {
+      setNotice('普通实体导入失败 · 场景没有足够的无碰撞空间')
+      return
+    }
+    const instances = baseInstances.map((instance) => ({ ...instance, x: snapWorld(instance.x + placementOffset.x), z: snapWorld(instance.z + placementOffset.z) }))
+    const assemblyIdMap = new Map(portable.assemblies.map((assembly) => [assembly.id, `assembly-${batchId}-${assembly.id}`]))
+    const assemblies: SceneAssembly[] = portable.assemblies.map((assembly) => ({
+      id: assemblyIdMap.get(assembly.id)!,
+      name: assembly.name,
+      nameMode: assembly.nameMode,
+      memberKeys: assembly.memberKeys.map((memberKey) => {
+        if (memberKey.startsWith('entity:')) return `asset:${entityToInstanceId.get(memberKey.slice('entity:'.length)) ?? memberKey}`
+        if (memberKey.startsWith('assembly:')) return `assembly:${assemblyIdMap.get(memberKey.slice('assembly:'.length)) ?? memberKey.slice('assembly:'.length)}`
+        return memberKey
+      }),
+    }))
+    updateProject((draft) => {
+      draft.assets.push(...localAssets)
+      draft.instances.push(...instances)
+      draft.assemblies = [...(draft.assemblies ?? []), ...assemblies]
+    })
+    setCheckedTreePartIds([])
+    setSelectedId(assemblies[0] ? `assembly:${assemblies[0].id}` : instances[0]?.id ?? '')
+    setNotice(`已导入普通实体文件 · ${localAssets.length} 个实体${placementOffset.x || placementOffset.z ? ' · 已自动寻找空闲位置' : ''}`)
+  }
+
+  const importEntityFileFromDisk = async (file: File) => {
+    try {
+      const portable = parsePortableFileText(await file.text())
+      if (portable.format !== 'moce-entity') throw new PortableFileError('导入实体只支持普通实体文件（.moceentity），不支持场景文件或资产模板文件')
+      await importPortableEntities(portable)
+    } catch (error) {
+      setNotice(`导入失败 · ${error instanceof Error ? error.message : '文件结构无效'}`)
+    }
+  }
+
+  const createNewProject = () => {
+    requestSceneReplace(async () => {
+      const next = normalizeStoredProject(makeDefaultProject())
+      replaceProject(next)
+      setSelectedId('inst-chinese')
+      setEditEntityId(null)
+      setCheckedTreePartIds([])
+      markSceneSaved(next, null)
+      setNotice('已新建街区工程')
+    })
   }
 
   const exportSelectedPart = () => {
@@ -916,28 +1577,50 @@ function App() {
     setNotice(`已导出选中实体 · ${exportName} · ${selectedEntityParts.length} 个实体`)
   }
 
-  const importModel = async (file: File) => {
-    try {
-      setNotice(`正在体素化 · ${file.name}`)
-    const imported = await importModelAsVoxelAsset(file, activeMaterial)
-    if (!imported.voxels.length) throw new Error('模型没有可转换的表面体素')
-      const instanceId = `instance-${imported.id}`
-      updateProject((draft) => {
-        draft.assets.push(imported)
-        draft.instances.push({ id: instanceId, assetId: imported.id, x: 0, y: 0, z: 0, rotation: 0, style: '导入模型', visible: true, overrides: [] })
-      })
-      setSelectedId(instanceId)
-      setNotice(`已完成体素化 · ${imported.voxels.length} 个体素 · ${file.name}`)
-    } catch (error) {
-      setNotice(`模型导入失败 · ${error instanceof Error ? error.message : '未知错误'}`)
+  const exportSceneStl = () => {
+    const allParts = sceneEntityParts(projectRef.current)
+    if (!allParts.length) {
+      setNotice('当前场景没有可导出的实体')
+      return
     }
+    const sceneAsset = makeAssetFromSceneParts(`scene-export-${Date.now()}`, projectRef.current.name || '莫测造境场景', allParts, '#6c827d', '#d2a354')
+    const stl = makeStl(sceneAsset)
+    const blob = new Blob([stl], { type: 'model/stl' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `${projectRef.current.name || '莫测造境场景'}-完整场景.stl`
+    anchor.click()
+    URL.revokeObjectURL(url)
+    setNotice(`已导出完整场景 STL · ${allParts.length} 个实体`)
   }
 
-  const filteredAssets = project.assets.filter((asset) => asset.isTemplate !== false).filter((asset) => {
-    const styleMatch = activeStyle === '全部' || asset.style === activeStyle
-    const queryMatch = asset.name.toLowerCase().includes(query.toLowerCase())
-    return styleMatch && queryMatch
-  })
+  const exportSelectedEntityFile = () => {
+    if (!selectedEntityParts.length) {
+      setNotice('请先选择要导出的实体')
+      return
+    }
+    const exportParts = selectedEntityParts.map((part) => ({ ...part, displayLabel: sceneEntityTreeName(projectRef.current, part) }))
+    const file = createEntityFile(projectRef.current, exportParts, selectedDisplayName || '莫测造境实体')
+    downloadPortableFile(file, selectedDisplayName || '莫测造境实体', '.moceentity')
+    setNotice(`已导出普通实体文件 · ${file.entities.length} 个实体`)
+  }
+
+  const exportTemplateAssets = (assetIds: string[]) => {
+    const assets = projectRef.current.assets.filter((asset) => asset.isTemplate !== false && assetIds.includes(asset.id))
+    if (!assets.length) {
+      setNotice('请先选择要导出的模板实体')
+      return
+    }
+    const file = createAssetFile(assets, assetCategoryPaths)
+    const baseName = assets.length === 1 ? assets[0].name : `莫测造境资产-${assets.length}个`
+    downloadPortableFile(file, baseName, '.moceasset')
+    setNotice(`已导出资产库实体文件 · ${assets.length} 个实体`)
+  }
+
+  const filteredAssets = project.assets
+    .filter((asset) => asset.isTemplate !== false)
+    .filter((asset) => asset.name.toLowerCase().includes(query.toLowerCase()))
 
   const replaceMaterialColor = (materialId: string, color: string) => {
     useMaterial(materialId)
@@ -951,7 +1634,9 @@ function App() {
   const refreshLibrary = async () => {
     setLibraryBusy(true)
     try {
-      setLibrary(await loadLibrary())
+      const loaded = await loadLibrary()
+      setLibrary(loaded)
+      setAssetCategoryPaths(normalizeAssetCategoryPaths(loaded.assetCategories ?? [], projectRef.current.assets))
     } catch {
       setNotice('资产库加载失败 · 请检查后端服务')
     } finally {
@@ -961,58 +1646,309 @@ function App() {
 
   const openLibrary = async () => {
     setLibraryOpen(true)
+    setSelectedLibrarySceneId(null)
+    setSelectedLibrarySceneProject(null)
+    setSceneLibraryContextMenu(null)
     await refreshLibrary()
   }
 
-  const applyStoredProject = (loaded: ProjectState, message: string) => {
+  const applyStoredProject = (loaded: ProjectState, fileRef: SceneFileRef | null, message: string) => {
     const normalized = normalizeStoredProject(loaded)
     replaceProject(normalized, false)
     setRecentMaterialIds(normalized.materials.slice(0, 8).map((material) => material.id))
     setSelectedId(normalized.instances[0]?.id ?? sceneEntityParts(normalized)[0]?.id ?? '')
+    setEditEntityId(null)
+    setCheckedTreePartIds([])
     persistenceReadyRef.current = true
     setPersistenceStatus('saved')
+    markSceneSaved(normalized, fileRef)
     setNotice(message)
   }
 
   const loadStoredScene = async (sceneId: string, name: string) => {
+    requestSceneReplace(async () => {
+      setLibraryBusy(true)
+      try {
+        applyStoredProject(await loadScene(sceneId), { name: `${name}.moceworld`, libraryId: sceneId }, `已加载场景 · ${name}`)
+        setLibraryOpen(false)
+      } catch {
+        setNotice('场景加载失败 · 数据库中不存在该场景')
+      } finally {
+        setLibraryBusy(false)
+      }
+    })
+  }
+
+  const selectLibraryScene = async (sceneId: string, name: string, x: number, y: number) => {
+    setSelectedLibrarySceneId(sceneId)
+    setSceneLibraryContextMenu({ sceneId, x, y })
     setLibraryBusy(true)
     try {
-      applyStoredProject(await loadScene(sceneId), `已加载场景 · ${name}`)
-      setLibraryOpen(false)
+      setSelectedLibrarySceneProject(normalizeStoredProject(await loadScene(sceneId)))
     } catch {
-      setNotice('场景加载失败 · 数据库中不存在该场景')
+      setSelectedLibrarySceneProject(null)
+      setNotice(`场景实体加载失败 · ${name}`)
     } finally {
       setLibraryBusy(false)
     }
   }
 
-  const loadStoredAsset = async (assetId: string, name: string) => {
-    setLibraryBusy(true)
-    try {
-      const asset = await loadAsset(assetId)
-      updateProject((draft) => {
-        if (!draft.assets.some((item) => item.id === asset.id)) draft.assets.push(asset)
-      })
-      setNotice(`已载入资产 · ${name}`)
-    } catch {
-      setNotice('资产加载失败 · 数据库中不存在该资产')
-    } finally {
-      setLibraryBusy(false)
+  const requestSaveAssetToLibrary = (sourceAsset: VoxelAsset) => {
+    const localAsset: VoxelAsset = {
+      ...structuredClone(sourceAsset),
+      id: `asset-library-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: sourceAsset.name?.trim() || '未命名实体',
+      source: '场景库实体保存',
+      isTemplate: true,
+      templateSourceId: undefined,
     }
+    setAssetCategorySave({ asset: localAsset })
   }
 
-  const saveCurrentSceneAsNew = async () => {
-    const requestedName = window.prompt('新场景名称', `${project.name}·副本`)
-    if (!requestedName?.trim()) return
-    const sceneId = `scene-${Date.now()}`
+  const saveAssetToLibrary = (requestedName: string, categoryPath: string[]) => {
+    if (!assetCategorySave) return
+    const name = uniqueTemplateAssetName(projectRef.current.assets, requestedName.trim() || assetCategorySave.asset.name || '未命名实体')
+    const asset: VoxelAsset = {
+      ...structuredClone(assetCategorySave.asset),
+      name,
+      categoryPath: normalizeAssetCategoryPath(categoryPath),
+      isTemplate: true,
+    }
+    updateProject((draft) => { draft.assets.push(asset) })
+    void saveAsset(asset).catch(() => setPersistenceStatus('offline'))
+    setAssetCategorySave(null)
+    setNotice(`已保存实体到当前资产库 · ${asset.name} · ${asset.categoryPath?.join(' / ') ?? DEFAULT_ASSET_CATEGORY}`)
+  }
+
+  const addLibrarySceneEntityToCurrentScene = (sourceAsset: VoxelAsset) => {
+    const sceneAsset: VoxelAsset = {
+      ...structuredClone(sourceAsset),
+      id: `scene-entity-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      source: '场景库实体',
+      isTemplate: false,
+    }
+    updateProject((draft) => { draft.assets.push(sceneAsset) })
+    setLibraryOpen(false)
+    setSelectedLibrarySceneId(null)
+    setSelectedLibrarySceneProject(null)
+    beginPlacement(sceneAsset)
+    setNotice(`已添加实体到当前场景 · 请拖动放置 · ${sceneAsset.name}`)
+  }
+
+  const deleteLibrarySceneEntity = async (sceneId: string, assetId: string, name: string) => {
+    const sceneName = library.scenes.find((scene) => scene.id === sceneId)?.name ?? '当前场景'
+    if (!window.confirm(`确定从场景“${sceneName}”删除实体“${name}”？该实体的场景实例也会被删除。`)) return
     try {
-      await saveScene(sceneId, { ...project, name: requestedName.trim() })
+      const source = selectedLibrarySceneProject ?? normalizeStoredProject(await loadScene(sceneId))
+      const next: ProjectState = {
+        ...source,
+        assets: source.assets.filter((asset) => asset.id !== assetId),
+        instances: source.instances.filter((instance) => instance.assetId !== assetId),
+      }
+      await saveScene(sceneId, createSceneFile(next))
+      setSelectedLibrarySceneProject(normalizeStoredProject(next))
       await refreshLibrary()
-      setNotice(`已保存新场景 · ${requestedName.trim()}`)
-    } catch {
-      setPersistenceStatus('offline')
-      setNotice('新场景保存失败 · 请检查后端服务')
+      setNotice(`已从场景中删除实体 · ${name}`)
+    } catch (error) {
+      setNotice(`场景实体删除失败 · ${error instanceof Error ? error.message : '请检查后端服务'}`)
     }
+  }
+
+  /**
+   * Migrate legacy instances that still point directly at a template asset.
+   * New placements already receive snapshots, but older projects can contain
+   * these shared references. Detaching them before a template edit preserves
+   * the scene's previous name and color permanently.
+   */
+  const detachLegacyTemplateInstances = (draft: ProjectState, templateAssetId: string): VoxelAsset[] => {
+    const template = draft.assets.find((asset) => asset.id === templateAssetId && asset.isTemplate !== false)
+    if (!template) return []
+    const snapshots: VoxelAsset[] = []
+    draft.instances
+      .filter((instance) => instance.assetId === templateAssetId)
+      .forEach((instance, index) => {
+        const preservedColor = instance.colorOverride ?? template.templateColor ?? template.color
+        const snapshot: VoxelAsset = {
+          ...structuredClone(template),
+          id: `scene-asset-legacy-${instance.id}-${Date.now()}-${index + 1}`,
+          source: '资产库实例快照',
+          isTemplate: false,
+          templateSourceId: template.id,
+          color: preservedColor,
+          templateColor: preservedColor,
+        }
+        draft.assets.push(snapshot)
+        instance.assetId = snapshot.id
+        instance.colorOverride = undefined
+        snapshots.push(snapshot)
+      })
+    return snapshots
+  }
+
+  const renameTemplateAsset = (assetId: string) => {
+    const asset = projectRef.current.assets.find((item) => item.id === assetId)
+    if (!asset) return
+    const requested = window.prompt('重命名模板实体', asset.name)
+    if (!requested?.trim()) return
+    const name = uniqueTemplateAssetName(projectRef.current.assets, requested, assetId)
+    const nextAsset = { ...asset, name }
+    let detachedAssets: VoxelAsset[] = []
+    updateProject((draft) => {
+      detachedAssets = detachLegacyTemplateInstances(draft, assetId)
+      const target = draft.assets.find((item) => item.id === assetId)
+      if (target) target.name = name
+    })
+    void Promise.all([nextAsset, ...detachedAssets].map((item) => saveAsset(item))).catch(() => setPersistenceStatus('offline'))
+    setAssetContextMenu(null)
+    setNotice(name === requested.trim() ? `已重命名模板实体 · ${name}` : `名称冲突，已重命名为 · ${name}`)
+  }
+
+  const duplicateTemplateAsset = (assetId: string) => {
+    const source = projectRef.current.assets.find((item) => item.id === assetId)
+    if (!source) return
+    const copy: VoxelAsset = {
+      ...structuredClone(source),
+      id: `asset-copy-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: uniqueTemplateAssetName(projectRef.current.assets, source.name),
+      source: '资产库副本',
+      isTemplate: true,
+    }
+    updateProject((draft) => { draft.assets.push(copy) })
+    void saveAsset(copy).catch(() => setPersistenceStatus('offline'))
+    setAssetContextMenu(null)
+    setNotice(`已创建资产副本 · ${copy.name}`)
+  }
+
+  const changeTemplateAssetColor = (assetId: string, color: string) => {
+    const asset = projectRef.current.assets.find((item) => item.id === assetId)
+    if (!asset) return
+    const normalizedColor = /^#[0-9a-f]{6}$/i.test(color) ? color : '#6c827d'
+    const nextAsset = { ...asset, color: normalizedColor, templateColor: normalizedColor }
+    let detachedAssets: VoxelAsset[] = []
+    updateProject((draft) => {
+      detachedAssets = detachLegacyTemplateInstances(draft, assetId)
+      const target = draft.assets.find((item) => item.id === assetId)
+      if (target) {
+        target.color = normalizedColor
+        target.templateColor = normalizedColor
+      }
+    })
+    void Promise.all([nextAsset, ...detachedAssets].map((item) => saveAsset(item))).catch(() => setPersistenceStatus('offline'))
+    setAssetContextMenu(null)
+    setNotice(`已更新模板实体颜色 · ${normalizedColor.toUpperCase()}`)
+  }
+
+  const deleteTemplateAsset = (assetId: string) => {
+    const asset = projectRef.current.assets.find((item) => item.id === assetId)
+    if (!asset) return
+    const usedByScene = projectRef.current.instances.some((instance) => instance.assetId === assetId)
+    if (!window.confirm(usedByScene ? `模板“${asset.name}”仍被场景实例使用。删除资产库记录但保留场景实例？` : `确定删除模板“${asset.name}”？`)) return
+    if (usedByScene) {
+      const nextAsset = { ...asset, isTemplate: false }
+      updateProject((draft) => {
+        const target = draft.assets.find((item) => item.id === assetId)
+        if (target) target.isTemplate = false
+      })
+      void saveAsset(nextAsset).catch(() => setPersistenceStatus('offline'))
+      setNotice(`已从资产库移除 · 场景实例仍保留 · ${asset.name}`)
+    } else {
+      updateProject((draft) => { draft.assets = draft.assets.filter((item) => item.id !== assetId) })
+      void deleteStoredAsset(assetId).catch(() => setPersistenceStatus('offline'))
+      setNotice(`已删除模板实体 · ${asset.name}`)
+    }
+    setAssetContextMenu(null)
+  }
+
+  const persistAssetCategoryPaths = (paths: string[][]) => {
+    const normalized = normalizeAssetCategoryPaths(paths, projectRef.current.assets)
+    setAssetCategoryPaths(normalized)
+    void saveAssetCategories(normalized).catch(() => setPersistenceStatus('offline'))
+  }
+
+  const createAssetCategory = (parentPath: string[] | null = null) => {
+    const parentLabel = parentPath?.length ? `（父类别：${parentPath.join(' / ')}）` : ''
+    const requested = window.prompt(`新建${parentPath?.length ? '子' : ''}类别${parentLabel}`, '')
+    if (!requested?.trim()) return
+    const segments = requested.split(/[\\/／>＞]/).map((value) => value.trim()).filter(Boolean)
+    if (!segments.length) return
+    const nextPath = [...(parentPath ?? []), ...segments]
+    const nextKey = assetCategoryKey(nextPath)
+    if (assetCategoryPaths.some((path) => assetCategoryKey(path) === nextKey)) {
+      setNotice(`类别已存在 · ${nextPath.join(' / ')}`)
+      setAssetCategoryContextMenu(null)
+      return
+    }
+    persistAssetCategoryPaths([...assetCategoryPaths, nextPath])
+    setAssetCategoryContextMenu(null)
+    setNotice(`已新建类别 · ${nextPath.join(' / ')}`)
+  }
+
+  const deleteAssetCategory = (categoryPath: string[]) => {
+    const prefixKey = assetCategoryKey(categoryPath)
+    const affectedAssets = projectRef.current.assets.filter((asset) => {
+      if (asset.isTemplate === false) return false
+      const path = normalizeAssetCategoryPath(asset.categoryPath)
+      return assetCategoryKey(path.slice(0, categoryPath.length)) === prefixKey
+    })
+    if (!window.confirm(`删除类别“${categoryPath.join(' / ')}”将同时删除其中的 ${affectedAssets.length} 个模板实体；场景中已经存在的实体会保留，但变为未保存实体。确定删除吗？`)) return
+    const affectedIds = new Set(affectedAssets.map((asset) => asset.id))
+    const usedIds = new Set(projectRef.current.instances.filter((instance) => affectedIds.has(instance.assetId)).map((instance) => instance.assetId))
+    const removedAssets = affectedAssets.filter((asset) => !usedIds.has(asset.id))
+    updateProject((draft) => {
+      draft.assets = draft.assets
+        .filter((asset) => !affectedIds.has(asset.id) || usedIds.has(asset.id))
+        .map((asset) => affectedIds.has(asset.id) ? { ...asset, isTemplate: false } : asset)
+    })
+    const nextCategoryPaths = normalizeAssetCategoryPaths(assetCategoryPaths.filter((path) => assetCategoryKey(path.slice(0, categoryPath.length)) !== prefixKey), projectRef.current.assets)
+    setAssetCategoryPaths(nextCategoryPaths)
+    void (async () => {
+      try {
+        for (const asset of removedAssets) await deleteStoredAsset(asset.id)
+        for (const asset of affectedAssets.filter((item) => usedIds.has(item.id))) await saveAsset({ ...asset, isTemplate: false })
+        await saveAssetCategories(nextCategoryPaths)
+      } catch {
+        setPersistenceStatus('offline')
+      }
+    })()
+    setAssetCategoryContextMenu(null)
+    setAssetContextMenu(null)
+    setNotice(`已删除类别 · ${categoryPath.join(' / ')} · ${affectedAssets.length} 个模板实体`)
+  }
+
+  const importSceneFileToLibrary = async (file: File) => {
+    try {
+      const sceneFile = parseSceneFileText(await file.text())
+      const result = await importScene(sceneFile)
+      await refreshLibrary()
+      setNotice(`已导入场景到场景库 · ${result.scene.name}`)
+    } catch (error) {
+      setNotice(`场景导入失败 · ${error instanceof Error ? error.message : '文件结构无效'}`)
+    }
+  }
+
+  const duplicateStoredScene = async (sceneId: string, name: string) => {
+    const requestedName = window.prompt('副本名称', `${name}·副本`)
+    if (!requestedName?.trim()) return
+    try {
+      await duplicateScene(sceneId, requestedName.trim())
+      await refreshLibrary()
+      setNotice(`已创建场景副本 · ${requestedName.trim()}`)
+    } catch {
+      setNotice('场景副本创建失败 · 请检查后端服务')
+    }
+    setSceneLibraryContextMenu(null)
+  }
+
+  const deleteStoredScene = async (sceneId: string, name: string) => {
+    if (!window.confirm(`确定从场景库删除“${name}”？当前场景不会因此被删除。`)) return
+    try {
+      await deleteLibraryScene(sceneId)
+      await refreshLibrary()
+      setNotice(`已删除场景 · ${name}`)
+    } catch {
+      setNotice('场景删除失败 · 请检查后端服务')
+    }
+    setSceneLibraryContextMenu(null)
   }
 
   const makeAssemblyTemplateAsset = (sourceProject: ProjectState, sourceParts: SceneEntityPart[], rootAssemblyId: string): VoxelAsset | null => {
@@ -1087,14 +2023,15 @@ function App() {
       setNotice('请先选择一个实体')
       return
     }
-    const assemblyRootId = selectedAssemblyId ?? (selectedEntityParts.flatMap((part) => part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).find((assemblyId) => !(project.assemblies ?? []).some((candidate) => candidate.memberKeys.includes(`assembly:${assemblyId}`))))
+    const assemblyRootId = multipleSelected ? undefined : (selectedAssemblyId ?? (selectedEntityParts.flatMap((part) => part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).find((assemblyId) => !(project.assemblies ?? []).some((candidate) => candidate.memberKeys.includes(`assembly:${assemblyId}`)))))
     const assemblyAsset = assemblyRootId ? makeAssemblyTemplateAsset(projectRef.current, selectedEntityParts, assemblyRootId) : null
-    const baseName = assemblyAsset?.name ?? (selectedAsset ? `${selectedAsset.name}·副本` : '自定义体素实体')
-    const name = assemblyAsset ? baseName : uniqueAssetName(project.assets, baseName)
-    const asset = assemblyAsset ? { ...assemblyAsset, name } : makeAssetFromSceneParts(`asset-custom-${Date.now()}`, name, selectedEntityParts, selectedAsset?.color ?? '#6c827d', selectedAsset?.accent ?? '#d2a354')
-    updateProject((draft) => draft.assets.push(asset))
-    void saveAsset(asset).catch(() => setPersistenceStatus('offline'))
-    setNotice(assemblyAsset ? `已保存装配体模板 · ${name} · 内含 ${selectedEntityParts.length} 个实体` : `已保存为新实体 · ${name}`)
+    const baseName = multipleSelected ? '多个实体' : (selectedDisplayName || assemblyAsset?.name || selectedAsset?.name || '手动体素实体')
+    const templateColor = scenePartsDisplayColor(project, selectedEntityParts, selectedAsset)
+    const templateAccent = selectedAsset?.accent ?? '#d2a354'
+    const asset = assemblyAsset
+      ? { ...assemblyAsset, name: baseName, color: templateColor, templateColor }
+      : { ...makeAssetFromSceneParts(`asset-custom-${Date.now()}`, baseName, selectedEntityParts, templateColor, templateAccent), templateColor }
+    setAssetCategorySave({ asset: { ...asset, isTemplate: true } })
   }
 
   const splitSelectedEntity = () => {
@@ -1170,7 +2107,9 @@ function App() {
     const copyBatchId = Date.now()
     let firstSelection = ''
     updateProject((draft) => {
-      const boundary = Math.max(1, draft.sceneSizeCm / 2)
+      const bounds = sceneBoundsForProject(draft)
+      const horizontalBoundaryX = bounds.x * VOXEL_WORLD_SIZE / 2
+      const horizontalBoundaryY = bounds.y * VOXEL_WORLD_SIZE / 2
       for (let copyIndex = 0; copyIndex < count; copyIndex += 1) {
         const instanceMap = new Map<string, string>()
         const customMap = new Map<string, string>()
@@ -1185,8 +2124,8 @@ function App() {
           draft.instances.push({
             ...structuredClone(current),
             id: newId,
-            x: Math.max(-boundary, Math.min(boundary, snapWorld(current.x + offset))),
-            z: Math.max(-boundary, Math.min(boundary, snapWorld(current.z + offset))),
+            x: Math.max(-horizontalBoundaryX, Math.min(horizontalBoundaryX, snapWorld(current.x + offset))),
+            z: Math.max(-horizontalBoundaryY, Math.min(horizontalBoundaryY, snapWorld(current.z + offset))),
             overrides: structuredClone(current.overrides ?? []),
             partOffsets: structuredClone(current.partOffsets ?? {}),
           })
@@ -1298,20 +2237,30 @@ function App() {
     ? selectedScenePart.kind === 'asset' && selectedInstance
       ? [selectedInstance.x, selectedInstance.z, selectedInstance.y ?? 0]
       : selectedScenePart.voxels[0]
-        ? [voxelToWorld(selectedScenePart.voxels[0].x), voxelToWorld(selectedScenePart.voxels[0].z), voxelCenterToWorld(selectedScenePart.voxels[0].y)]
+        ? [voxelCenterToWorld(selectedScenePart.voxels[0].x), voxelCenterToWorld(selectedScenePart.voxels[0].z), voxelCenterToWorld(selectedScenePart.voxels[0].y)]
         : [0, 0, 0]
     : [0, 0, 0]
 
   const changeSelectedTransform = (axis: number, requestedValue: number) => {
     if (!selectedTransformEditable || !selectedScenePart || !Number.isFinite(requestedValue)) return
-    const boundary = Math.max(1, projectRef.current.sceneSizeCm / 2)
-    const value = Math.max(-boundary, Math.min(boundary, requestedValue))
+    const bounds = sceneBoundsForProject(projectRef.current)
+    const limits = axis === 0
+      ? { min: -bounds.x * VOXEL_WORLD_SIZE / 2, max: bounds.x * VOXEL_WORLD_SIZE / 2 }
+      : axis === 1
+        ? { min: -bounds.y * VOXEL_WORLD_SIZE / 2, max: bounds.y * VOXEL_WORLD_SIZE / 2 }
+        : { min: 0, max: bounds.z * VOXEL_WORLD_SIZE }
+    const value = Math.max(limits.min, Math.min(limits.max, requestedValue))
     if (selectedScenePart.kind === 'asset' && selectedInstance) {
       const property = axis === 0 ? 'x' : axis === 1 ? 'z' : 'y'
       updateProject((draft) => {
         const instance = draft.instances.find((item) => item.id === selectedInstance.id)
         if (!instance) return
-        instance[property] = snapWorld(value)
+        const asset = draft.assets.find((item) => item.id === instance.assetId)
+        instance[property] = property === 'x'
+          ? snapAssetOrigin(value, asset?.width ?? 1)
+          : property === 'z'
+            ? snapAssetOrigin(value, asset?.depth ?? 1)
+            : snapWorld(value)
       })
       setNotice(`已更新位置 ${['X', 'Y', 'Z'][axis]} · 已限制在场景边界内`)
       return
@@ -1319,7 +2268,7 @@ function App() {
     const entityId = selectedScenePart.partId
     const firstVoxel = selectedScenePart.voxels[0]
     if (!firstVoxel) return
-    const targetVoxel = axis === 2 ? Math.round(value / VOXEL_WORLD_SIZE - 0.5) : worldToVoxel(value)
+    const targetVoxel = axis === 2 ? Math.round(value / VOXEL_WORLD_SIZE - 0.5) : worldToVoxelCenter(value)
     const currentVoxel = axis === 0 ? firstVoxel.x : axis === 1 ? firstVoxel.z : firstVoxel.y
     const delta = targetVoxel - currentVoxel
     if (!delta) return
@@ -1334,7 +2283,29 @@ function App() {
     setNotice(`已更新手动实体位置 ${['X', 'Y', 'Z'][axis]} · 已限制在场景边界内`)
   }
 
-  const selectedColor = selectedEntityParts[0]?.colorOverride ?? selectedAsset?.color ?? '#6c827d'
+  const selectedColor = scenePartsDisplayColor(project, selectedEntityParts, selectedAsset)
+  const previewVoxelColors = useMemo(() => {
+    const colors: Record<string, string> = {}
+    selectedEntityParts.forEach((part) => {
+      const instance = part.instanceId ? project.instances.find((item) => item.id === part.instanceId) : undefined
+      const asset = instance ? project.assets.find((item) => item.id === instance.assetId) : undefined
+      // Match buildAssetGroup's precedence: an instance override, template
+      // color, or custom-entity color is applied to every voxel, including
+      // voxels whose materialId is ivory/gold/etc. Only an ordinary asset with
+      // no whole-entity color uses its material colors below.
+      const wholeEntityColor = part.colorOverride ?? asset?.templateColor ?? (part.kind === 'custom' ? project.customColors?.[part.partId] : undefined)
+      const primaryColor = wholeEntityColor ?? asset?.color
+      part.voxels.forEach((voxel) => {
+        const key = `${voxel.x},${voxel.y},${voxel.z}`
+        if (wholeEntityColor) colors[key] = wholeEntityColor
+        else if (voxel.materialId === 'primary' && primaryColor) colors[key] = primaryColor
+        else if (voxel.materialId === 'accent') colors[key] = asset?.accent ?? '#d2a354'
+        else if (voxel.materialId.startsWith('#')) colors[key] = voxel.materialId
+        else colors[key] = materialColorForVoxel(project, voxel, asset)
+      })
+    })
+    return colors
+  }, [project, selectedEntityParts])
   const changeSelectedColor = (color: string) => {
     if (!selectedEntityParts.length) return
     const instanceIds = new Set(selectedEntityParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
@@ -1351,11 +2322,8 @@ function App() {
   const sceneAxisToVoxelAxis = (axis: SceneTransformAxis): 'x' | 'y' | 'z' => axis === 'x' ? 'x' : axis === 'y' ? 'z' : 'y'
 
   const transformedEntitiesWithinSceneBoundary = (mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90) => {
-    const boundary = Math.max(1, projectRef.current.sceneSizeCm / 2)
-    const withinBoundary = (voxels: Voxel[]) => voxels.every((voxel) => {
-      const halfVoxel = VOXEL_WORLD_SIZE / 2
-      return Math.abs(voxelToWorld(voxel.x)) + halfVoxel <= boundary && Math.abs(voxelToWorld(voxel.z)) + halfVoxel <= boundary
-    })
+    const bounds = sceneBoundsForProject(projectRef.current)
+    const withinBoundary = (voxels: Voxel[]) => sceneVoxelsWithinBounds(voxels, bounds)
     const voxelAxis = sceneAxisToVoxelAxis(axis)
     const customIds = new Set<string>()
     for (const part of selectedEntityParts) {
@@ -1399,9 +2367,15 @@ function App() {
     return true
   }
 
+  const selectedContainsLockedEntity = () => selectedEntityParts.some((part) => scenePartIsLocked(projectRef.current, part))
+
   const mirrorSelectedEntities = (axis: SceneTransformAxis) => {
     if (!selectedEntityParts.length) {
       setNotice('请先选择要镜像的实体')
+      return
+    }
+    if (selectedContainsLockedEntity()) {
+      setNotice('选中的实体中包含已固定实体 · 请先取消固定后再镜像')
       return
     }
     if (!transformedEntitiesWithinSceneBoundary('mirror', axis)) {
@@ -1425,6 +2399,10 @@ function App() {
   const rotateSelectedEntities = (axis: SceneTransformAxis, degrees: 90 | 180 | 270) => {
     if (!selectedEntityParts.length) {
       setNotice('请先选择要旋转的实体')
+      return
+    }
+    if (selectedContainsLockedEntity()) {
+      setNotice('选中的实体中包含已固定实体 · 请先取消固定后再旋转')
       return
     }
     if (!transformedEntitiesWithinSceneBoundary('rotate', axis, degrees)) {
@@ -1463,6 +2441,10 @@ function App() {
 
   const resetSelectedTransform = () => {
     if (!selectedInstance) return
+    if (selectedContainsLockedEntity()) {
+      setNotice('当前实体已固定 · 请先取消固定后再重置变换')
+      return
+    }
     updateProject((draft) => {
       const instance = draft.instances.find((item) => item.id === selectedInstance.id)
       if (instance) { instance.x = 0; instance.y = 0; instance.z = 0; instance.rotation = 0; instance.rotationX = 0; instance.rotationY = 0; instance.rotationZ = 0; instance.mirror = { x: false, y: false, z: false }; instance.partOffsets = {} }
@@ -1540,32 +2522,47 @@ function App() {
           <div><div className="brand-name">莫测造境</div><div className="brand-subtitle">体素世界编辑器</div></div>
         </div>
         <div className="top-actions">
-          <ActionButton icon={<FilePlus2 size={17} />} label="新建" onClick={() => { replaceProject(makeDefaultProject()); setSelectedId('inst-chinese'); setNotice('已新建街区工程') }} />
+          <ActionButton icon={<FilePlus2 size={17} />} label="新建" onClick={createNewProject} />
           <ActionButton icon={<FolderOpen size={17} />} label="打开" onClick={() => fileInputRef.current?.click()} />
           <ActionButton icon={<Database size={17} />} label="场景库" onClick={openLibrary} />
           <ActionButton icon={<Save size={17} />} label="保存" onClick={saveProject} />
+          <ActionButton icon={<Save size={17} />} label="另存" onClick={saveProjectAs} />
           <div className="top-divider" />
-          <ActionButton icon={<Upload size={17} />} label="导入模型" onClick={() => modelInputRef.current?.click()} />
-          <ActionButton icon={<Download size={17} />} label="导出部件" onClick={exportSelectedPart} strong />
+          <ActionButton icon={<WandSparkles size={17} />} label="模型转体素" onClick={() => modelImportInputRef.current?.click()} />
+          <ActionButton icon={<Upload size={17} />} label="导入实体" onClick={() => entityFileInputRef.current?.click()} />
+          <ActionButton icon={<Download size={17} />} label="导出场景" onClick={exportSceneStl} strong />
           <button className="icon-button" title="撤销" aria-label="撤销" disabled={!canUndo} onClick={undoProject}><Undo2 size={17} /></button>
           <button className="icon-button" title="重做" aria-label="重做" disabled={!canRedo} onClick={redoProject}><Redo2 size={17} /></button>
           <div className="top-spacer" />
           <button className="icon-button" title="设置" onClick={() => setNotice('设置面板将在下一阶段接入')}><Settings size={17} /></button>
         </div>
-        <input ref={fileInputRef} className="hidden-input" type="file" accept=".json,.moceworld" onChange={(event) => event.target.files?.[0] && openProject(event.target.files[0])} />
-        <input ref={modelInputRef} className="hidden-input" type="file" accept=".glb,.gltf,.obj,.stl" onChange={(event) => event.target.files?.[0] && importModel(event.target.files[0])} />
+        <input ref={fileInputRef} className="hidden-input" type="file" accept=".json,.moceworld" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) void openProject(file) }} />
+        <input ref={modelImportInputRef} className="hidden-input" type="file" accept=".glb,.gltf,.obj,.stl" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) openModelImportDialog(file) }} />
+        <input ref={entityFileInputRef} className="hidden-input" type="file" accept=".moceentity" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) void importEntityFileFromDisk(file) }} />
+        <input ref={sceneLibraryImportInputRef} className="hidden-input" type="file" accept=".json,.moceworld" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) void importSceneFileToLibrary(file) }} />
       </header>
 
-      <main className={`workspace ${assetSidebarCollapsed ? 'asset-sidebar-collapsed' : ''}`} onClick={() => treeContextMenu && setTreeContextMenu(null)}>
-        <AssetSidebar assets={filteredAssets} query={query} setQuery={setQuery} activeStyle={activeStyle} setActiveStyle={setActiveStyle} collapsed={assetSidebarCollapsed} onToggleCollapsed={() => setAssetSidebarCollapsed((value) => !value)} onNotice={setNotice} onBeginPlacement={beginPlacement} onEndPlacement={endPlacement} />
+      <main className={`workspace ${assetSidebarCollapsed ? 'asset-sidebar-collapsed' : ''}`} onClick={() => { if (treeContextMenu) setTreeContextMenu(null); if (assetContextMenu) setAssetContextMenu(null); if (assetCategoryContextMenu) setAssetCategoryContextMenu(null); if (sceneLibraryContextMenu) setSceneLibraryContextMenu(null) }}>
+        <AssetSidebar assets={filteredAssets} categoryPaths={assetCategoryPaths} query={query} setQuery={setQuery} selectedAssetIds={selectedAssetIds} onToggleAssetSelection={(assetId) => setSelectedAssetIds((current) => current.includes(assetId) ? current.filter((id) => id !== assetId) : [...current, assetId])} onClearAssetSelection={() => setSelectedAssetIds([])} onExportAssets={exportTemplateAssets} collapsed={assetSidebarCollapsed} onToggleCollapsed={() => setAssetSidebarCollapsed((value) => !value)} onNotice={setNotice} onBeginPlacement={beginPlacement} onEndPlacement={endPlacement} onContextMenu={(assetId, x, y) => { setAssetContextMenu({ assetId, x, y }); setAssetCategoryContextMenu(null) }} contextMenu={assetContextMenu} categoryContextMenu={assetCategoryContextMenu} onCategoryContextMenu={(path, x, y) => { setAssetCategoryContextMenu({ path, x, y }); setAssetContextMenu(null) }} onCreateCategory={createAssetCategory} onDeleteCategory={deleteAssetCategory} onRenameAsset={renameTemplateAsset} onDuplicateAsset={duplicateTemplateAsset} onDeleteAsset={deleteTemplateAsset} onChangeAssetColor={changeTemplateAssetColor} />
         <section className="viewport-panel">
           <div className="viewport-toolbar">
             <div className="view-toggle">{(['正交', '透视'] as const).map((mode) => <button key={mode} className={viewMode === mode ? 'active' : ''} onClick={() => { setViewMode(mode); setNotice(`已切换视图 · ${mode}`) }}>{mode}</button>)}</div>
             <div className="toolbar-spacer" />
             <button className="micro-control" onClick={() => setNotice('当前体素单位 · 1 mm')}><Grid3X3 size={14} /> 1 mm体素 <ChevronDown size={13} /></button>
-            <button className="micro-control" onClick={() => setNotice('边界设置面板尚未接入')}><SlidersHorizontal size={14} /> 边界 <ChevronDown size={13} /></button>
+            <div className="boundary-control-wrap">
+              <button className={`micro-control ${boundaryOpen ? 'active' : ''}`} onClick={() => { setBoundaryDraft(currentSceneBounds); setBoundaryOpen((value) => !value) }}><SlidersHorizontal size={14} /> 边界 <ChevronDown size={13} /></button>
+              {boundaryOpen && <div className="boundary-popover" onClick={(event) => event.stopPropagation()}>
+                <div className="boundary-popover-title">场景边界</div>
+                <div className="boundary-popover-subtitle">按体素设置地面尺寸与 Z 轴限高</div>
+                <div className="boundary-fields">
+                  {([['x', 'X 宽度'], ['y', 'Y 深度'], ['z', 'Z 高度']] as const).map(([axis, label]) => <label key={axis} className="boundary-field"><span>{label}</span><input type="number" min={1} max={1000} step={1} value={boundaryDraft[axis]} onChange={(event) => setBoundaryDraft((current) => ({ ...current, [axis]: Math.max(1, Math.min(1000, Number(event.target.value) || 1)) }))} /><em>体素</em></label>)}
+                </div>
+                <div className="boundary-limit">最大尺寸：1000 × 1000 × 1000 体素</div>
+                <div className="boundary-actions"><button onClick={() => { setBoundaryDraft(currentSceneBounds); setBoundaryOpen(false) }}>取消</button><button className="primary" onClick={applySceneBounds}>应用</button></div>
+              </div>}
+            </div>
           </div>
-          <VoxelViewport project={project} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} tool={tool} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={project.assets.find((asset) => asset.id === placementAssetId) ?? null} placementPreview={placementPreview} viewMode={viewMode} showGrid={showGrid} showGround={showGround} zoomLevel={zoomLevel} onCameraApiChange={setCameraControlApi} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onEditInstanceVoxel={editInstanceVoxel} onMoveSceneParts={moveSceneParts} onPlacementMove={updatePlacementPreview} onPlaceAsset={placeAssetAt} onNotice={setNotice} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
+          <VoxelViewport project={project} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} tool={tool} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={project.assets.find((asset) => asset.id === placementAssetId) ?? null} placementPreview={placementPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={(value) => setZoomLevel(clampZoomLevel(value))} onCameraApiChange={setCameraControlApi} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onEditInstanceVoxel={editInstanceVoxel} onMoveSceneParts={moveSceneParts} onPlacementMove={updatePlacementPreview} onPlaceAsset={placeAssetAt} onNotice={setNotice} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
             <SceneTreePanel items={sceneTreeItems} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} expandedAssemblies={expandedAssemblies} contextMenu={treeContextMenu} onToggleExpanded={(assemblyId) => setExpandedAssemblies((current) => ({ ...current, [assemblyId]: !(current[assemblyId] ?? true) }))} onSelect={selectTreeItem} onToggleChecked={toggleTreeChecked} onAssemble={assembleCheckedTreeParts} onDissolve={dissolveSceneAssembly} onEnterEdit={enterEditMode} onRename={renameSceneEntity} onDelete={deleteSceneTreeEntity} onToggleLock={toggleTreeLock} onContextMenu={(targetId, x, y, assemblyId) => { if (!editEntityId || targetId === editEntityId) setTreeContextMenu({ targetId, assemblyId, x, y }) }} />
           </VoxelViewport>
           <div className="viewport-footer">
@@ -1576,16 +2573,19 @@ function App() {
             </div>
             <div className="footer-separator" />
             <button className={`footer-control ${showGrid ? 'active' : ''}`} onClick={() => { setShowGrid((value) => !value); setNotice(showGrid ? '已隐藏网格' : '已显示网格') }}><Grid3X3 size={16} /> 网格</button>
-            <button className={`footer-control ${showGround ? 'active' : ''}`} onClick={() => { setShowGround((value) => !value); setNotice(showGround ? '已隐藏地面' : '已显示地面') }}><Layers3 size={16} /> 地面 <ChevronDown size={13} /></button>
+            <button className={`footer-control ${showBoundary ? 'active' : ''}`} onClick={() => { setShowBoundary((value) => !value); setNotice(showBoundary ? '已隐藏场景边框' : '已显示场景边框') }}><Square size={16} /> 边框</button>
             <div className="drag-axis-control" aria-label="拖动方向"><Move3d size={14} /><span>拖动</span><button className={dragAxis === 'horizontal' ? 'active' : ''} onClick={() => { setDragAxis('horizontal'); setNotice('拖动方向 · 水平（X/Y）') }}>水平 X/Y</button><button className={dragAxis === 'vertical' ? 'active' : ''} onClick={() => { setDragAxis('vertical'); setNotice('拖动方向 · 竖直（Z）') }}>竖直 Z</button></div>
             <div className="footer-status"><span className={`status-dot ${persistenceStatus === 'offline' ? 'offline' : ''}`} /> {notice}</div>
             {cameraControlApi && <ViewportCameraControls showJoystick={false} onRotate={cameraControlApi.rotate} onView={(view) => { cameraControlApi.view(view); setNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { cameraControlApi.reset(); setZoomLevel(100); setNotice('视角已回中 · 缩放已恢复 100%') }} />}
-            <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { setZoomLevel((value) => Math.max(50, value - 10)); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${Math.max(0, Math.min(100, ((zoomLevel - 50) / 150) * 100))}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { setZoomLevel((value) => Math.min(200, value + 10)); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{zoomLevel}%</span></div>
+            <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { setZoomLevel((value) => clampZoomLevel(value - (value > 100 ? 50 : 10))); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${((zoomLevel - MIN_ZOOM_LEVEL) / (MAX_ZOOM_LEVEL - MIN_ZOOM_LEVEL)) * 100}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { setZoomLevel((value) => clampZoomLevel(value + (value >= 100 ? 50 : 10))); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{Math.round(zoomLevel)}%</span></div>
           </div>
         </section>
-        <Inspector selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onDuplicate={duplicateSelected} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} />
+        <Inspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? selectedEntityParts[0]?.colorOverride : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={Object.fromEntries(project.materials.map((material) => [material.id, material.color]))} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportEntityFile={exportSelectedEntityFile} onDuplicate={duplicateSelected} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} />
       </main>
-      {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} onClose={() => setLibraryOpen(false)} onRefresh={refreshLibrary} onSaveScene={saveCurrentSceneAsNew} onLoadScene={loadStoredScene} onLoadAsset={loadStoredAsset} />}
+      {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null) }} onImportScene={() => sceneLibraryImportInputRef.current?.click()} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} />}
+      {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
+      {modelImportDialog && <ModelImportDialog state={modelImportDialog} targetSizeMm={modelImportTargetSize} mode={modelImportMode} preserveParts={modelImportPreserveParts} onTargetSizeChange={setModelImportTargetSize} onModeChange={setModelImportMode} onPreservePartsChange={setModelImportPreserveParts} onStart={runModelImport} onConfirm={confirmModelImport} onCancel={() => setModelImportDialog(null)} />}
+      {unsavedDialogOpen && <UnsavedChangesDialog onDecision={handleUnsavedDecision} />}
     </div>
   )
 }
@@ -1672,11 +2672,10 @@ function SceneTreePanel({ items, selectedId, selectedPartIds, expandedAssemblies
   </aside>
 }
 
-function AssetSidebar({ assets, query, setQuery, activeStyle, setActiveStyle, collapsed, onToggleCollapsed, onNotice, onBeginPlacement, onEndPlacement }: { assets: VoxelAsset[]; query: string; setQuery: (value: string) => void; activeStyle: string; setActiveStyle: (value: string) => void; collapsed: boolean; onToggleCollapsed: () => void; onNotice: (value: string) => void; onBeginPlacement: (asset: VoxelAsset) => void; onEndPlacement: () => void }) {
-  const baseStyles = ['希腊风格', '印度风格', '中式风格', '日式风格', '基础件']
-  const styles = ['全部', ...baseStyles, ...[...new Set(assets.map((asset) => asset.style))].filter((style) => !baseStyles.includes(style))]
-  const assetGroups = [...baseStyles, ...[...new Set(assets.map((asset) => asset.style))].filter((style) => !baseStyles.includes(style))]
+function AssetSidebar({ assets, categoryPaths, query, setQuery, selectedAssetIds, onToggleAssetSelection, onClearAssetSelection, onExportAssets, collapsed, onToggleCollapsed, onNotice, onBeginPlacement, onEndPlacement, contextMenu, onContextMenu, categoryContextMenu, onCategoryContextMenu, onCreateCategory, onDeleteCategory, onRenameAsset, onDuplicateAsset, onDeleteAsset, onChangeAssetColor }: { assets: VoxelAsset[]; categoryPaths: string[][]; query: string; setQuery: (value: string) => void; selectedAssetIds: string[]; onToggleAssetSelection: (assetId: string) => void; onClearAssetSelection: () => void; onExportAssets: (assetIds: string[]) => void; collapsed: boolean; onToggleCollapsed: () => void; onNotice: (value: string) => void; onBeginPlacement: (asset: VoxelAsset) => void; onEndPlacement: () => void; contextMenu: AssetContextMenuState; onContextMenu: (assetId: string, x: number, y: number) => void; categoryContextMenu: AssetCategoryContextMenuState; onCategoryContextMenu: (path: string[], x: number, y: number) => void; onCreateCategory: (parentPath: string[] | null) => void; onDeleteCategory: (path: string[]) => void; onRenameAsset: (assetId: string) => void; onDuplicateAsset: (assetId: string) => void; onDeleteAsset: (assetId: string) => void; onChangeAssetColor: (assetId: string, color: string) => void }) {
+  const categoryTree = assetCategoryTreeFromAssetsAndPaths(assets, categoryPaths)
   const [activeNav, setActiveNav] = useState('组件')
+  const [expandedCategoryKeys, setExpandedCategoryKeys] = useState<Record<string, boolean>>({})
   const draggedAssetRef = useRef(false)
   const navItems = [
     { label: '组件', icon: <Box size={17} /> },
@@ -1685,69 +2684,187 @@ function AssetSidebar({ assets, query, setQuery, activeStyle, setActiveStyle, co
     { label: '图层', icon: <Layers3 size={17} /> },
     { label: '网格', icon: <Grid3X3 size={17} /> },
   ]
+  const renderAssetCard = (asset: VoxelAsset) => <div className={`asset-card ${selectedAssetIds.includes(asset.id) ? 'selected' : ''}`} key={asset.id} role="button" tabIndex={0} onPointerDown={(event) => { if (event.button !== 0) return; draggedAssetRef.current = true; onBeginPlacement(asset) }} onPointerUp={(event) => { if (event.button !== 0) return; draggedAssetRef.current = false; onEndPlacement() }} onPointerCancel={() => { draggedAssetRef.current = false; onEndPlacement() }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onContextMenu(asset.id, event.clientX, event.clientY) }} onClick={() => { if (draggedAssetRef.current) { draggedAssetRef.current = false; return } onNotice('请按住组件拖动到三维场地后放置') }} title="按住拖动到场地放置">
+    <label className="asset-select-box" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={selectedAssetIds.includes(asset.id)} onChange={() => onToggleAssetSelection(asset.id)} aria-label={`选择${asset.name}`} /></label>
+    <VoxelThumbnail asset={asset} />
+    <span>{asset.name.replace('·主屋', '')}</span>
+  </div>
+  const renderCategoryNode = (node: AssetCategoryNode, depth = 0): React.ReactNode => {
+    const expanded = expandedCategoryKeys[node.key] ?? true
+    return <div className="asset-category-node" key={node.key}>
+      <button className="asset-category-row" style={{ paddingLeft: `${8 + depth * 13}px` }} onClick={() => setExpandedCategoryKeys((current) => ({ ...current, [node.key]: !expanded }))} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onCategoryContextMenu(node.path, event.clientX, event.clientY) }} title="展开或收起类别">
+        <ChevronDown size={13} className={expanded ? '' : 'category-collapsed-icon'} /><span className="asset-category-name">{node.name}</span><span className="asset-category-count">{node.assets.length + node.children.reduce((count, child) => count + child.assets.length, 0)}</span>
+      </button>
+      {expanded && <div className="asset-category-children">
+        {node.children.map((child) => renderCategoryNode(child, depth + 1))}
+        {node.assets.length > 0 && <div className="asset-category-assets"><div className="asset-grid">{node.assets.map(renderAssetCard)}</div></div>}
+      </div>}
+    </div>
+  }
   return <aside className={`asset-sidebar ${collapsed ? 'collapsed' : ''}`}>
-    <div className="panel-title-row"><div><h2>资产库</h2><p>模板实体</p></div><button className="panel-collapse-button" aria-label={collapsed ? '展开资产库' : '收起资产库'} title={collapsed ? '展开资产库' : '收起资产库'} onClick={onToggleCollapsed}>{collapsed ? <ChevronRight size={18} /> : <ChevronRight size={18} className="collapse-left" />}</button></div>
+    <div className="panel-title-row"><div><h2>资产库</h2><p>类别树 · 模板实体</p></div><button className="panel-collapse-button" aria-label={collapsed ? '展开资产库' : '收起资产库'} title={collapsed ? '展开资产库' : '收起资产库'} onClick={onToggleCollapsed}>{collapsed ? <ChevronRight size={18} /> : <ChevronRight size={18} className="collapse-left" />}</button></div>
     {collapsed ? <button className="collapsed-asset-toggle" aria-label="展开资产库" onClick={onToggleCollapsed}><Box size={17} /></button> : <>
     <label className="search-field"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索组件" /><SlidersHorizontal size={14} /></label>
-    <div className="style-tabs">{styles.map((style) => <button key={style} className={activeStyle === style ? 'active' : ''} onClick={() => setActiveStyle(style)}>{style}</button>)}</div>
+    {selectedAssetIds.length > 0 && <div className="asset-selection-actions"><span>已选 {selectedAssetIds.length} 个模板实体</span><button onClick={() => onExportAssets(selectedAssetIds)} title="导出选中模板实体"><Download size={12} /></button><button onClick={onClearAssetSelection} title="清除选择"><X size={12} /></button></div>}
     <div className="asset-scroll">
-      {assetGroups.map((style) => {
-        const group = assets.filter((asset) => asset.style === style)
-        if (activeStyle !== '全部' && activeStyle !== style) return null
-        if (!group.length) return null
-        return <div className="asset-group" key={style}>
-          <div className="group-heading"><span className="style-dot" style={{ background: styleColors[style] ?? '#a5a6a2' }} />{style}<ChevronDown size={15} /></div>
-          <div className="asset-grid">{group.map((asset) => <button className="asset-card" key={asset.id} onPointerDown={() => { draggedAssetRef.current = true; onBeginPlacement(asset) }} onPointerUp={() => { draggedAssetRef.current = false; onEndPlacement() }} onPointerCancel={() => { draggedAssetRef.current = false; onEndPlacement() }} onClick={(event) => { if (draggedAssetRef.current) { event.preventDefault(); draggedAssetRef.current = false; return } onNotice('请按住组件拖动到三维场地后放置') }} title="按住拖动到场地放置">
-            <VoxelThumbnail asset={asset} />
-            <span>{asset.name.replace('·主屋', '')}</span>
-          </button>)}</div>
-        </div>
-      })}
+      {categoryTree.length ? categoryTree.map((node) => renderCategoryNode(node)) : <div className="asset-category-empty">资产库暂无类别</div>}
     </div>
     <div className="sidebar-nav">{navItems.map(({ label, icon }) => <button key={label} className={activeNav === label ? 'active' : ''} onClick={() => { setActiveNav(label); onNotice(label === '组件' ? '模板实体库已打开' : `${label}功能尚未接入工程数据`) }}>{icon}<span>{label}</span></button>)}</div></>}
+    {categoryContextMenu && <div className="asset-context-menu" style={{ left: categoryContextMenu.x, top: categoryContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}><button onClick={() => onCreateCategory(categoryContextMenu.path)}>新建子类别</button><button onClick={() => onCreateCategory(null)}>新建根类别</button><button className="danger" onClick={() => onDeleteCategory(categoryContextMenu.path)}>删除类别</button></div>}
+    {contextMenu && (() => {
+      const asset = assets.find((item) => item.id === contextMenu.assetId)
+      if (!asset) return null
+      const color = /^#[0-9a-f]{6}$/i.test(asset.templateColor ?? asset.color) ? (asset.templateColor ?? asset.color) : '#6c827d'
+      return <div className="asset-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}>
+        <button onClick={() => onRenameAsset(asset.id)}>重命名</button>
+        <button onClick={() => onDuplicateAsset(asset.id)}>创建副本</button>
+        <button onClick={() => onExportAssets([asset.id])}>导出实体文件</button>
+        <label className="asset-context-color"><span>修改颜色</span><input type="color" aria-label="选择资产颜色" value={color} onChange={(event) => onChangeAssetColor(asset.id, event.target.value)} /></label>
+        <button className="danger" onClick={() => onDeleteAsset(asset.id)}>删除资产</button>
+      </div>
+    })()}
   </aside>
 }
 
-function VoxelThumbnail({ asset }: { asset: VoxelAsset }) {
-  return <div className="thumbnail-scene" style={{ '--thumb-main': asset.color, '--thumb-accent': asset.accent } as React.CSSProperties}>
-    <div className="thumb-ground" />
-    <div className="thumb-house"><div className="thumb-roof" /><div className="thumb-body" /><div className="thumb-door" /></div>
+function AssetCategorySaveDialog({ asset, assets, onCancel, onSave }: { asset: VoxelAsset; assets: VoxelAsset[]; onCancel: () => void; onSave: (name: string, categoryPath: string[]) => void }) {
+  const existingPaths = collectAssetCategoryPaths(assets)
+  const categoryPaths = existingPaths.length ? existingPaths : [[DEFAULT_ASSET_CATEGORY]]
+  const initialPath = categoryPaths.find((path) => assetCategoryKey(path) === assetCategoryKey(normalizeAssetCategoryPath(asset.categoryPath))) ?? categoryPaths[0]
+  const [selectedPath, setSelectedPath] = useState(initialPath)
+  const [draftName, setDraftName] = useState(asset.name)
+  const [draftCategory, setDraftCategory] = useState('')
+  const [customPaths, setCustomPaths] = useState<string[][]>([])
+  const allPaths = [...categoryPaths, ...customPaths.filter((path) => !categoryPaths.some((candidate) => assetCategoryKey(candidate) === assetCategoryKey(path)))]
+  const roots = assetCategoryTreeFromPaths(allPaths)
+  const renderCategory = (node: AssetCategoryNode, depth = 0): React.ReactNode => <div className="asset-category-picker-node" key={node.key}>
+    <button className={`asset-category-picker-row ${assetCategoryKey(selectedPath) === node.key ? 'active' : ''}`} style={{ paddingLeft: `${12 + depth * 16}px` }} onClick={() => setSelectedPath(node.path)}><ChevronRight size={12} /><span>{node.name}</span></button>
+    {node.children.map((child) => renderCategory(child, depth + 1))}
+  </div>
+  const addCategory = (asChild: boolean) => {
+    const segments = draftCategory.split(/[\\/／>＞]/).map((value) => value.trim()).filter(Boolean)
+    if (!segments.length) return
+    const path = [...(asChild ? selectedPath : []), ...segments]
+    setCustomPaths((current) => [...current, ...path.reduce<string[][]>((result, _name, index) => { result.push(path.slice(0, index + 1)); return result }, [])])
+    setSelectedPath(path)
+    setDraftCategory('')
+  }
+  return <div className="modal-backdrop asset-category-dialog-backdrop" onPointerDown={(event) => event.target === event.currentTarget && onCancel()}>
+    <section className="asset-category-dialog" role="dialog" aria-modal="true" aria-label="选择资产类别">
+      <div className="asset-category-dialog-heading"><div><h2>保存到资产库</h2><p>{asset.name}</p></div><button className="icon-button" aria-label="取消保存资产" onClick={onCancel}><X size={17} /></button></div>
+      <div className="asset-category-dialog-body"><div className="field-label">实体名称</div><input className="asset-category-name-input" value={draftName} onChange={(event) => setDraftName(event.target.value)} placeholder="请输入实体名称" /><div className="field-label">选择类别</div><div className="asset-category-picker">{roots.map((node) => renderCategory(node))}</div><div className="asset-category-add"><input value={draftCategory} onChange={(event) => setDraftCategory(event.target.value)} placeholder={`在“${selectedPath.join(' / ')}”下新建子类别`} onKeyDown={(event) => { if (event.key === 'Enter') addCategory(true) }} /><button onClick={() => addCategory(true)}>新建子类别</button><button onClick={() => addCategory(false)}>新建根类别</button></div><p className="asset-category-hint">资产会保存到：{selectedPath.join(' / ')}</p></div>
+      <div className="asset-category-dialog-actions"><button onClick={onCancel}>取消</button><button className="primary" onClick={() => onSave(draftName.trim() || asset.name, selectedPath)}>保存</button></div>
+    </section>
   </div>
 }
 
-function SceneLibraryDialog({ library, busy, onClose, onRefresh, onSaveScene, onLoadScene, onLoadAsset }: { library: LibraryResponse; busy: boolean; onClose: () => void; onRefresh: () => void; onSaveScene: () => void; onLoadScene: (id: string, name: string) => void; onLoadAsset: (id: string, name: string) => void }) {
-  return <div className="modal-backdrop" onPointerDown={(event) => event.target === event.currentTarget && onClose()}>
-    <section className="library-dialog" role="dialog" aria-modal="true" aria-label="后端场景库">
-      <div className="library-dialog-heading"><div><h2>后端场景库</h2><p>资产、场景与手动体素均由当前工程自动入库</p></div><button className="icon-button" aria-label="关闭场景库" onClick={onClose}><X size={17} /></button></div>
-      <div className="library-dialog-toolbar"><span>{library.scenes.length} 个场景 · {library.assets.length} 个资产</span><div className="library-toolbar-actions"><button className="tiny-button" onClick={onSaveScene} disabled={busy}><Save size={13} /> 当前场景另存为</button><button className="tiny-button" onClick={onRefresh} disabled={busy}><RotateCw size={13} /> 刷新</button></div></div>
-      <div className="library-columns">
-        <div className="library-column"><div className="library-column-title">场景</div>{library.scenes.length ? library.scenes.map((scene) => <button className="library-row" key={scene.id} onClick={() => onLoadScene(scene.id, scene.name)}><div><strong>{scene.name}</strong><span>{scene.instanceCount} 个实例 · {scene.customVoxelCount} 个手动体素</span></div><ChevronRight size={15} /></button>) : <div className="empty-panel">尚无后端场景</div>}</div>
-        <div className="library-column"><div className="library-column-title">资产</div>{library.assets.length ? library.assets.map((asset) => <button className="library-row" key={asset.id} onClick={() => onLoadAsset(asset.id, asset.name)}><div><strong>{asset.name}</strong><span>{asset.style} · {asset.voxelCount} 个体素</span></div><Plus size={15} /></button>) : <div className="empty-panel">尚无后端资产</div>}</div>
+function ModelImportDialog({ state, targetSizeMm, mode, preserveParts, onTargetSizeChange, onModeChange, onPreservePartsChange, onStart, onConfirm, onCancel }: { state: ModelImportDialogState; targetSizeMm: number; mode: VoxelizeMode; preserveParts: boolean; onTargetSizeChange: (value: number) => void; onModeChange: (value: VoxelizeMode) => void; onPreservePartsChange: (value: boolean) => void; onStart: () => void; onConfirm: () => void; onCancel: () => void }) {
+  const result = state.result
+  const diagnostics = result?.diagnostics
+  const sizeLabel = result ? `${result.asset.width} × ${result.asset.height} × ${result.asset.depth} mm` : '尚未生成'
+  return <div className="modal-backdrop model-import-dialog-backdrop" onPointerDown={(event) => event.target === event.currentTarget && !state.busy && onCancel()}>
+    <section className="model-import-dialog" role="dialog" aria-modal="true" aria-label="模型转体素">
+      <div className="model-import-heading"><div><h2>模型转体素</h2><p>{state.file.name} · 统一 1 mm 体素</p></div><button className="icon-button" aria-label="关闭模型转体素" disabled={state.busy} onClick={onCancel}><X size={17} /></button></div>
+      <div className="model-import-body">
+        <div className="model-import-settings">
+          <label className="model-import-field"><span>目标最大尺寸</span><div><input type="number" min={1} max={256} step={1} value={targetSizeMm} disabled={state.busy} onChange={(event) => onTargetSizeChange(Math.max(1, Math.min(256, Number(event.target.value) || 1)))} /><em>mm</em></div></label>
+          <div className="model-import-field"><span>体素化方式</span><div className="model-import-mode"><button className={mode === 'solid' ? 'active' : ''} disabled={state.busy} onClick={() => onModeChange('solid')}>实体填充</button><button className={mode === 'surface' ? 'active' : ''} disabled={state.busy} onClick={() => onModeChange('surface')}>仅表面</button></div></div>
+          <label className="model-import-check"><input type="checkbox" checked={preserveParts} disabled={state.busy} onChange={(event) => onPreservePartsChange(event.target.checked)} /><span>按模型部件保留可编辑分件</span></label>
+          <p className="model-import-hint">实体填充适合封闭模型；开放模型会提示可能需要手工修补。体素化后仍可在场景中继续绘制、擦除和拆分。</p>
+        </div>
+        <div className="model-import-preview"><div className="model-import-preview-title"><span>体素预览</span><span>{sizeLabel}</span></div>{result ? <VoxelMiniPreview voxels={result.asset.voxels} asset={result.asset} /> : <div className="model-import-empty">设置参数后点击“开始体素化”</div>}</div>
+        <div className="model-import-status"><div className="model-import-progress"><span style={{ width: `${Math.round(state.progress * 100)}%` }} /></div><span>{state.progressLabel}{state.busy ? ` · ${Math.round(state.progress * 100)}%` : ''}</span></div>
+        {state.error && <div className="model-import-error">{state.error}</div>}
+        {diagnostics && <div className="model-import-diagnostics"><span>{diagnostics.triangleCount} 个三角面</span><span>{diagnostics.partCount} 个部件</span><span>{diagnostics.closedMesh ? '封闭网格' : '开放网格'}</span>{diagnostics.warnings.map((warning) => <p key={warning}>提示：{warning}</p>)}</div>}
       </div>
-      {busy && <div className="library-loading">正在访问后端数据库…</div>}
+      <div className="model-import-actions"><button onClick={onCancel} disabled={state.busy}>取消</button><button onClick={onStart} disabled={state.busy}>{state.busy ? '体素化中…' : result ? '重新体素化' : '开始体素化'}</button><button className="primary" onClick={onConfirm} disabled={!result || state.busy}>确认并放置</button></div>
     </section>
   </div>
+}
+
+function VoxelThumbnail({ asset }: { asset: VoxelAsset }) {
+  return <div className="thumbnail-scene" aria-label={`${asset.name} 3D 预览`}><VoxelMiniPreview voxels={asset.voxels} asset={asset} /></div>
+}
+
+function SceneLibraryDialog({ library, busy, selectedSceneId, selectedSceneProject, onClose, onImportScene, onLoadScene, onSelectScene, onSaveSceneEntity, onAddSceneEntityToCurrentScene, onDeleteSceneEntity, contextMenu, onContextMenu, onCloseContextMenu, onDuplicateScene, onDeleteScene }: { library: LibraryResponse; busy: boolean; selectedSceneId: string | null; selectedSceneProject: ProjectState | null; onClose: () => void; onImportScene: () => void; onLoadScene: (id: string, name: string) => void; onSelectScene: (id: string, name: string, x: number, y: number) => void; onSaveSceneEntity: (asset: VoxelAsset) => void; onAddSceneEntityToCurrentScene: (asset: VoxelAsset) => void; onDeleteSceneEntity: (sceneId: string, assetId: string, name: string) => void | Promise<void>; contextMenu: SceneLibraryContextMenuState; onContextMenu: (sceneId: string, x: number, y: number) => void; onCloseContextMenu: () => void; onDuplicateScene: (sceneId: string, name: string) => void; onDeleteScene: (sceneId: string, name: string) => void }) {
+  const [entityContextMenu, setEntityContextMenu] = useState<SceneEntityContextMenuState>(null)
+  const menuCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const contextScene = contextMenu ? library.scenes.find((scene) => scene.id === contextMenu.sceneId) : undefined
+  const selectedAssetIds = new Set(selectedSceneProject?.instances.map((instance) => instance.assetId) ?? [])
+  const selectedSceneEntities = selectedSceneProject?.assets.filter((asset) => selectedAssetIds.has(asset.id)) ?? []
+  const cancelMenuClose = () => {
+    if (menuCloseTimerRef.current) {
+      clearTimeout(menuCloseTimerRef.current)
+      menuCloseTimerRef.current = null
+    }
+  }
+  const scheduleMenuClose = () => {
+    cancelMenuClose()
+    menuCloseTimerRef.current = setTimeout(() => {
+      onCloseContextMenu()
+      setEntityContextMenu(null)
+      menuCloseTimerRef.current = null
+    }, 180)
+  }
+  const openSceneMenu = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+    cancelMenuClose()
+    setEntityContextMenu(null)
+    const scene = event.currentTarget.dataset.sceneId ? library.scenes.find((item) => item.id === event.currentTarget.dataset.sceneId) : undefined
+    if (scene) onSelectScene(scene.id, scene.name, event.clientX + 8, event.clientY + 8)
+  }
+  const openEntityMenu = (event: React.MouseEvent<HTMLButtonElement>, assetId: string) => {
+    event.preventDefault()
+    event.stopPropagation()
+    cancelMenuClose()
+    onCloseContextMenu()
+    setEntityContextMenu({ assetId, x: event.clientX + 8, y: event.clientY + 8 })
+  }
+  const closeMenus = () => {
+    cancelMenuClose()
+    onCloseContextMenu()
+    setEntityContextMenu(null)
+  }
+  useEffect(() => () => cancelMenuClose(), [])
+  return <div className="modal-backdrop" onPointerDown={(event) => event.target === event.currentTarget && onClose()}>
+    <section className="library-dialog" role="dialog" aria-modal="true" aria-label="场景库" onPointerDown={(event) => { const target = event.target as HTMLElement; if (!target.closest('button, input, .scene-library-context-menu')) closeMenus() }}>
+      <div className="library-dialog-heading"><div><h2>场景库</h2><p>场景文件与场景实体由当前工程自动管理</p></div><button className="icon-button" aria-label="关闭场景库" onClick={onClose}><X size={17} /></button></div>
+      <div className="library-dialog-toolbar"><span>{library.scenes.length} 个场景 · {selectedSceneId ? `${selectedSceneEntities.length} 个实体` : '未选择场景'}</span><div className="library-toolbar-actions"><button className="tiny-button" onClick={onImportScene} disabled={busy}><FolderOpen size={13} /> 导入场景文件</button></div></div>
+      <div className="library-columns">
+        <div className="library-column"><div className="library-column-title">场景</div>{library.scenes.length ? library.scenes.map((scene) => <button className={`library-row ${selectedSceneId === scene.id ? 'selected' : ''}`} data-scene-id={scene.id} key={scene.id} onPointerEnter={openSceneMenu} onPointerLeave={scheduleMenuClose} onClick={openSceneMenu} onContextMenu={openSceneMenu}><div><strong>{scene.name}</strong><span>{scene.instanceCount} 个实例 · {scene.customVoxelCount} 个手动体素 · {scene.assetCount} 个依赖实体</span></div><ChevronRight size={15} /></button>) : <div className="empty-panel">尚无场景</div>}</div>
+        <div className="library-column"><div className="library-column-title">实体</div>{!selectedSceneId ? <div className="empty-panel">请选择场景查看实体</div> : selectedSceneEntities.length ? selectedSceneEntities.map((asset) => <button className="library-row" key={asset.id} onClick={(event) => openEntityMenu(event, asset.id)} onContextMenu={(event) => openEntityMenu(event, asset.id)}><div><strong>{asset.name}</strong><span>{asset.style} · {asset.voxels.length} 个体素</span></div><ChevronRight size={15} /></button>) : <div className="empty-panel">当前场景没有可显示的实体</div>}</div>
+      </div>
+      {contextScene && contextMenu && <div className="scene-library-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerEnter={cancelMenuClose} onPointerLeave={scheduleMenuClose} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}><button onClick={() => { closeMenus(); onLoadScene(contextScene.id, contextScene.name) }}>打开场景</button><button onClick={() => { closeMenus(); onDuplicateScene(contextScene.id, contextScene.name) }}>创建副本</button><button className="danger" onClick={() => { closeMenus(); onDeleteScene(contextScene.id, contextScene.name) }}>删除场景</button></div>}
+      {entityContextMenu && selectedSceneId && (() => {
+        const entity = selectedSceneEntities.find((asset) => asset.id === entityContextMenu.assetId)
+        if (!entity) return null
+        return <div className="scene-library-context-menu" style={{ left: entityContextMenu.x, top: entityContextMenu.y }} onPointerEnter={cancelMenuClose} onPointerLeave={scheduleMenuClose} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}><button onClick={() => { closeMenus(); onSaveSceneEntity(entity) }}>保存到当前资产库</button><button onClick={() => { closeMenus(); onAddSceneEntityToCurrentScene(entity) }}>添加到当前场景</button><button className="danger" onClick={() => { closeMenus(); onDeleteSceneEntity(selectedSceneId, entity.id, entity.name) }}>删除该实体</button></div>
+      })()}
+      {busy && <div className="library-loading">正在访问场景库…</div>}
+    </section>
+  </div>
+}
+
+function UnsavedChangesDialog({ onDecision }: { onDecision: (decision: UnsavedDecision) => void | Promise<void> }) {
+  return <div className="modal-backdrop unsaved-modal-backdrop"><section className="unsaved-dialog" role="dialog" aria-modal="true" aria-label="保存当前场景"><h2>当前场景有未保存改动</h2><p>继续操作前，是否先保存当前场景？</p><div className="unsaved-dialog-actions"><button onClick={() => onDecision('cancel')}>取消</button><button onClick={() => onDecision('discard')}>否</button><button className="primary" onClick={() => onDecision('save')}>是</button></div></section></div>
 }
 
 function ToolButton({ icon, label, description, active, onClick }: { icon: React.ReactNode; label: string; description: string; active: boolean; onClick: () => void }) {
   return <button className={`tool-button ${active ? 'active' : ''}`} data-tooltip={description} aria-label={label} onClick={onClick} title={description}>{icon}</button>
 }
 
-function Inspector({ selectedAsset, selectedPart, selectedParts, editEntityId, position, transformEditable, selectedColor, onChangeTransform, onChangeColor, onMirror, onRotate, onExport, onDuplicate, onDelete, onResetTransform, onSaveAsAsset }: { selectedAsset?: VoxelAsset; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; editEntityId: string | null; position: number[]; transformEditable: boolean; selectedColor: string; onChangeTransform: (axis: number, value: number) => void; onChangeColor: (color: string) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onExport: () => void; onDuplicate: (count: number) => void; onDelete: () => void; onResetTransform: () => void; onSaveAsAsset: () => void }) {
+function Inspector({ entityName, source, selectedAsset, selectedPart, selectedParts, editEntityId, position, transformEditable, selectedColor, previewColor, previewVoxelColors, previewMaterialColors, onChangeTransform, onChangeColor, onMirror, onRotate, onExport, onExportEntityFile, onDuplicate, onDelete, onResetTransform, onSaveAsAsset }: { entityName: string; source: string; selectedAsset?: VoxelAsset; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; editEntityId: string | null; position: number[]; transformEditable: boolean; selectedColor: string; previewColor?: string; previewVoxelColors: Record<string, string>; previewMaterialColors: Record<string, string>; onChangeTransform: (axis: number, value: number) => void; onChangeColor: (color: string) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onExport: () => void; onExportEntityFile: () => void; onDuplicate: (count: number) => void; onDelete: () => void; onResetTransform: () => void; onSaveAsAsset: () => void }) {
   const [copyCount, setCopyCount] = useState(1)
   const [mirrorAxis, setMirrorAxis] = useState<'x' | 'y' | 'z'>('x')
   const [rotateAxis, setRotateAxis] = useState<'x' | 'y' | 'z'>('z')
   const [rotateDegrees, setRotateDegrees] = useState<90 | 180 | 270>(90)
   const previewVoxels = selectedParts.flatMap((part) => part.voxels)
-  const isAssembly = selectedParts.length > 1 && selectedParts.some((part) => part.assemblyId || part.assemblyIds?.length)
-  const entityName = isAssembly ? `装配体 · ${selectedParts.length} 个子实体` : selectedAsset?.name ?? selectedPart?.label ?? (selectedPart ? '手动体素实体' : '未选择')
-  const source = isAssembly ? '当前场景 · 装配体实体' : selectedAsset ? (selectedAsset.source ?? '莫测标准组件') : (selectedPart ? '当前场景 · 用户实体' : '莫测标准组件')
   return <aside className="inspector">
     <div className="inspector-heading"><div><h2>属性</h2><p>选中对象的编辑参数</p></div><ChevronRight size={18} className="muted-icon" /></div>
     <div className="inspector-section entity-summary-section">
-      <div className="field-label">选中实体</div><div className="select-field">{entityName} <ChevronDown size={14} /></div>
+      <div className="field-label">选中实体</div><div className="select-field entity-name-field">{entityName}</div>
       <div className="field-label">来源</div><div className="input-field muted-field">{source}</div>
-      <div className="entity-preview"><VoxelMiniPreview voxels={previewVoxels} asset={selectedAsset} /></div>
+      <div className="entity-preview"><VoxelMiniPreview voxels={previewVoxels} asset={selectedAsset} colorOverride={previewColor} voxelColors={previewVoxelColors} materialColors={previewMaterialColors} /></div>
     </div>
     <div className="inspector-section">
       <div className="section-heading"><span>变换</span><button className="tiny-icon" onClick={onResetTransform} title="重置变换"><RotateCcw size={13} /></button></div>
@@ -1766,13 +2883,14 @@ function Inspector({ selectedAsset, selectedPart, selectedParts, editEntityId, p
         <div className="entity-transform-operation"><span>旋转实体</span><div className="axis-choice">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={rotateAxis === axis ? 'active' : ''} onClick={() => setRotateAxis(axis)}>{axis.toUpperCase()}</button>)}</div><div className="degree-choice">{([90, 180, 270] as const).map((degrees) => <button key={degrees} className={rotateDegrees === degrees ? 'active' : ''} onClick={() => setRotateDegrees(degrees)}>{degrees}°</button>)}</div><button className="operation-confirm" onClick={() => onRotate(rotateAxis, rotateDegrees)}>执行</button></div>
         <button onClick={onSaveAsAsset}><Save size={14} /> 保存为模板实体</button>
         <button className="danger-action" onClick={onDelete}><Trash2 size={14} /> 删除实体</button>
+        <button onClick={onExportEntityFile}><Download size={14} /> 导出普通实体文件</button>
         <button className="export-action" onClick={onExport}><Download size={14} /> 导出选中部件 STL</button>
       </div>
     </div>
   </aside>
 }
 
-function VoxelMiniPreview({ voxels, asset }: { voxels: Voxel[]; asset?: VoxelAsset }) {
+function VoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, materialColors = {} }: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string> }) {
   if (!voxels.length) return <div className="mini-preview-empty">暂无预览</div>
   const minX = Math.min(...voxels.map((voxel) => voxel.x))
   const minY = Math.min(...voxels.map((voxel) => voxel.y))
@@ -1788,16 +2906,27 @@ function VoxelMiniPreview({ voxels, asset }: { voxels: Voxel[]; asset?: VoxelAss
   const tileY = 7
   const width = (spanX + spanZ) * tileX + 28
   const height = (spanX + spanZ) * tileZ + spanY * tileY + 28
-  const originX = 14 + spanZ * tileX
+  const originX = 14 + spanX * tileX
   const originY = 14 + spanY * tileY
-  const project = (x: number, y: number, z: number): [number, number] => [originX + (x - z) * tileX, originY + (x + z) * tileZ - y * tileY]
-  const materialColor = (materialId: string) => materialId === 'primary' ? asset?.color ?? '#6c827d' : materialId === 'accent' ? asset?.accent ?? '#d2a354' : materialId.startsWith('#') ? materialId : MATERIALS.find((material) => material.id === materialId)?.color ?? '#6c827d'
+  // Keep this fixed thumbnail projection in lockstep with the viewport's
+  // default camera and toSceneWorld mapping: voxel X/Z form the ground plane,
+  // while voxel Y is vertical.
+  const project = (x: number, y: number, z: number): [number, number] => [originX + (z - x) * tileX, originY + (x + z) * tileZ - y * tileY]
+  const materialColor = (voxel: Voxel & { sourceVoxel?: Voxel }) => {
+    // voxelColors is keyed by scene-space coordinates. The thumbnail only
+    // normalizes the drawing coordinates, so never offset this lookup by the
+    // preview bounds. Offsetting it made multi-selection fall back to the
+    // first selected asset's color for every primary voxel.
+    const sourceVoxel = voxel.sourceVoxel ?? voxel
+    const originalKey = `${sourceVoxel.x},${sourceVoxel.y},${sourceVoxel.z}`
+    return voxelColors[originalKey] ?? colorOverride ?? asset?.templateColor ?? (voxel.materialId === 'primary' ? asset?.color ?? '#6c827d' : voxel.materialId === 'accent' ? asset?.accent ?? '#d2a354' : voxel.materialId.startsWith('#') ? voxel.materialId : materialColors[voxel.materialId] ?? MATERIALS.find((material) => material.id === voxel.materialId)?.color ?? '#6c827d')
+  }
   const shadeColor = (color: string, amount: number) => {
     if (!/^#[0-9a-f]{6}$/i.test(color)) return color
     const channels = [0, 2, 4].map((offset) => Math.max(0, Math.min(255, Math.round(parseInt(color.slice(offset + 1, offset + 3), 16) * amount))))
     return `#${channels.map((channel) => channel.toString(16).padStart(2, '0')).join('')}`
   }
-  const orderedVoxels = voxels.slice(0, 600).map((voxel) => ({ ...voxel, x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ }))
+  const orderedVoxels = voxels.slice(0, 600).map((voxel) => ({ ...voxel, sourceVoxel: voxel, x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ }))
     .sort((left, right) => (left.x + left.z + left.y * 0.02) - (right.x + right.z + right.y * 0.02))
   const voxelKeys = new Set(orderedVoxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
   const hasVoxel = (x: number, y: number, z: number) => voxelKeys.has(`${x},${y},${z}`)
@@ -1811,7 +2940,7 @@ function VoxelMiniPreview({ voxels, asset }: { voxels: Voxel[]; asset?: VoxelAss
       const p101 = project(voxel.x + 1, voxel.y, voxel.z + 1)
       const p011 = project(voxel.x, voxel.y + 1, voxel.z + 1)
       const p111 = project(voxel.x + 1, voxel.y + 1, voxel.z + 1)
-      const color = materialColor(voxel.materialId)
+      const color = materialColor(voxel)
       const points = (values: Array<[number, number]>) => values.map(([x, y]) => `${x},${y}`).join(' ')
       return <g key={`${voxel.x}-${voxel.y}-${voxel.z}-${index}`}>
         {!hasVoxel(voxel.x, voxel.y + 1, voxel.z) && <polygon points={points([p010, p110, p111, p011])} fill={color} />}
@@ -2066,7 +3195,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   </div>
 }
 
-function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, tool, activeMaterial, materials, dragAxis, placementAsset, placementPreview, viewMode, showGrid, showGround, zoomLevel, onCameraApiChange, onSelect, onSelectMultiple, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onEditInstanceVoxel, onMoveSceneParts, onPlacementMove, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; tool: Tool; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; placementPreview: PlacementPreview | null; viewMode: '正交' | '透视'; showGrid: boolean; showGround: boolean; zoomLevel: number; onCameraApiChange: (api: CameraControlApi | null) => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onMoveSceneParts: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number, trackHistory?: boolean) => GridMoveResult; onPlacementMove: (assetId: string, x: number, z: number) => void; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
+function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, tool, activeMaterial, materials, dragAxis, placementAsset, placementPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onSelect, onSelectMultiple, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onEditInstanceVoxel, onMoveSceneParts, onPlacementMove, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; tool: Tool; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; placementPreview: PlacementPreview | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onMoveSceneParts: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number, trackHistory?: boolean) => GridMoveResult; onPlacementMove: (assetId: string, x: number, z: number) => void; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.Camera | null>(null)
@@ -2077,6 +3206,8 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   const raycasterRef = useRef(new THREE.Raycaster())
   const pointerRef = useRef(new THREE.Vector2())
   const controlsRef = useRef<OrbitControls | null>(null)
+  const onZoomChangeRef = useRef(onZoomChange)
+  const perspectiveBaseDistanceRef = useRef(Math.sqrt(16 ** 2 + 18 ** 2 + 18 ** 2))
   const editRenderStateRef = useRef<{ active: boolean; partIds: Set<string> }>({ active: false, partIds: new Set() })
   const editGestureRef = useRef<{ pointerId: number; x: number; y: number; moved: boolean } | null>(null)
   const selectGestureRef = useRef<SelectGesture | null>(null)
@@ -2085,6 +3216,9 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   const [sceneSelectionBox, setSceneSelectionBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
   const [sceneContextMenu, setSceneContextMenu] = useState<{ partIds: string[]; x: number; y: number } | null>(null)
   const [ready, setReady] = useState(false)
+  useEffect(() => {
+    onZoomChangeRef.current = onZoomChange
+  }, [onZoomChange])
   // Keep persisted asset coordinates backward-compatible while presenting the scene
   // in the editor's conventional XY ground plane with Z as the vertical axis.
   const toSceneWorld = (x: number, y: number, z: number) => new THREE.Vector3(x, z, y)
@@ -2119,6 +3253,8 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     controls.enabled = true
     controls.enableDamping = true
     controls.enablePan = true
+    // Keep OrbitControls' native continuous zoom. Its change event below feeds
+    // the resulting camera scale back into the shared React percentage state.
     controls.enableZoom = true
     controls.enableRotate = true
     controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE
@@ -2136,16 +3272,13 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     key.position.set(10, 10, 22)
     key.castShadow = true
     scene.add(key)
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(22, 22), new THREE.MeshStandardMaterial({ color: '#11181b', roughness: 0.95 }))
+    const initialBounds = sceneBoundsForProject(project)
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(initialBounds.x * VOXEL_WORLD_SIZE, initialBounds.y * VOXEL_WORLD_SIZE), new THREE.MeshStandardMaterial({ color: '#11181b', roughness: 0.95, side: THREE.DoubleSide }))
     floor.position.z = 0
     floor.name = 'editing-floor'
     floor.receiveShadow = true
     scene.add(floor)
-    const grid = new THREE.GridHelper(20, 20, '#34464c', '#203036')
-    grid.rotation.x = Math.PI / 2
-    grid.position.z = -0.004
-    grid.name = 'editing-grid'
-    scene.add(grid)
+    scene.add(createGroundGrid(initialBounds), createGroundBoundary(initialBounds), createBoundaryBox(initialBounds))
     const group = new THREE.Group()
     scene.add(group)
     sceneRef.current = scene
@@ -2154,6 +3287,15 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     rendererRef.current = renderer
     groupRef.current = group
     controlsRef.current = controls
+    const reportZoom = () => {
+      const currentCamera = cameraRef.current
+      if (!currentCamera) return
+      const factor = currentCamera === orthographic
+        ? orthographic.zoom
+        : perspectiveBaseDistanceRef.current / Math.max(0.0001, perspective.position.distanceTo(controls.target))
+      onZoomChangeRef.current(clampZoomLevel(factor * 100))
+    }
+    controls.addEventListener('change', reportZoom)
     const resize = () => {
       const width = mount.clientWidth || 800
       const height = mount.clientHeight || 600
@@ -2260,6 +3402,8 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         const previousBackground = scene.background
         const floorObject = scene.getObjectByName('editing-floor')
         const gridObject = scene.getObjectByName('editing-grid')
+        const groundBoundaryObject = scene.getObjectByName('editing-ground-boundary')
+        const boundaryBoxObject = scene.getObjectByName('editing-boundary-box')
         const subtreeContainsEditPart = (object: THREE.Object3D): boolean => {
           if (object.userData.editPlacementPreview) return true
           const scenePartId = object.userData.scenePartId as string | undefined
@@ -2286,6 +3430,8 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         group.children.forEach(hideOutsideEditPart)
         if (floorObject) { hidden.push({ object: floorObject, visible: floorObject.visible }); floorObject.visible = false }
         if (gridObject) { hidden.push({ object: gridObject, visible: gridObject.visible }); gridObject.visible = false }
+        if (groundBoundaryObject) { hidden.push({ object: groundBoundaryObject, visible: groundBoundaryObject.visible }); groundBoundaryObject.visible = false }
+        if (boundaryBoxObject) { hidden.push({ object: boundaryBoxObject, visible: boundaryBoxObject.visible }); boundaryBoxObject.visible = false }
         renderer.autoClear = false
         renderer.clearDepth()
         renderer.render(dimScene, dimCamera)
@@ -2302,6 +3448,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     return () => {
       cancelAnimationFrame(frame)
       observer.disconnect()
+      controls.removeEventListener('change', reportZoom)
       controls.dispose()
       renderer.dispose()
       dimPlane.geometry.dispose()
@@ -2325,20 +3472,45 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     if (!scene) return
     const grid = scene.getObjectByName('editing-grid')
     const ground = scene.getObjectByName('editing-floor')
+    const groundBoundary = scene.getObjectByName('editing-ground-boundary')
+    const boundaryBox = scene.getObjectByName('editing-boundary-box')
     if (grid) grid.visible = showGrid
-    if (ground) ground.visible = showGround
-  }, [showGrid, showGround])
+    if (ground) ground.visible = true
+    if (groundBoundary) groundBoundary.visible = showBoundary
+    if (boundaryBox) boundaryBox.visible = showBoundary
+  }, [showGrid, showBoundary])
+
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene) return
+    updateEditingBoundsVisuals(scene, sceneBoundsForProject(project))
+    const grid = scene.getObjectByName('editing-grid')
+    const ground = scene.getObjectByName('editing-floor')
+    const groundBoundary = scene.getObjectByName('editing-ground-boundary')
+    const boundaryBox = scene.getObjectByName('editing-boundary-box')
+    if (grid) grid.visible = showGrid
+    if (ground) ground.visible = true
+    if (groundBoundary) groundBoundary.visible = showBoundary
+    if (boundaryBox) boundaryBox.visible = showBoundary
+  }, [project.sceneBounds?.x, project.sceneBounds?.y, project.sceneBounds?.z, project.sceneSizeCm, showGrid, showBoundary])
 
   useEffect(() => {
     const cameras = camerasRef.current
-    if (!cameras) return
-    cameras.orthographic.zoom = zoomLevel / 100
+    const controls = controlsRef.current
+    if (!cameras || !controls) return
+    const factor = clampZoomLevel(zoomLevel) / 100
+    cameras.orthographic.zoom = factor
     cameras.orthographic.updateProjectionMatrix()
-    cameras.perspective.fov = Math.max(24, Math.min(52, 38 - (zoomLevel - 100) * 0.12))
+    cameras.perspective.zoom = 1
+    const direction = cameras.perspective.position.clone().sub(controls.target)
+    if (direction.lengthSq() > 0.000001) {
+      cameras.perspective.position.copy(controls.target).add(direction.normalize().multiplyScalar(perspectiveBaseDistanceRef.current / factor))
+    }
+    cameras.perspective.fov = 38
     cameras.perspective.updateProjectionMatrix()
   }, [zoomLevel])
 
-  const applyCameraView = (view: CameraView) => {
+  const applyCameraView = (view: CameraView, requestedZoom = zoomLevel) => {
     const cameras = camerasRef.current
     const controls = controlsRef.current
     if (!cameras || !controls) return
@@ -2356,13 +3528,16 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       const option = cameraViewOptions.find((item) => item.id === view)
       if (option) position = new THREE.Vector3(...option.direction).normalize().multiplyScalar(distance)
     }
+    perspectiveBaseDistanceRef.current = position.length()
+    const zoomFactor = clampZoomLevel(requestedZoom) / 100
+    const perspectivePosition = position.clone().divideScalar(zoomFactor)
     if (view === 'top') {
       up = new THREE.Vector3(0, 1, 0)
     } else if (view === 'bottom') {
       up = new THREE.Vector3(0, -1, 0)
     }
     cameras.orthographic.position.copy(position)
-    cameras.perspective.position.copy(position)
+    cameras.perspective.position.copy(perspectivePosition)
     cameras.orthographic.up.copy(up)
     cameras.perspective.up.copy(up)
     cameras.orthographic.lookAt(target)
@@ -2385,7 +3560,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     onCameraApiChange({
       rotate: rotateCameraByInput,
       view: (view) => applyCameraView(view),
-      reset: () => applyCameraView('default'),
+      reset: () => applyCameraView('default', 100),
     })
     return () => onCameraApiChange(null)
   }, [onCameraApiChange])
@@ -2404,7 +3579,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       if (!instance.visible) continue
       const asset = assetMap.get(instance.assetId)
       if (!asset) continue
-      const variant = styleMaterialVariants[instance.style]
+      const variant = asset.templateColor ? undefined : styleMaterialVariants[instance.style]
       const renderAsset = variant ? { ...asset, color: variant.color, accent: variant.accent } : asset
       const instanceGroup = buildAssetGroup(renderAsset, materialMap, instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ)
       instanceGroup.position.copy(toSceneWorld(instance.x, instance.y ?? 0, instance.z))
@@ -2440,7 +3615,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         const meshMaterial = material.clone()
         if (componentColor) meshMaterial.color.set(componentColor)
         const mesh = new THREE.Mesh(new THREE.BoxGeometry(VOXEL_WORLD_SIZE, VOXEL_WORLD_SIZE, VOXEL_WORLD_SIZE), meshMaterial)
-        mesh.position.copy(toSceneWorld(voxelToWorld(voxel.x), voxelCenterToWorld(voxel.y), voxelToWorld(voxel.z)))
+        mesh.position.copy(toSceneWorld(voxelCenterToWorld(voxel.x), voxelCenterToWorld(voxel.y), voxelCenterToWorld(voxel.z)))
         mesh.userData.customVoxel = voxel
         mesh.userData.customComponentId = voxelComponentId(component)
         mesh.userData.scenePartId = `custom:${voxelEntityId(voxel)}`
@@ -2461,7 +3636,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       group.add(custom)
     }
     if (placementAsset && placementPreview) {
-      const variant = styleMaterialVariants[placementAsset.style]
+      const variant = placementAsset.templateColor ? undefined : styleMaterialVariants[placementAsset.style]
       const renderAsset = variant ? { ...placementAsset, color: variant.color, accent: variant.accent } : placementAsset
       const preview = buildAssetGroup(renderAsset, materialMap)
       preview.position.copy(toSceneWorld(placementPreview.x, placementPreview.y, placementPreview.z))
@@ -2601,8 +3776,8 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       return
     }
     if (!floorPoint) return
-    const x = worldToVoxel(floorPoint.x)
-    const z = worldToVoxel(floorPoint.y)
+    const x = worldToVoxelCell(floorPoint.x)
+    const z = worldToVoxelCell(floorPoint.y)
     const sceneVoxel = { x, y: 0, z, materialId: activeMaterial }
     const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
     const occupiedAsset = project.instances.find((instance) => {
@@ -2673,7 +3848,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         const anchorVoxel = hitPart.voxels[0]
         const anchor = instance
           ? toSceneWorld(instance.x, instance.y ?? 0, instance.z)
-          : toSceneWorld(voxelToWorld(anchorVoxel?.x ?? 0), voxelCenterToWorld(anchorVoxel?.y ?? 0), voxelToWorld(anchorVoxel?.z ?? 0))
+          : toSceneWorld(voxelCenterToWorld(anchorVoxel?.x ?? 0), voxelCenterToWorld(anchorVoxel?.y ?? 0), voxelCenterToWorld(anchorVoxel?.z ?? 0))
         const selectionLabel = selectedParts.some((part) => part.assemblyId || part.assemblyIds?.length) ? '已选中装配体' : '已选中实体'
         onNotice(`${selectionLabel} · ${selectedParts.length} 个零件`)
         selectGestureRef.current = {
@@ -2894,7 +4069,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   const sceneContextLocked = Boolean(sceneContextMenu?.partIds.length && sceneContextMenu.partIds.every((partId) => lockedPartIds.has(partId)))
   const sceneContextEditTargetId = sceneContextMenu?.partIds.length === 1 ? sceneContextMenu.partIds[0] : ''
   const sceneContextRenameTargetId = sceneContextMenu?.partIds.length === 1 ? sceneContextMenu.partIds[0] : ''
-  return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onWheel={(event) => { if (event.ctrlKey) event.preventDefault() }} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextRenameTargetId && <button onClick={() => { onRename(sceneContextRenameTargetId); setSceneContextMenu(null) }}>重命名</button>}{sceneContextEditTargetId && <button onClick={() => { onEnterEditMode(sceneContextEditTargetId); setSceneContextMenu(null) }}>进入编辑修改模式</button>}{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { applyCameraView('default'); onNotice('视角已回中') }} /></div>
+  return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onWheel={(event) => { if (event.ctrlKey) event.preventDefault() }} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextRenameTargetId && <button onClick={() => { onRename(sceneContextRenameTargetId); setSceneContextMenu(null) }}>重命名</button>}{sceneContextEditTargetId && <button onClick={() => { onEnterEditMode(sceneContextEditTargetId); setSceneContextMenu(null) }}>进入编辑修改模式</button>}{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { applyCameraView('default', 100); onZoomChange(100); onNotice('视角已回中 · 缩放已恢复 100%') }} /></div>
 }
 
 function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0, colorOverride?: string, mirror: SceneInstance['mirror'] = undefined, rotationX = 0, rotationY = 0, rotationZ = 0) {
@@ -2918,6 +4093,8 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
     for (const voxel of component) {
       const material = colorOverride
         ? new THREE.MeshStandardMaterial({ color: colorOverride, roughness: 0.72, metalness: 0.03 })
+        : asset.templateColor
+          ? new THREE.MeshStandardMaterial({ color: asset.templateColor, roughness: 0.72, metalness: 0.03 })
         : voxel.materialId === 'primary'
         ? new THREE.MeshStandardMaterial({ color: asset.color, roughness: 0.72, metalness: 0.03 })
         : voxel.materialId === 'accent'
