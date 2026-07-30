@@ -22,6 +22,13 @@ export type OccupancyHit = {
   ownerIds: string[]
 }
 
+export type OccupancySyncResult = {
+  inserted: number
+  updated: number
+  removed: number
+  unchanged: number
+}
+
 function bitAddress(localIndex: number): { wordIndex: number; bitMask: number } {
   return {
     wordIndex: localIndex >>> 5,
@@ -46,6 +53,7 @@ export class SceneOccupancyIndex {
   private readonly ownerIdToHandle = new Map<string, number>()
   private readonly handleToOwnerId: string[] = ['']
   private readonly ownerVoxels = new Map<number, RuntimeVoxelCoord[]>()
+  private readonly ownerVoxelKeys = new Map<string, string[]>()
   private readonly materialIdToIndex = new Map<string, number>()
   private nextMaterialIndex = 1
 
@@ -60,6 +68,7 @@ export class SceneOccupancyIndex {
     this.ownerIdToHandle.clear()
     this.handleToOwnerId.splice(1)
     this.ownerVoxels.clear()
+    this.ownerVoxelKeys.clear()
     this.materialIdToIndex.clear()
     this.nextMaterialIndex = 1
   }
@@ -73,6 +82,7 @@ export class SceneOccupancyIndex {
     const ownerHandle = this.registerOwner(ownerId)
     const runtimeVoxels = voxels.map(projectVoxelToRuntime)
     this.ownerVoxels.set(ownerHandle, runtimeVoxels)
+    this.ownerVoxelKeys.set(ownerId, this.sortedVoxelKeys(voxels))
     voxels.forEach((voxel, index) => {
       const runtimeVoxel = runtimeVoxels[index]
       const { chunkKey, localIndex } = runtimeVoxelAddress(runtimeVoxel)
@@ -121,6 +131,7 @@ export class SceneOccupancyIndex {
       if (!chunk.ownerIds.some(Boolean) && !chunk.overflowOwners.size) this.chunks.delete(chunkKey)
     }
     this.ownerVoxels.delete(ownerHandle)
+    this.ownerVoxelKeys.delete(ownerId)
     this.ownerIdToHandle.delete(ownerId)
     this.handleToOwnerId[ownerHandle] = ''
   }
@@ -128,6 +139,33 @@ export class SceneOccupancyIndex {
   replaceOwner(ownerId: string, voxels: Voxel[]): void {
     this.removeOwner(ownerId)
     this.insertOwner(ownerId, voxels)
+  }
+
+  syncParts(parts: SceneEntityPart[]): OccupancySyncResult {
+    const incoming = new Map(parts.map((part) => [part.id, part.voxels]))
+    const result: OccupancySyncResult = { inserted: 0, updated: 0, removed: 0, unchanged: 0 }
+    for (const ownerId of [...this.ownerIdToHandle.keys()]) {
+      if (incoming.has(ownerId)) continue
+      this.removeOwner(ownerId)
+      result.removed += 1
+    }
+    incoming.forEach((voxels, ownerId) => {
+      const existingKeys = this.ownerVoxelKeys.get(ownerId)
+      if (!existingKeys) {
+        this.insertOwner(ownerId, voxels)
+        result.inserted += 1
+        return
+      }
+      const nextKeys = this.sortedVoxelKeys(voxels)
+      const unchanged = existingKeys.length === nextKeys.length && existingKeys.every((key, index) => key === nextKeys[index])
+      if (unchanged) {
+        result.unchanged += 1
+        return
+      }
+      this.replaceOwner(ownerId, voxels)
+      result.updated += 1
+    })
+    return result
   }
 
   queryProjectVoxel(voxel: Pick<Voxel, 'x' | 'y' | 'z'>): OccupancyHit {
@@ -151,7 +189,7 @@ export class SceneOccupancyIndex {
   }
 
   collidesProjectVoxels(
-    voxels: Array<Pick<Voxel, 'x' | 'y' | 'z'>>,
+    voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>,
     excludedOwnerIds: Iterable<string> = [],
   ): boolean {
     const excluded = new Set(excludedOwnerIds)
@@ -162,7 +200,7 @@ export class SceneOccupancyIndex {
   }
 
   collidesTranslatedProjectVoxels(
-    voxels: Array<Pick<Voxel, 'x' | 'y' | 'z'>>,
+    voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>,
     delta: Pick<Voxel, 'x' | 'y' | 'z'>,
     excludedOwnerIds: Iterable<string> = [],
   ): boolean {
@@ -182,6 +220,10 @@ export class SceneOccupancyIndex {
     this.ownerIdToHandle.set(ownerId, handle)
     this.handleToOwnerId.push(ownerId)
     return handle
+  }
+
+  private sortedVoxelKeys(voxels: Array<Pick<Voxel, 'x' | 'y' | 'z'>>): string[] {
+    return voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`).sort()
   }
 
   private materialIndex(materialId: string): number {

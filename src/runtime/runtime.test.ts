@@ -8,6 +8,7 @@ import {
   runtimeVoxelToProject,
 } from './runtime-coordinates'
 import { SceneOccupancyIndex } from './spatial-index'
+import { AssetTransformCache } from './asset-transform-cache'
 
 const voxel = (x: number, y: number, z: number, materialId = 'stone'): Voxel => ({ x, y, z, materialId })
 
@@ -63,5 +64,70 @@ describe('SceneOccupancyIndex', () => {
     expect(index.collidesProjectVoxels([voxel(4, 1, 2)], ['first'])).toBe(true)
     index.removeOwner('first')
     expect(index.queryProjectVoxel(voxel(4, 1, 2)).ownerIds).toEqual(['second'])
+  })
+
+  it('synchronizes only changed owners while preserving unchanged chunks', () => {
+    const index = SceneOccupancyIndex.fromParts([
+      part('stable', [voxel(0, 0, 0)]),
+      part('moving', [voxel(2, 0, 0)]),
+    ])
+    const stableChunk = index.chunks.get('0,0,0')
+    const result = index.syncParts([
+      part('stable', [voxel(0, 0, 0)]),
+      part('moving', [voxel(34, 0, 0)]),
+      part('added', [voxel(-1, 0, 0)]),
+    ])
+    expect(result).toEqual({ inserted: 1, updated: 1, removed: 0, unchanged: 1 })
+    expect(index.queryProjectVoxel(voxel(2, 0, 0)).occupied).toBe(false)
+    expect(index.queryProjectVoxel(voxel(34, 0, 0)).ownerIds).toEqual(['moving'])
+    expect(index.queryProjectVoxel(voxel(-1, 0, 0)).ownerIds).toEqual(['added'])
+    expect(index.chunks.get('0,0,0')).toBe(stableChunk)
+  })
+})
+
+describe('AssetTransformCache', () => {
+  it('reuses transformed topology while applying scene translation separately', () => {
+    const asset = {
+      id: 'asset',
+      name: 'asset',
+      kind: 'house' as const,
+      style: 'greek' as const,
+      width: 2,
+      height: 1,
+      depth: 1,
+      color: '#ffffff',
+      accent: '#000000',
+      parts: ['main'],
+      voxels: [voxel(0, 0, 0), voxel(1, 0, 0)],
+    }
+    const instance = { id: 'instance', assetId: asset.id, x: 0, y: 0, z: 0, rotation: 0, style: asset.style, visible: true, overrides: [] }
+    const cache = new AssetTransformCache()
+    const first = cache.get(instance, asset)
+    const second = cache.get({ ...instance, x: 8, z: 9 }, asset)
+    expect(second).toBe(first)
+    expect(cache.resolve({ ...instance, x: 2, z: 3 }, asset).map(({ x, y, z }) => ({ x, y, z }))).toEqual([
+      { x: 19, y: 0, z: 30 },
+      { x: 20, y: 0, z: 30 },
+    ])
+  })
+
+  it('keeps mirror and rotation variants in separate cache entries', () => {
+    const asset = {
+      id: 'asset',
+      name: 'asset',
+      kind: 'house' as const,
+      style: 'greek' as const,
+      width: 2,
+      height: 1,
+      depth: 1,
+      color: '#ffffff',
+      accent: '#000000',
+      parts: ['main'],
+      voxels: [voxel(0, 0, 0)],
+    }
+    const instance = { id: 'instance', assetId: asset.id, x: 0, y: 0, z: 0, rotation: 0, style: asset.style, visible: true, overrides: [] }
+    const cache = new AssetTransformCache()
+    expect(cache.get({ ...instance, mirror: { x: true, y: false, z: false } }, asset)).not.toBe(cache.get(instance, asset))
+    expect(cache.get({ ...instance, rotation: 90 }, asset)).not.toBe(cache.get(instance, asset))
   })
 })
