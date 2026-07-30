@@ -2607,6 +2607,7 @@ function App() {
       setNotice('编辑模式下只能操作当前编辑实体')
       return
     }
+    setCopyPreview(null)
     const removing = additive && checkedTreePartIds.includes(id)
     setCheckedTreePartIds((current) => {
       if (!additive) return [id]
@@ -2626,6 +2627,7 @@ function App() {
       setNotice('编辑模式下只能操作当前编辑实体')
       return
     }
+    setCopyPreview(null)
     const removing = checkedTreePartIds.includes(id)
     setCheckedTreePartIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
     setSelectedId(removing && selectedId === id ? '' : id)
@@ -2634,6 +2636,7 @@ function App() {
   }
 
   const selectScenePart = (id: string) => {
+    setCopyPreview(null)
     setSelectedId(id)
     setCheckedTreePartIds([id])
     revealScenePartPath(id)
@@ -2641,6 +2644,7 @@ function App() {
   }
 
   const updateSceneCheckedSelection = (partIds: string[], additive = false) => {
+    setCopyPreview(null)
     setCheckedTreePartIds((current) => {
       if (!additive) return [...new Set(partIds)]
       const next = new Set(current)
@@ -2704,7 +2708,7 @@ function App() {
               </div>}
             </div>
           </div>
-          <VoxelViewport project={project} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} tool={tool} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={(value) => setZoomLevel(clampZoomLevel(value))} onCameraApiChange={setCameraControlApi} onInteractionChange={(active) => { interactionActiveRef.current = active }} onRaycastVoxel={raycastSceneVoxel} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onEditInstanceVoxel={editInstanceVoxel} onPreviewScenePartsMove={previewScenePartsMove} onCommitScenePartsMove={commitScenePartsMove} onPreviewPlacement={previewPlacementAt} onPlaceAsset={placeAssetAt} onNotice={setNotice} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
+          <VoxelViewport project={project} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} tool={tool} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={(value) => setZoomLevel(clampZoomLevel(value))} onCameraApiChange={setCameraControlApi} onInteractionChange={(active) => { interactionActiveRef.current = active }} onRaycastVoxel={raycastSceneVoxel} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onCancelPendingEntityOperation={() => setCopyPreview(null)} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onEditInstanceVoxel={editInstanceVoxel} onPreviewScenePartsMove={previewScenePartsMove} onCommitScenePartsMove={commitScenePartsMove} onPreviewPlacement={previewPlacementAt} onPlaceAsset={placeAssetAt} onNotice={setNotice} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
             <SceneTreePanel items={sceneTreeItems} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} expandedAssemblies={expandedAssemblies} contextMenu={treeContextMenu} onToggleExpanded={(assemblyId) => setExpandedAssemblies((current) => ({ ...current, [assemblyId]: !(current[assemblyId] ?? true) }))} onSelect={selectTreeItem} onToggleChecked={toggleTreeChecked} onAssemble={assembleCheckedTreeParts} onDissolve={dissolveSceneAssembly} onEnterEdit={enterEditMode} onRename={renameSceneEntity} onDelete={deleteSceneTreeEntity} onToggleLock={toggleTreeLock} onContextMenu={(targetId, x, y, assemblyId) => { if (!editEntityId || targetId === editEntityId) setTreeContextMenu({ targetId, assemblyId, x, y }) }} />
           </VoxelViewport>
           <div className="viewport-footer">
@@ -3000,6 +3004,15 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
   const [mirrorAxis, setMirrorAxis] = useState<'x' | 'y' | 'z'>('x')
   const [rotateAxis, setRotateAxis] = useState<'x' | 'y' | 'z'>('z')
   const [rotateDegrees, setRotateDegrees] = useState<90 | 180 | 270>(90)
+  const selectedPartsKey = selectedParts.map((part) => part.id).join('|')
+  useEffect(() => {
+    // Axis/angle choices are operation-local. Selecting another entity or
+    // clearing the scene selection must leave no pending transform choice
+    // attached to the next entity.
+    setMirrorAxis('x')
+    setRotateAxis('z')
+    setRotateDegrees(90)
+  }, [selectedPartsKey])
   const previewVoxels = selectedParts.flatMap((part) => part.voxels)
   return <aside className="inspector">
     <div className="inspector-heading"><div><h2>属性</h2><p>选中对象的编辑参数</p></div><ChevronRight size={18} className="muted-icon" /></div>
@@ -3360,7 +3373,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   </div>
 }
 
-function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, tool, activeMaterial, materials, dragAxis, placementAsset, copyPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSelect, onSelectMultiple, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onEditInstanceVoxel, onPreviewScenePartsMove, onCommitScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; tool: Tool; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
+function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, tool, activeMaterial, materials, dragAxis, placementAsset, copyPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onEditInstanceVoxel, onPreviewScenePartsMove, onCommitScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; tool: Tool; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.Camera | null>(null)
@@ -4291,6 +4304,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     if (event.button === 0 || event.button === 2) event.currentTarget.setPointerCapture(event.pointerId)
     if (event.button === 2) {
       if (placementAsset) return
+      if (tool === 'select') onCancelPendingEntityOperation()
       const context = getPointerContext(event)
       const hit = context?.hits.find((item) => item.object.userData.scenePartId)
       const hitPartId = context?.voxelHit?.ownerIds[0] ?? hit?.object.userData.scenePartId
@@ -4305,6 +4319,9 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     }
     if (event.button !== 0) return
     if (placementAsset) return
+    // A scene click starts a new selection/drag interaction. Any pending
+    // entity operation must be abandoned before that interaction begins.
+    if (tool === 'select') onCancelPendingEntityOperation()
     if (editEntityId && tool === 'select') return
     if (tool === 'select') {
       const context = getPointerContext(event)
