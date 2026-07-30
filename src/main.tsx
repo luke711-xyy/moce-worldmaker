@@ -186,6 +186,14 @@ function scenePartsDisplayColor(project: ProjectState, parts: SceneEntityPart[],
   return firstVoxel ? materialColorForVoxel(project, firstVoxel, asset) : asset?.color ?? '#6c827d'
 }
 
+function scenePartVoxelDisplayColor(project: ProjectState, part: SceneEntityPart, voxel: Voxel): string {
+  const instance = part.instanceId ? project.instances.find((item) => item.id === part.instanceId) : undefined
+  const asset = instance ? project.assets.find((item) => item.id === instance.assetId) : undefined
+  const variant = asset && !asset.templateColor ? styleMaterialVariants[instance?.style ?? ''] : undefined
+  const renderAsset = variant && asset ? { ...asset, color: variant.color, accent: variant.accent } : asset
+  return part.colorOverride ?? renderAsset?.templateColor ?? materialColorForVoxel(project, voxel, renderAsset)
+}
+
 function normalizeStoredProject(loaded: ProjectState): ProjectState {
   const defaultAssets = new Map(makeDefaultProject().assets.map((asset) => [asset.id, asset]))
   const normalized: ProjectState = {
@@ -277,10 +285,10 @@ function createGroundGrid(bounds: SceneBounds) {
   const depth = bounds.y * VOXEL_WORLD_SIZE
   const grid = new THREE.Group()
   grid.name = 'editing-grid'
-  // Keep a layer just above and just below the floor. Both layers use normal
-  // depth testing, so the upper grid cannot draw through objects from above,
-  // while the lower layer remains available when viewing the scene from below.
-  for (const gridZ of [-0.006, 0.006]) {
+  // Keep both grid layers below the voxel base. A grid at z=0 or above can
+  // become coplanar with, or enter, the bottom voxel faces and then appear to
+  // cut through entities because of depth precision and line rasterization.
+  for (const gridZ of [-0.006, -0.002]) {
     const positions: number[] = []
     for (let index = 0; index <= bounds.x; index += 1) {
       const x = -width / 2 + index * VOXEL_WORLD_SIZE
@@ -316,7 +324,7 @@ function createGroundBoundary(bounds: SceneBounds) {
   ]
   bars.forEach((bar) => {
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(bar.width, bar.depth), material.clone())
-    mesh.position.set(bar.x, bar.y, 0.014)
+    mesh.position.set(bar.x, bar.y, -0.001)
     mesh.name = 'editing-ground-boundary-edge'
     mesh.renderOrder = 1
     group.add(mesh)
@@ -332,7 +340,7 @@ function createBoundaryBox(bounds: SceneBounds) {
   const x1 = width / 2
   const y0 = -depth / 2
   const y1 = depth / 2
-  const z0 = 0.02
+  const z0 = -0.001
   const z1 = height
   const positions: number[] = []
   const edge = (a: [number, number, number], b: [number, number, number]) => positions.push(...a, ...b)
@@ -2078,14 +2086,26 @@ function App() {
       setNotice('请先选择一个实体')
       return
     }
+    // A scene part can get its visible color from an instance override, a
+    // template color, or an individual palette/material voxel. Flatten that
+    // resolved appearance into each voxel before creating the template. A
+    // single asset-level templateColor would otherwise recolor every voxel in
+    // a multi-selection with the first selected entity's color.
+    const colorizedParts = selectedEntityParts.map((part) => ({
+      ...part,
+      voxels: part.voxels.map((voxel) => ({
+        ...voxel,
+        materialId: scenePartVoxelDisplayColor(projectRef.current, part, voxel),
+      })),
+    }))
     const assemblyRootId = multipleSelected ? undefined : (selectedAssemblyId ?? (selectedEntityParts.flatMap((part) => part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).find((assemblyId) => !(project.assemblies ?? []).some((candidate) => candidate.memberKeys.includes(`assembly:${assemblyId}`)))))
-    const assemblyAsset = assemblyRootId ? makeAssemblyTemplateAsset(projectRef.current, selectedEntityParts, assemblyRootId) : null
+    const assemblyAsset = assemblyRootId ? makeAssemblyTemplateAsset(projectRef.current, colorizedParts, assemblyRootId) : null
     const baseName = multipleSelected ? '多个实体' : (selectedDisplayName || assemblyAsset?.name || selectedAsset?.name || '手动体素实体')
     const templateColor = scenePartsDisplayColor(project, selectedEntityParts, selectedAsset)
     const templateAccent = selectedAsset?.accent ?? '#d2a354'
     const asset = assemblyAsset
-      ? { ...assemblyAsset, name: baseName, color: templateColor, templateColor }
-      : { ...makeAssetFromSceneParts(`asset-custom-${Date.now()}`, baseName, selectedEntityParts, templateColor, templateAccent), templateColor }
+      ? { ...assemblyAsset, name: baseName, color: templateColor }
+      : makeAssetFromSceneParts(`asset-custom-${Date.now()}`, baseName, colorizedParts, templateColor, templateAccent)
     setAssetCategorySave({ asset: { ...asset, isTemplate: true } })
   }
 
@@ -3354,9 +3374,10 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     controls.enabled = true
     controls.enableDamping = true
     controls.enablePan = true
-    // Keep OrbitControls' native continuous zoom. Its change event below feeds
-    // the resulting camera scale back into the shared React percentage state.
-    controls.enableZoom = true
+    // Handle wheel/pinch zoom in one place below. Leaving OrbitControls' own
+    // dolly handler enabled would let it change the camera first and then let
+    // the React zoom synchronizer change it again in the same gesture.
+    controls.enableZoom = false
     controls.enableRotate = true
     controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE
     controls.mouseButtons.RIGHT = THREE.MOUSE.PAN
@@ -3375,7 +3396,10 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     scene.add(key)
     const initialBounds = sceneBoundsForProject(project)
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(initialBounds.x * VOXEL_WORLD_SIZE, initialBounds.y * VOXEL_WORLD_SIZE), new THREE.MeshStandardMaterial({ color: '#11181b', roughness: 0.95, side: THREE.DoubleSide }))
-    floor.position.z = 0
+    // Voxel row y=0 starts at z=0. Keep the floor just below it to avoid
+    // coplanar depth fighting and prevent the ground from visually entering
+    // the bottom row of voxels.
+    floor.position.z = -0.004
     floor.name = 'editing-floor'
     floor.receiveShadow = true
     scene.add(floor)
@@ -3422,6 +3446,36 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     }
     invalidateRenderRef.current = invalidateRender
     controls.addEventListener('change', reportZoom)
+    const applyWheelZoom = (event: WheelEvent) => {
+      if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return
+      event.preventDefault()
+      const currentCamera = cameraRef.current ?? camera
+      const factor = currentCamera === orthographic
+        ? orthographic.zoom
+        : perspectiveBaseDistanceRef.current / Math.max(0.0001, perspective.position.distanceTo(controls.target))
+      const scale = Math.pow(0.95, controls.zoomSpeed * Math.abs(event.deltaY * 0.01))
+      const nextFactor = factor * (event.deltaY < 0 ? 1 / scale : scale)
+      const nextZoom = clampZoomLevel(nextFactor * 100)
+      cameraZoomLevelRef.current = nextZoom
+      lastReportedZoomLevelRef.current = nextZoom
+      if (currentCamera === orthographic) {
+        orthographic.zoom = nextZoom / 100
+        orthographic.updateProjectionMatrix()
+      } else {
+        const direction = perspective.position.clone().sub(controls.target)
+        if (direction.lengthSq() > 0.000001) {
+          perspective.position.copy(controls.target).add(direction.normalize().multiplyScalar(perspectiveBaseDistanceRef.current / (nextZoom / 100)))
+        }
+      }
+      if (zoomReportFrameRef.current === null) {
+        zoomReportFrameRef.current = requestAnimationFrame(() => {
+          zoomReportFrameRef.current = null
+          onZoomChangeRef.current(cameraZoomLevelRef.current)
+        })
+      }
+      invalidateRender(220)
+    }
+    renderer.domElement.addEventListener('wheel', applyWheelZoom, { passive: false })
     const resize = () => {
       const width = mount.clientWidth || 800
       const height = mount.clientHeight || 600
@@ -3604,6 +3658,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       invalidateRenderRef.current = () => {}
       observer.disconnect()
       controls.removeEventListener('change', reportZoom)
+      renderer.domElement.removeEventListener('wheel', applyWheelZoom)
       controls.dispose()
       disposeThreeObject(scene)
       renderer.dispose()
@@ -4432,7 +4487,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   const sceneContextLocked = Boolean(sceneContextMenu?.partIds.length && sceneContextMenu.partIds.every((partId) => lockedPartIds.has(partId)))
   const sceneContextEditTargetId = sceneContextMenu?.partIds.length === 1 ? sceneContextMenu.partIds[0] : ''
   const sceneContextRenameTargetId = sceneContextMenu?.partIds.length === 1 ? sceneContextMenu.partIds[0] : ''
-  return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onWheel={(event) => { if (event.ctrlKey) event.preventDefault() }} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextRenameTargetId && <button onClick={() => { onRename(sceneContextRenameTargetId); setSceneContextMenu(null) }}>重命名</button>}{sceneContextEditTargetId && <button onClick={() => { onEnterEditMode(sceneContextEditTargetId); setSceneContextMenu(null) }}>进入编辑修改模式</button>}{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { applyCameraView('default', 100); onZoomChange(100); onNotice('视角已回中 · 缩放已恢复 100%') }} /></div>
+  return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextRenameTargetId && <button onClick={() => { onRename(sceneContextRenameTargetId); setSceneContextMenu(null) }}>重命名</button>}{sceneContextEditTargetId && <button onClick={() => { onEnterEditMode(sceneContextEditTargetId); setSceneContextMenu(null) }}>进入编辑修改模式</button>}{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { applyCameraView('default', 100); onZoomChange(100); onNotice('视角已回中 · 缩放已恢复 100%') }} /></div>
 }
 
 function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0, colorOverride?: string, mirror: SceneInstance['mirror'] = undefined, rotationX = 0, rotationY = 0, rotationZ = 0) {

@@ -154,8 +154,11 @@ export function uniqueTemplateAssetName(assets: VoxelAsset[], requestedName: str
   return `${baseName} (${index})`
 }
 
-export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEntityPart[], color = '#6c827d', accent = '#d2a354'): VoxelAsset {
-  const sourceVoxels = parts.flatMap((part) => part.voxels)
+export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEntityPart[], color = '#6c827d', accent = '#d2a354', materialIdResolver?: (voxel: Voxel, part: SceneEntityPart) => string): VoxelAsset {
+  const sourceVoxels = parts.flatMap((part) => part.voxels.map((voxel) => ({
+    ...voxel,
+    materialId: materialIdResolver ? materialIdResolver(voxel, part) : voxel.materialId,
+  })))
   const minX = Math.min(...sourceVoxels.map((voxel) => voxel.x), 0)
   const minY = Math.min(...sourceVoxels.map((voxel) => voxel.y), 0)
   const minZ = Math.min(...sourceVoxels.map((voxel) => voxel.z), 0)
