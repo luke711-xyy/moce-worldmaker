@@ -1,0 +1,51 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "moce-worldmaker-staging",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-07-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "moce-worldmaker-staging",
+      "database_id": "de5718bc-7abb-488b-8daa-9f8f2f69e243",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BLOBS",
+      "bucket_name": "moce-worldmaker-staging"
+    }
+  ],
+  "vars": {
+    "DEPLOYMENT_ENV": "staging",
+    "MOCE_AUTH_REQUIRED": "true"
+  },
+  "env": {
+    "production": {
+      "name": "moce-worldmaker",
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "moce-worldmaker",
+          "database_id": "a1572dd7-8ec9-42c5-93d0-435603a7065f",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "BLOBS",
+          "bucket_name": "moce-worldmaker"
+        }
+      ],
+      "vars": {
+        "DEPLOYMENT_ENV": "production",
+        "MOCE_AUTH_REQUIRED": "true"
+      }
+    }
+  }
+}

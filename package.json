@@ -7,7 +7,16 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck:worker": "tsc -p worker/tsconfig.json",
+    "cf:types": "wrangler types",
+    "db:migrate:local": "wrangler d1 migrations apply moce-worldmaker-staging --local",
+    "db:migrate:staging": "wrangler d1 migrations apply moce-worldmaker-staging --remote",
+    "db:migrate:production": "wrangler d1 migrations apply moce-worldmaker --remote --env production",
+    "migrate:staging": "node scripts/migrate-json-to-cloudflare.mjs --database moce-worldmaker-staging --bucket moce-worldmaker-staging",
+    "migrate:production": "node scripts/migrate-json-to-cloudflare.mjs --database moce-worldmaker --bucket moce-worldmaker --env production",
+    "deploy:staging": "npm run build && wrangler deploy",
+    "deploy": "npm run build && wrangler deploy --env production"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
@@ -19,10 +28,13 @@
     "vite": "latest"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.49.0",
+    "@cloudflare/workers-types": "^5.20260730.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@types/three": "^0.185.1",
     "jsdom": "latest",
-    "vitest": "latest"
+    "vitest": "latest",
+    "wrangler": "^4.116.0"
   }
 }
