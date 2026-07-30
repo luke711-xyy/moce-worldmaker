@@ -3335,6 +3335,10 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     perspective.lookAt(0, 0, 0)
     const camera = orthographic
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
+    // Keep the WebGL back buffer at one stable size for the lifetime of the
+    // viewport. Resizing it while a pointer gesture is in progress makes the
+    // canvas briefly clear/reallocate, which is perceived as a flash even
+    // though the render loop itself is running at a good frame rate.
     const staticPixelRatio = Math.min(window.devicePixelRatio, 1.5)
     renderer.setPixelRatio(staticPixelRatio)
     renderer.shadowMap.enabled = true
@@ -3404,14 +3408,9 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     }
     let frame = 0
     let renderUntil = 0
-    let interactionQuality = false
     let animate = () => {}
     const invalidateRender = (durationMs = 0) => {
       renderUntil = Math.max(renderUntil, performance.now() + durationMs)
-      if (durationMs > 0 && !interactionQuality) {
-        interactionQuality = true
-        renderer.setPixelRatio(1)
-      }
       if (!frame) frame = requestAnimationFrame(animate)
     }
     invalidateRenderRef.current = invalidateRender
@@ -3553,15 +3552,22 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
         if (gridObject) { hidden.push({ object: gridObject, visible: gridObject.visible }); gridObject.visible = false }
         if (groundBoundaryObject) { hidden.push({ object: groundBoundaryObject, visible: groundBoundaryObject.visible }); groundBoundaryObject.visible = false }
         if (boundaryBoxObject) { hidden.push({ object: boundaryBoxObject, visible: boundaryBoxObject.visible }); boundaryBoxObject.visible = false }
+        // The edit overlay is a second pass. Keep all temporary renderer and
+        // scene state guarded so an interrupted frame can never leave
+        // autoClear/background/visibility in a partially restored state.
+        const previousAutoClear = renderer.autoClear
         renderer.autoClear = false
-        renderer.clearDepth()
-        renderer.render(dimScene, dimCamera)
-        renderer.clearDepth()
-        scene.background = null
-        renderer.render(scene, currentCamera)
-        scene.background = previousBackground
-        renderer.autoClear = true
-        hidden.reverse().forEach(({ object, visible }) => { object.visible = visible })
+        try {
+          renderer.clearDepth()
+          renderer.render(dimScene, dimCamera)
+          renderer.clearDepth()
+          scene.background = null
+          renderer.render(scene, currentCamera)
+        } finally {
+          scene.background = previousBackground
+          renderer.autoClear = previousAutoClear
+          hidden.reverse().forEach(({ object, visible }) => { object.visible = visible })
+        }
       }
       renderCount += 1
       window.__MOCE_PERFORMANCE__ = {
@@ -3578,10 +3584,6 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       renderer.domElement.dataset.geometries = `${renderer.info.memory.geometries}`
       renderer.domElement.dataset.textures = `${renderer.info.memory.textures}`
       if (controlsAnimating || performance.now() < renderUntil) {
-        frame = requestAnimationFrame(animate)
-      } else if (interactionQuality) {
-        interactionQuality = false
-        renderer.setPixelRatio(staticPixelRatio)
         frame = requestAnimationFrame(animate)
       }
     }
