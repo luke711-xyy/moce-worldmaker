@@ -1774,6 +1774,20 @@ function App() {
       const loaded = await loadLibrary()
       setLibrary(loaded)
       setAssetCategoryPaths(normalizeAssetCategoryPaths(loaded.assetCategories ?? [], projectRef.current.assets))
+
+      // The scene list and the entity list have separate state.  When a scene
+      // is removed (or disappears through another client), the scene list can
+      // become empty while the last loaded project snapshot is still present.
+      // Keep the selected-scene state consistent with the library response so
+      // the entity pane never shows entities from a deleted scene.
+      const selectedSceneExists = selectedLibrarySceneId
+        ? loaded.scenes.some((scene) => scene.id === selectedLibrarySceneId)
+        : false
+      if (!selectedSceneExists && (selectedLibrarySceneId || selectedLibrarySceneProject)) {
+        setSelectedLibrarySceneId(null)
+        setSelectedLibrarySceneProject(null)
+        setSceneLibraryContextMenu(null)
+      }
     } catch {
       setNotice('资产库加载失败 · 请检查后端服务')
     } finally {
@@ -2080,6 +2094,11 @@ function App() {
     if (!window.confirm(`确定从场景库删除“${name}”？当前场景不会因此被删除。`)) return
     try {
       await deleteLibraryScene(sceneId)
+      if (selectedLibrarySceneId === sceneId) {
+        setSelectedLibrarySceneId(null)
+        setSelectedLibrarySceneProject(null)
+        setSceneLibraryContextMenu(null)
+      }
       await refreshLibrary()
       setNotice(`已删除场景 · ${name}`)
     } catch {
