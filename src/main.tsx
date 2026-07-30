@@ -263,7 +263,7 @@ function scenePartIsLocked(project: ProjectState, part: SceneEntityPart): boolea
   const assemblyIds = part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])
   return assemblyIds.some((assemblyId) => {
     const assembly = project.assemblies?.find((item) => item.id === assemblyId)
-    return Boolean(assembly?.memberKeys.some((memberKey) => lockedKeys.has(memberKey) || memberKey === part.memberKey))
+    return Boolean(lockedKeys.has(`assembly:${assemblyId}`) || assembly?.memberKeys.some((memberKey) => lockedKeys.has(memberKey)))
   })
 }
 
