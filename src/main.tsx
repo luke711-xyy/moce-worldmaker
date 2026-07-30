@@ -34,6 +34,8 @@ type CameraControlApi = {
   rotate: (deltaX: number, deltaY: number) => void
   view: (view: CameraViewId) => void
   reset: () => void
+  zoomIn: () => void
+  zoomOut: () => void
 }
 
 type SelectGesture = {
@@ -2715,8 +2717,8 @@ function App() {
             <button className={`footer-control ${showBoundary ? 'active' : ''}`} onClick={() => { setShowBoundary((value) => !value); setNotice(showBoundary ? '已隐藏场景边框' : '已显示场景边框') }}><Square size={16} /> 边框</button>
             <div className="drag-axis-control" aria-label="拖动方向"><Move3d size={14} /><span>拖动</span><button className={dragAxis === 'horizontal' ? 'active' : ''} onClick={() => { setDragAxis('horizontal'); setNotice('拖动方向 · 水平（X/Y）') }}>水平 X/Y</button><button className={dragAxis === 'vertical' ? 'active' : ''} onClick={() => { setDragAxis('vertical'); setNotice('拖动方向 · 竖直（Z）') }}>竖直 Z</button></div>
             <div className="footer-status"><span className={`status-dot ${persistenceStatus === 'offline' ? 'offline' : ''}`} /> {notice}</div>
-            {cameraControlApi && <ViewportCameraControls showJoystick={false} onRotate={cameraControlApi.rotate} onView={(view) => { cameraControlApi.view(view); setNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { cameraControlApi.reset(); setZoomLevel(100); setNotice('视角已回中 · 缩放已恢复 100%') }} />}
-            <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { setZoomLevel((value) => clampZoomLevel(value - (value > 100 ? 50 : 10))); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${((zoomLevel - MIN_ZOOM_LEVEL) / (MAX_ZOOM_LEVEL - MIN_ZOOM_LEVEL)) * 100}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { setZoomLevel((value) => clampZoomLevel(value + (value >= 100 ? 50 : 10))); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{Math.round(zoomLevel)}%</span></div>
+            {cameraControlApi && <ViewportCameraControls showJoystick={false} onRotate={cameraControlApi.rotate} onView={(view) => { cameraControlApi.view(view); setNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { cameraControlApi.reset(); setNotice('视角已回中 · 缩放已恢复 100%') }} />}
+            <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { if (cameraControlApi) cameraControlApi.zoomOut(); else setZoomLevel((value) => clampZoomLevel(value - (value > 100 ? 50 : 10))); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${((zoomLevel - MIN_ZOOM_LEVEL) / (MAX_ZOOM_LEVEL - MIN_ZOOM_LEVEL)) * 100}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { if (cameraControlApi) cameraControlApi.zoomIn(); else setZoomLevel((value) => clampZoomLevel(value + (value >= 100 ? 50 : 10))); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{Math.round(zoomLevel)}%</span></div>
           </div>
         </section>
         <Inspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? selectedEntityParts[0]?.colorOverride : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={Object.fromEntries(project.materials.map((material) => [material.id, material.color]))} copyPreview={copyPreview} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportEntityFile={exportSelectedEntityFile} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => setCopyPreview(null)} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} />
@@ -3376,7 +3378,6 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   const onZoomChangeRef = useRef(onZoomChange)
   const zoomReportFrameRef = useRef<number | null>(null)
   const cameraZoomLevelRef = useRef(100)
-  const lastReportedZoomLevelRef = useRef(100)
   const invalidateRenderRef = useRef<(durationMs?: number) => void>(() => {})
   const perspectiveBaseDistanceRef = useRef(Math.sqrt(16 ** 2 + 18 ** 2 + 18 ** 2))
   const editRenderStateRef = useRef<{ active: boolean; partIds: Set<string> }>({ active: false, partIds: new Set() })
@@ -3401,6 +3402,42 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
   // Keep persisted asset coordinates backward-compatible while presenting the scene
   // in the editor's conventional XY ground plane with Z as the vertical axis.
   const toSceneWorld = (x: number, y: number, z: number) => new THREE.Vector3(x, z, y)
+
+  const scheduleZoomReport = () => {
+    if (zoomReportFrameRef.current !== null) return
+    zoomReportFrameRef.current = requestAnimationFrame(() => {
+      zoomReportFrameRef.current = null
+      onZoomChangeRef.current(cameraZoomLevelRef.current)
+    })
+  }
+
+  // This is the single imperative zoom path. Wheel/trackpad input and the
+  // footer buttons both call it; React only receives the coalesced value for
+  // the percentage ruler and never drives the camera during a gesture.
+  const setCameraZoomLevel = (requestedZoom: number) => {
+    const cameras = camerasRef.current
+    const controls = controlsRef.current
+    const nextZoom = clampZoomLevel(requestedZoom)
+    if (!cameras || !controls) {
+      onZoomChangeRef.current(nextZoom)
+      return
+    }
+    if (Math.abs(cameraZoomLevelRef.current - nextZoom) < 0.001) return
+    cameraZoomLevelRef.current = nextZoom
+    const factor = nextZoom / 100
+    cameras.orthographic.zoom = factor
+    cameras.orthographic.updateProjectionMatrix()
+    const direction = cameras.perspective.position.clone().sub(controls.target)
+    if (direction.lengthSq() > 0.000001) {
+      cameras.perspective.position.copy(controls.target).add(direction.normalize().multiplyScalar(perspectiveBaseDistanceRef.current / factor))
+    }
+    cameras.perspective.zoom = 1
+    cameras.perspective.fov = 38
+    cameras.perspective.updateProjectionMatrix()
+    controls.update()
+    scheduleZoomReport()
+    invalidateRenderRef.current(220)
+  }
 
   const materialMap = useMemo(() => new Map(project.materials.map((material) => [material.id, new THREE.MeshStandardMaterial({ color: material.color, roughness: 0.72, metalness: 0.03 })])), [project.materials])
   useEffect(() => () => {
@@ -3486,27 +3523,6 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     placementGroupRef.current = placementGroup
     copyPreviewGroupRef.current = copyPreviewGroup
     controlsRef.current = controls
-    const reportZoom = () => {
-      invalidateRenderRef.current(220)
-      const currentCamera = cameraRef.current
-      if (!currentCamera) return
-      const factor = currentCamera === orthographic
-        ? orthographic.zoom
-        : perspectiveBaseDistanceRef.current / Math.max(0.0001, perspective.position.distanceTo(controls.target))
-      const nextZoom = clampZoomLevel(factor * 100)
-      // OrbitControls emits `change` for camera rotation/pan as well. Do not
-      // feed every identical (or floating-point-noise) zoom value through
-      // React, otherwise the controlled zoom effect can repeatedly touch the
-      // camera while a wheel gesture is still in progress.
-      if (Math.abs(lastReportedZoomLevelRef.current - nextZoom) < 0.01) return
-      lastReportedZoomLevelRef.current = nextZoom
-      cameraZoomLevelRef.current = nextZoom
-      if (zoomReportFrameRef.current !== null) return
-      zoomReportFrameRef.current = requestAnimationFrame(() => {
-        zoomReportFrameRef.current = null
-        onZoomChangeRef.current(cameraZoomLevelRef.current)
-      })
-    }
     let frame = 0
     let renderUntil = 0
     let animate = () => {}
@@ -3515,35 +3531,15 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       if (!frame) frame = requestAnimationFrame(animate)
     }
     invalidateRenderRef.current = invalidateRender
-    controls.addEventListener('change', reportZoom)
+    // Initialize the camera from the external ruler once. After this point
+    // all zoom changes go through setCameraZoomLevel imperatively.
+    setCameraZoomLevel(zoomLevel)
     const applyWheelZoom = (event: WheelEvent) => {
       if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return
       event.preventDefault()
-      const currentCamera = cameraRef.current ?? camera
-      const factor = currentCamera === orthographic
-        ? orthographic.zoom
-        : perspectiveBaseDistanceRef.current / Math.max(0.0001, perspective.position.distanceTo(controls.target))
       const scale = Math.pow(0.95, controls.zoomSpeed * Math.abs(event.deltaY * 0.01))
-      const nextFactor = factor * (event.deltaY < 0 ? 1 / scale : scale)
-      const nextZoom = clampZoomLevel(nextFactor * 100)
-      cameraZoomLevelRef.current = nextZoom
-      lastReportedZoomLevelRef.current = nextZoom
-      if (currentCamera === orthographic) {
-        orthographic.zoom = nextZoom / 100
-        orthographic.updateProjectionMatrix()
-      } else {
-        const direction = perspective.position.clone().sub(controls.target)
-        if (direction.lengthSq() > 0.000001) {
-          perspective.position.copy(controls.target).add(direction.normalize().multiplyScalar(perspectiveBaseDistanceRef.current / (nextZoom / 100)))
-        }
-      }
-      if (zoomReportFrameRef.current === null) {
-        zoomReportFrameRef.current = requestAnimationFrame(() => {
-          zoomReportFrameRef.current = null
-          onZoomChangeRef.current(cameraZoomLevelRef.current)
-        })
-      }
-      invalidateRender(220)
+      const nextZoom = cameraZoomLevelRef.current * (event.deltaY < 0 ? 1 / scale : scale)
+      setCameraZoomLevel(nextZoom)
     }
     renderer.domElement.addEventListener('wheel', applyWheelZoom, { passive: false })
     const resize = () => {
@@ -3727,7 +3723,6 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       if (zoomReportFrameRef.current !== null) cancelAnimationFrame(zoomReportFrameRef.current)
       invalidateRenderRef.current = () => {}
       observer.disconnect()
-      controls.removeEventListener('change', reportZoom)
       renderer.domElement.removeEventListener('wheel', applyWheelZoom)
       controls.dispose()
       disposeThreeObject(scene)
@@ -3778,28 +3773,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     invalidateRenderRef.current()
   }, [project.sceneBounds?.x, project.sceneBounds?.y, project.sceneBounds?.z, project.sceneSizeCm, showGrid, showBoundary])
 
-  useEffect(() => {
-    const cameras = camerasRef.current
-    const controls = controlsRef.current
-    if (!cameras || !controls) return
-    const nextZoom = clampZoomLevel(zoomLevel)
-    if (Math.abs(cameraZoomLevelRef.current - nextZoom) < 0.05) return
-    cameraZoomLevelRef.current = nextZoom
-    lastReportedZoomLevelRef.current = nextZoom
-    const factor = nextZoom / 100
-    cameras.orthographic.zoom = factor
-    cameras.orthographic.updateProjectionMatrix()
-    cameras.perspective.zoom = 1
-    const direction = cameras.perspective.position.clone().sub(controls.target)
-    if (direction.lengthSq() > 0.000001) {
-      cameras.perspective.position.copy(controls.target).add(direction.normalize().multiplyScalar(perspectiveBaseDistanceRef.current / factor))
-    }
-    cameras.perspective.fov = 38
-    cameras.perspective.updateProjectionMatrix()
-    invalidateRenderRef.current(120)
-  }, [zoomLevel])
-
-  const applyCameraView = (view: CameraView, requestedZoom = zoomLevel) => {
+  const applyCameraView = (view: CameraView, requestedZoom = cameraZoomLevelRef.current) => {
     const cameras = camerasRef.current
     const controls = controlsRef.current
     if (!cameras || !controls) return
@@ -3837,6 +3811,7 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
     cameras.perspective.updateProjectionMatrix()
     controls.target.copy(target)
     controls.update()
+    scheduleZoomReport()
     invalidateRenderRef.current(220)
   }
 
@@ -3854,6 +3829,8 @@ function VoxelViewport({ project, selectedId, selectedPartIds, checkedPartIds, l
       rotate: rotateCameraByInput,
       view: (view) => applyCameraView(view),
       reset: () => applyCameraView('default', 100),
+      zoomIn: () => setCameraZoomLevel(cameraZoomLevelRef.current + (cameraZoomLevelRef.current >= 100 ? 50 : 10)),
+      zoomOut: () => setCameraZoomLevel(cameraZoomLevelRef.current - (cameraZoomLevelRef.current > 100 ? 50 : 10)),
     })
     return () => onCameraApiChange(null)
   }, [onCameraApiChange])
