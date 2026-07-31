@@ -834,10 +834,6 @@ function App() {
       return false
     }
 
-    // Autosave keeps a workspace copy under CURRENT_SCENE_ID, but it is not
-    // considered an explicitly named scene until the user saves it. A scene
-    // opened from the library already has a linked libraryId and can be
-    // updated directly.
     let availableScenes = library.scenes
     try {
       const latest = await loadLibrary()
@@ -848,24 +844,19 @@ function App() {
       // Keep the last known list; the save request below will still report a
       // useful error if the service is unavailable.
     }
-    const linkedSceneId = sceneFileRef?.libraryId && availableScenes.some((scene) => scene.id === sceneFileRef.libraryId)
-      ? sceneFileRef.libraryId
-      : undefined
-    const workspaceSceneExists = availableScenes.some((scene) => scene.id === CURRENT_SCENE_ID)
-    let targetSceneId = linkedSceneId ?? (workspaceSceneExists ? CURRENT_SCENE_ID : undefined)
     let savedName = snapshot.name?.trim() || '未命名场景'
-    if (forceSaveAs || !linkedSceneId) {
-      const requestedName = window.prompt(
-        forceSaveAs ? '请输入另存后的场景名称' : '当前场景尚未保存到场景库，请输入场景名称',
-        savedName,
-      )
-      if (!requestedName?.trim()) {
-        setNotice('已取消保存场景')
-        return false
-      }
-      savedName = requestedName.trim()
-      sceneFile.scene.name = savedName
+    const requestedName = window.prompt(
+      forceSaveAs ? '请输入另存后的场景名称' : '请输入保存后的场景名称',
+      savedName,
+    )
+    if (!requestedName?.trim()) {
+      setNotice('已取消保存场景')
+      return false
     }
+    savedName = requestedName.trim()
+    sceneFile.scene.name = savedName
+    const sameNameScene = availableScenes.find((scene) => scene.name.trim() === savedName)
+    let targetSceneId = !forceSaveAs ? sameNameScene?.id : undefined
 
     try {
       if (forceSaveAs || !targetSceneId) {
@@ -873,24 +864,7 @@ function App() {
         targetSceneId = result.sceneId
         savedName = result.scene.name
       } else {
-        try {
-          await saveScene(targetSceneId, sceneFile)
-        } catch (error) {
-          // The scene may have been deleted in another tab or immediately
-          // before the fresh library read completed. Turn this stale update
-          // into the same create-new-scene flow as a first save.
-          const message = error instanceof Error ? error.message : ''
-          if (!/404|场景不存在/.test(message)) throw error
-          const requestedName = window.prompt('当前场景已从场景库删除，请输入新的场景名称', savedName)
-          if (!requestedName?.trim()) {
-            setNotice('已取消保存场景')
-            return false
-          }
-          sceneFile.scene.name = requestedName.trim()
-          const result = await importScene(sceneFile)
-          targetSceneId = result.sceneId
-          savedName = result.scene.name
-        }
+        await saveScene(targetSceneId, sceneFile)
       }
       setPersistenceStatus('saved')
     } catch (error) {
@@ -941,6 +915,7 @@ function App() {
     let cancelled = false
     loadScene(CURRENT_SCENE_ID).then((loaded) => {
       if (cancelled) return
+      const migratedDefault = isLegacyDefaultSampleProject(loaded)
       const normalized = normalizeStoredProject(loaded)
       replaceProject(normalized, false)
       setRecentMaterialIds(normalized.materials.slice(0, 8).map((material) => material.id))
@@ -948,21 +923,17 @@ function App() {
       persistenceReadyRef.current = true
       setPersistenceStatus('saved')
       markSceneSaved(normalized, null)
-      void saveScene(CURRENT_SCENE_ID, createSceneFile(normalized)).catch(() => setPersistenceStatus('offline'))
+      if (migratedDefault) {
+        void saveScene(CURRENT_SCENE_ID, createSceneFile(normalized)).catch(() => setPersistenceStatus('offline'))
+      }
       setNotice(`已加载场景 · ${normalized.name}`)
     }).catch(async (error: unknown) => {
       if (cancelled) return
       if (error instanceof Error && error.message.includes('场景不存在')) {
-        try {
-          await saveScene(CURRENT_SCENE_ID, createSceneFile(projectRef.current))
-          persistenceReadyRef.current = true
-          setPersistenceStatus('saved')
-          markSceneSaved(projectRef.current, null)
-          setNotice('已创建场景 · 莫测里·第一街区')
-        } catch {
-          setPersistenceStatus('offline')
-          setNotice('场景库不可用 · 当前使用本地草稿')
-        }
+        persistenceReadyRef.current = true
+        setPersistenceStatus('saved')
+        markSceneSaved(projectRef.current, null)
+        setNotice('已加载默认场景 · 尚未保存到场景库')
       } else {
         setPersistenceStatus('offline')
         setNotice('后端连接失败 · 当前使用本地草稿')
@@ -980,35 +951,6 @@ function App() {
     }).catch(() => undefined)
     return () => { cancelled = true }
   }, [])
-
-  useEffect(() => {
-    if (!persistenceReadyRef.current) return
-    const autosaveSceneId = sceneFileRef?.libraryId
-      ?? (library.scenes.some((scene) => scene.id === CURRENT_SCENE_ID) ? CURRENT_SCENE_ID : undefined)
-    if (!autosaveSceneId) return
-    let idleId: number | null = null
-    let timer = 0
-    const persist = () => {
-      try {
-        saveScene(autosaveSceneId, createSceneFile(project)).then(() => setPersistenceStatus('saved')).catch(() => setPersistenceStatus('offline'))
-      } catch {
-        setPersistenceStatus('offline')
-      }
-    }
-    const schedulePersist = () => {
-      if (interactionActiveRef.current) {
-        timer = window.setTimeout(schedulePersist, 250)
-        return
-      }
-      idleId = window.requestIdleCallback ? window.requestIdleCallback(persist, { timeout: 1500 }) : null
-      if (idleId === null) persist()
-    }
-    timer = window.setTimeout(schedulePersist, 1200)
-    return () => {
-      window.clearTimeout(timer)
-      if (idleId !== null && window.cancelIdleCallback) window.cancelIdleCallback(idleId)
-    }
-  }, [project, sceneFileRef?.libraryId, library.scenes])
 
   const undoProject = () => {
     const previous = historyRef.current.past.pop()
@@ -2936,7 +2878,7 @@ function App() {
         </section>
         <Inspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportEntityFile={exportSelectedEntityFile} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => setCopyPreview(null)} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
       </main>
-      {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} currentSceneId={sceneFileRef?.libraryId ?? CURRENT_SCENE_ID} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null) }} onImportScene={() => sceneLibraryImportInputRef.current?.click()} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} />}
+      {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null) }} onImportScene={() => sceneLibraryImportInputRef.current?.click()} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} />}
       {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
       {modelImportDialog && <ModelImportDialog state={modelImportDialog} targetSizeMm={modelImportTargetSize} mode={modelImportMode} preserveParts={modelImportPreserveParts} onTargetSizeChange={setModelImportTargetSize} onModeChange={setModelImportMode} onPreservePartsChange={setModelImportPreserveParts} onStart={runModelImport} onConfirm={confirmModelImport} onCancel={() => setModelImportDialog(null)} />}
       {unsavedDialogOpen && <UnsavedChangesDialog onDecision={handleUnsavedDecision} />}
@@ -3139,7 +3081,7 @@ const VoxelThumbnail = React.memo(function VoxelThumbnail({ asset }: { asset: Vo
   return <div className="thumbnail-scene" aria-label={`${asset.name} 3D 预览`}><VoxelMiniPreview voxels={asset.voxels} asset={asset} /></div>
 })
 
-function SceneLibraryDialog({ library, busy, currentSceneId, selectedSceneId, selectedSceneProject, onClose, onImportScene, onLoadScene, onSelectScene, onSaveSceneEntity, onAddSceneEntityToCurrentScene, onDeleteSceneEntity, contextMenu, onContextMenu, onCloseContextMenu, onDuplicateScene, onDeleteScene }: { library: LibraryResponse; busy: boolean; currentSceneId: string; selectedSceneId: string | null; selectedSceneProject: ProjectState | null; onClose: () => void; onImportScene: () => void; onLoadScene: (id: string, name: string) => void; onSelectScene: (id: string, name: string, x: number, y: number) => void; onSaveSceneEntity: (asset: VoxelAsset) => void; onAddSceneEntityToCurrentScene: (asset: VoxelAsset) => void; onDeleteSceneEntity: (sceneId: string, entity: SceneLibraryEntity) => void | Promise<void>; contextMenu: SceneLibraryContextMenuState; onContextMenu: (sceneId: string, x: number, y: number) => void; onCloseContextMenu: () => void; onDuplicateScene: (sceneId: string, name: string) => void; onDeleteScene: (sceneId: string, name: string) => void }) {
+function SceneLibraryDialog({ library, busy, selectedSceneId, selectedSceneProject, onClose, onImportScene, onLoadScene, onSelectScene, onSaveSceneEntity, onAddSceneEntityToCurrentScene, onDeleteSceneEntity, contextMenu, onContextMenu, onCloseContextMenu, onDuplicateScene, onDeleteScene }: { library: LibraryResponse; busy: boolean; selectedSceneId: string | null; selectedSceneProject: ProjectState | null; onClose: () => void; onImportScene: () => void; onLoadScene: (id: string, name: string) => void; onSelectScene: (id: string, name: string, x: number, y: number) => void; onSaveSceneEntity: (asset: VoxelAsset) => void; onAddSceneEntityToCurrentScene: (asset: VoxelAsset) => void; onDeleteSceneEntity: (sceneId: string, entity: SceneLibraryEntity) => void | Promise<void>; contextMenu: SceneLibraryContextMenuState; onContextMenu: (sceneId: string, x: number, y: number) => void; onCloseContextMenu: () => void; onDuplicateScene: (sceneId: string, name: string) => void; onDeleteScene: (sceneId: string, name: string) => void }) {
   const [entityContextMenu, setEntityContextMenu] = useState<SceneEntityContextMenuState>(null)
   const menuCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const contextScene = contextMenu ? library.scenes.find((scene) => scene.id === contextMenu.sceneId) : undefined
@@ -3229,7 +3171,7 @@ function SceneLibraryDialog({ library, busy, currentSceneId, selectedSceneId, se
       <div className="library-dialog-heading"><div><h2>场景库</h2><p>场景文件与场景实体由当前工程自动管理</p></div><button className="icon-button" aria-label="关闭场景库" onClick={onClose}><X size={17} /></button></div>
       <div className="library-dialog-toolbar"><span>{library.scenes.length} 个场景 · {selectedSceneId ? `${selectedSceneEntities.length} 个实体` : '未选择场景'}</span><div className="library-toolbar-actions"><button className="tiny-button" onClick={onImportScene} disabled={busy}><FolderOpen size={13} /> 导入场景文件</button></div></div>
       <div className="library-columns">
-        <div className="library-column"><div className="library-column-title">场景</div>{library.scenes.length ? library.scenes.map((scene) => <button className={`library-row ${selectedSceneId === scene.id ? 'selected' : ''}`} data-scene-id={scene.id} key={scene.id} onClick={openSceneMenu} onContextMenu={openSceneMenu}><div><strong>{scene.name}</strong><span>{scene.assemblyCount} 个装配体 · {scene.entityCount} 个实体</span></div><div className="library-row-actions">{currentSceneId === scene.id && <em>当前场景</em>}<ChevronRight size={15} /></div></button>) : <div className="empty-panel">尚无场景</div>}</div>
+        <div className="library-column"><div className="library-column-title">场景</div>{library.scenes.length ? library.scenes.map((scene) => <button className={`library-row ${selectedSceneId === scene.id ? 'selected' : ''}`} data-scene-id={scene.id} key={scene.id} onClick={openSceneMenu} onContextMenu={openSceneMenu}><div><strong>{scene.name}</strong><span>{scene.assemblyCount} 个装配体 · {scene.entityCount} 个实体</span></div><div className="library-row-actions"><ChevronRight size={15} /></div></button>) : <div className="empty-panel">尚无场景</div>}</div>
         <div className="library-column"><div className="library-column-title">实体</div>{!selectedSceneId ? <div className="empty-panel">请选择场景查看实体</div> : selectedSceneEntities.length ? selectedSceneEntities.map((entity) => <button className="library-row" key={entity.id} onClick={(event) => openEntityMenu(event, entity.id)} onContextMenu={(event) => openEntityMenu(event, entity.id)}><div><strong>{entity.name}</strong><span>{entity.subtitle}</span></div><ChevronRight size={15} /></button>) : <div className="empty-panel">当前场景没有可显示的实体</div>}</div>
       </div>
       {contextScene && contextMenu && <div className="scene-library-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerEnter={cancelMenuClose} onPointerLeave={scheduleMenuClose} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}><button onClick={() => { closeMenus(); onLoadScene(contextScene.id, contextScene.name) }}>打开场景</button><button onClick={() => { closeMenus(); onDuplicateScene(contextScene.id, contextScene.name) }}>创建副本</button><button className="danger" onClick={() => { closeMenus(); onDeleteScene(contextScene.id, contextScene.name) }}>删除场景</button></div>}
