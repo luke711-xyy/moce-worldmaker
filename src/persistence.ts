@@ -43,11 +43,11 @@ export function loadScene(sceneId: string): Promise<ProjectState> {
   return request<ProjectState>(`/api/scenes/${encodeURIComponent(sceneId)}`)
 }
 
-export function saveScene(sceneId: string, sceneFile: MoceSceneFile | ProjectState): Promise<{ ok: boolean }> {
+export function saveScene(sceneId: string, sceneFile: MoceSceneFile | ProjectState): Promise<{ ok: boolean; scene?: LibrarySceneSummary }> {
   const previous = sceneSaveQueues.get(sceneId) ?? Promise.resolve()
   const next = previous
     .catch(() => undefined)
-    .then(() => request<{ ok: boolean }>(`/api/scenes/${encodeURIComponent(sceneId)}`, { method: 'PUT', body: JSON.stringify(sceneFile) }))
+    .then(() => request<{ ok: boolean; scene?: LibrarySceneSummary }>(`/api/scenes/${encodeURIComponent(sceneId)}`, { method: 'PUT', body: JSON.stringify(sceneFile) }))
   sceneSaveQueues.set(sceneId, next)
   void next.finally(() => {
     if (sceneSaveQueues.get(sceneId) === next) sceneSaveQueues.delete(sceneId)

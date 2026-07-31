@@ -5,7 +5,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, CircleUserRound, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
 import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
-import { LibraryResponse, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
+import { LibraryResponse, LibrarySceneSummary, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
 import { importModelAsVoxelAssetInWorker, ModelImportResult, VoxelizeMode } from './model-import'
 import { SceneOccupancyIndex } from './runtime/spatial-index'
@@ -857,14 +857,17 @@ function App() {
     sceneFile.scene.name = savedName
     const sameNameScene = availableScenes.find((scene) => scene.name.trim() === savedName)
     let targetSceneId = !forceSaveAs ? sameNameScene?.id : undefined
+    let savedSceneSummary: LibrarySceneSummary | undefined
 
     try {
       if (forceSaveAs || !targetSceneId) {
         const result = await importScene(sceneFile)
         targetSceneId = result.sceneId
         savedName = result.scene.name
+        savedSceneSummary = result.scene
       } else {
-        await saveScene(targetSceneId, sceneFile)
+        const result = await saveScene(targetSceneId, sceneFile)
+        savedSceneSummary = result.scene
       }
       setPersistenceStatus('saved')
     } catch (error) {
@@ -879,9 +882,18 @@ function App() {
       setProject(projectRef.current)
     }
     markSceneSaved(savedSnapshot, { name: savedName, libraryId: targetSceneId })
+    if (savedSceneSummary) {
+      setLibrary((current) => ({
+        ...current,
+        scenes: [savedSceneSummary!, ...current.scenes.filter((scene) => scene.id !== savedSceneSummary!.id)],
+      }))
+    }
     try {
       const loaded = await loadLibrary()
-      setLibrary(loaded)
+      const hasSavedScene = targetSceneId ? loaded.scenes.some((scene) => scene.id === targetSceneId) : false
+      setLibrary(hasSavedScene || !savedSceneSummary
+        ? loaded
+        : { ...loaded, scenes: [savedSceneSummary, ...loaded.scenes.filter((scene) => scene.id !== savedSceneSummary!.id)] })
       setAssetCategoryPaths(normalizeAssetCategoryPaths(loaded.assetCategories ?? [], projectRef.current.assets))
     } catch {
       // The scene is already saved; a failed list refresh should not turn it
