@@ -837,10 +837,20 @@ function App() {
     // considered an explicitly named scene until the user saves it. A scene
     // opened from the library already has a linked libraryId and can be
     // updated directly.
-    const linkedSceneId = sceneFileRef?.libraryId && library.scenes.some((scene) => scene.id === sceneFileRef.libraryId)
+    let availableScenes = library.scenes
+    try {
+      const latest = await loadLibrary()
+      availableScenes = latest.scenes
+      setLibrary(latest)
+      setAssetCategoryPaths(normalizeAssetCategoryPaths(latest.assetCategories ?? [], projectRef.current.assets))
+    } catch {
+      // Keep the last known list; the save request below will still report a
+      // useful error if the service is unavailable.
+    }
+    const linkedSceneId = sceneFileRef?.libraryId && availableScenes.some((scene) => scene.id === sceneFileRef.libraryId)
       ? sceneFileRef.libraryId
       : undefined
-    const workspaceSceneExists = library.scenes.some((scene) => scene.id === CURRENT_SCENE_ID)
+    const workspaceSceneExists = availableScenes.some((scene) => scene.id === CURRENT_SCENE_ID)
     let targetSceneId = linkedSceneId ?? (workspaceSceneExists ? CURRENT_SCENE_ID : undefined)
     let savedName = snapshot.name?.trim() || '未命名场景'
     if (forceSaveAs || !linkedSceneId) {
@@ -862,7 +872,24 @@ function App() {
         targetSceneId = result.sceneId
         savedName = result.scene.name
       } else {
-        await saveScene(targetSceneId, sceneFile)
+        try {
+          await saveScene(targetSceneId, sceneFile)
+        } catch (error) {
+          // The scene may have been deleted in another tab or immediately
+          // before the fresh library read completed. Turn this stale update
+          // into the same create-new-scene flow as a first save.
+          const message = error instanceof Error ? error.message : ''
+          if (!/404|场景不存在/.test(message)) throw error
+          const requestedName = window.prompt('当前场景已从场景库删除，请输入新的场景名称', savedName)
+          if (!requestedName?.trim()) {
+            setNotice('已取消保存场景')
+            return false
+          }
+          sceneFile.scene.name = requestedName.trim()
+          const result = await importScene(sceneFile)
+          targetSceneId = result.sceneId
+          savedName = result.scene.name
+        }
       }
       setPersistenceStatus('saved')
     } catch (error) {
@@ -955,11 +982,14 @@ function App() {
 
   useEffect(() => {
     if (!persistenceReadyRef.current) return
+    const autosaveSceneId = sceneFileRef?.libraryId
+      ?? (library.scenes.some((scene) => scene.id === CURRENT_SCENE_ID) ? CURRENT_SCENE_ID : undefined)
+    if (!autosaveSceneId) return
     let idleId: number | null = null
     let timer = 0
     const persist = () => {
       try {
-        saveScene(CURRENT_SCENE_ID, createSceneFile(project)).then(() => setPersistenceStatus('saved')).catch(() => setPersistenceStatus('offline'))
+        saveScene(autosaveSceneId, createSceneFile(project)).then(() => setPersistenceStatus('saved')).catch(() => setPersistenceStatus('offline'))
       } catch {
         setPersistenceStatus('offline')
       }
@@ -977,7 +1007,7 @@ function App() {
       window.clearTimeout(timer)
       if (idleId !== null && window.cancelIdleCallback) window.cancelIdleCallback(idleId)
     }
-  }, [project])
+  }, [project, sceneFileRef?.libraryId, library.scenes])
 
   const undoProject = () => {
     const previous = historyRef.current.past.pop()
@@ -2175,6 +2205,8 @@ function App() {
     if (!window.confirm(`确定从场景库删除“${name}”？当前场景不会因此被删除。`)) return
     try {
       await deleteLibraryScene(sceneId)
+      if (sceneFileRef?.libraryId === sceneId) setSceneFileRef(null)
+      setLibrary((current) => ({ ...current, scenes: current.scenes.filter((scene) => scene.id !== sceneId) }))
       if (selectedLibrarySceneId === sceneId) {
         setSelectedLibrarySceneId(null)
         setSelectedLibrarySceneProject(null)
