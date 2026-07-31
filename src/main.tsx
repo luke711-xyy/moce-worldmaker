@@ -166,7 +166,6 @@ type PendingEntityImport = {
 type SceneFileRef = {
   name: string
   libraryId?: string
-  fileHandle?: FileSystemFileHandle
 }
 
 type UnsavedDecision = 'cancel' | 'save' | 'discard'
@@ -814,16 +813,6 @@ function App() {
     setUnsavedDialogOpen(true)
   }
 
-  const downloadSceneFile = (sceneFile: MoceSceneFile, fileName: string) => {
-    const blob = new Blob([JSON.stringify(sceneFile, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = fileName.endsWith('.moceworld') ? fileName : `${fileName}.moceworld`
-    anchor.click()
-    URL.revokeObjectURL(url)
-  }
-
   const downloadPortableFile = (file: MoceAssetFile | MoceEntityFile, fileName: string, extension: '.moceasset' | '.moceentity') => {
     const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
@@ -834,7 +823,7 @@ function App() {
     URL.revokeObjectURL(url)
   }
 
-  const saveProjectAsFile = async (forceSaveAs = false): Promise<boolean> => {
+  const saveProjectToLibrary = async (forceSaveAs = false): Promise<boolean> => {
     const snapshot = structuredClone(projectRef.current)
     let sceneFile: MoceSceneFile
     try {
@@ -843,41 +832,60 @@ function App() {
       setNotice(error instanceof Error ? `保存失败 · ${error.message}` : '保存失败 · 场景文件生成失败')
       return false
     }
-    const suggestedName = `${snapshot.name || '未命名场景'}.moceworld`
-    const pickerWindow = window as Window & { showSaveFilePicker?: (options?: unknown) => Promise<FileSystemFileHandle> }
-    let handle = !forceSaveAs ? sceneFileRef?.fileHandle : undefined
-    let fileName = sceneFileRef?.name || suggestedName
+
+    // Autosave keeps a workspace copy under CURRENT_SCENE_ID, but it is not
+    // considered an explicitly named scene until the user saves it. A scene
+    // opened from the library already has a linked libraryId and can be
+    // updated directly.
+    const linkedSceneId = sceneFileRef?.libraryId && library.scenes.some((scene) => scene.id === sceneFileRef.libraryId)
+      ? sceneFileRef.libraryId
+      : undefined
+    const workspaceSceneExists = library.scenes.some((scene) => scene.id === CURRENT_SCENE_ID)
+    let targetSceneId = linkedSceneId ?? (workspaceSceneExists ? CURRENT_SCENE_ID : undefined)
+    let savedName = snapshot.name?.trim() || '未命名场景'
+    if (forceSaveAs || !linkedSceneId) {
+      const requestedName = window.prompt(
+        forceSaveAs ? '请输入另存后的场景名称' : '当前场景尚未保存到场景库，请输入场景名称',
+        savedName,
+      )
+      if (!requestedName?.trim()) {
+        setNotice('已取消保存场景')
+        return false
+      }
+      savedName = requestedName.trim()
+      sceneFile.scene.name = savedName
+    }
+
     try {
-      if (!handle && pickerWindow.showSaveFilePicker) {
-        handle = await pickerWindow.showSaveFilePicker({
-          suggestedName,
-          types: [{ description: '莫测造境场景文件', accept: { 'application/json': ['.moceworld'] } }],
-        })
-        fileName = handle.name
-      }
-      if (handle) {
-        const writable = await handle.createWritable()
-        await writable.write(JSON.stringify(sceneFile, null, 2))
-        await writable.close()
+      if (forceSaveAs || !targetSceneId) {
+        const result = await importScene(sceneFile)
+        targetSceneId = result.sceneId
+        savedName = result.scene.name
       } else {
-        downloadSceneFile(sceneFile, fileName)
+        await saveScene(targetSceneId, sceneFile)
       }
+      setPersistenceStatus('saved')
     } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return false
-      setNotice(`保存文件失败 · ${error instanceof Error ? error.message : '无法写入文件'}`)
+      setPersistenceStatus('offline')
+      setNotice(`保存场景失败 · ${error instanceof Error ? error.message : '请检查场景库连接'}`)
       return false
     }
-    const targetSceneId = forceSaveAs ? CURRENT_SCENE_ID : sceneFileRef?.libraryId ?? CURRENT_SCENE_ID
-    let persisted = true
-    try {
-      await saveScene(targetSceneId, sceneFile)
-      setPersistenceStatus('saved')
-    } catch {
-      persisted = false
-      setPersistenceStatus('offline')
+
+    const savedSnapshot = { ...snapshot, name: savedName }
+    if (projectRef.current.name !== savedName) {
+      projectRef.current = { ...projectRef.current, name: savedName }
+      setProject(projectRef.current)
     }
-    markSceneSaved(snapshot, { name: fileName, libraryId: forceSaveAs ? undefined : sceneFileRef?.libraryId, fileHandle: handle })
-    setNotice(persisted ? `场景已保存 · ${fileName}` : `文件已保存 · 场景库同步失败 · ${fileName}`)
+    markSceneSaved(savedSnapshot, { name: savedName, libraryId: targetSceneId })
+    try {
+      const loaded = await loadLibrary()
+      setLibrary(loaded)
+      setAssetCategoryPaths(normalizeAssetCategoryPaths(loaded.assetCategories ?? [], projectRef.current.assets))
+    } catch {
+      // The scene is already saved; a failed list refresh should not turn it
+      // into a failed save.
+    }
+    setNotice(forceSaveAs ? `场景已另存到场景库 · ${savedName}` : `场景已保存到场景库 · ${savedName}`)
     return true
   }
 
@@ -893,7 +901,7 @@ function App() {
       return
     }
     if (decision === 'save') {
-      const saved = await saveProjectAsFile(false)
+      const saved = await saveProjectToLibrary(false)
       if (!saved) return
     }
     pendingSceneOperationRef.current = null
@@ -1585,9 +1593,9 @@ function App() {
     setTreeContextMenu(null)
   }
 
-  const saveProject = () => saveProjectAsFile(false)
+  const saveProject = () => saveProjectToLibrary(false)
 
-  const saveProjectAs = () => saveProjectAsFile(true)
+  const saveProjectAs = () => saveProjectToLibrary(true)
 
   const mergeLocalTemplateAssets = (loaded: ProjectState): ProjectState => {
     const loadedAssetIds = new Set(loaded.assets.map((asset) => asset.id))
@@ -3188,7 +3196,7 @@ function SceneLibraryDialog({ library, busy, currentSceneId, selectedSceneId, se
       <div className="library-dialog-heading"><div><h2>场景库</h2><p>场景文件与场景实体由当前工程自动管理</p></div><button className="icon-button" aria-label="关闭场景库" onClick={onClose}><X size={17} /></button></div>
       <div className="library-dialog-toolbar"><span>{library.scenes.length} 个场景 · {selectedSceneId ? `${selectedSceneEntities.length} 个实体` : '未选择场景'}</span><div className="library-toolbar-actions"><button className="tiny-button" onClick={onImportScene} disabled={busy}><FolderOpen size={13} /> 导入场景文件</button></div></div>
       <div className="library-columns">
-        <div className="library-column"><div className="library-column-title">场景</div>{library.scenes.length ? library.scenes.map((scene) => <button className={`library-row ${selectedSceneId === scene.id ? 'selected' : ''}`} data-scene-id={scene.id} key={scene.id} onPointerEnter={openSceneMenu} onPointerLeave={scheduleMenuClose} onClick={openSceneMenu} onContextMenu={openSceneMenu}><div><strong>{scene.name}</strong><span>{scene.assemblyCount} 个装配体 · {scene.entityCount} 个实体</span></div><div className="library-row-actions">{currentSceneId === scene.id && <em>当前场景</em>}<ChevronRight size={15} /></div></button>) : <div className="empty-panel">尚无场景</div>}</div>
+        <div className="library-column"><div className="library-column-title">场景</div>{library.scenes.length ? library.scenes.map((scene) => <button className={`library-row ${selectedSceneId === scene.id ? 'selected' : ''}`} data-scene-id={scene.id} key={scene.id} onClick={openSceneMenu} onContextMenu={openSceneMenu}><div><strong>{scene.name}</strong><span>{scene.assemblyCount} 个装配体 · {scene.entityCount} 个实体</span></div><div className="library-row-actions">{currentSceneId === scene.id && <em>当前场景</em>}<ChevronRight size={15} /></div></button>) : <div className="empty-panel">尚无场景</div>}</div>
         <div className="library-column"><div className="library-column-title">实体</div>{!selectedSceneId ? <div className="empty-panel">请选择场景查看实体</div> : selectedSceneEntities.length ? selectedSceneEntities.map((entity) => <button className="library-row" key={entity.id} onClick={(event) => openEntityMenu(event, entity.id)} onContextMenu={(event) => openEntityMenu(event, entity.id)}><div><strong>{entity.name}</strong><span>{entity.subtitle}</span></div><ChevronRight size={15} /></button>) : <div className="empty-panel">当前场景没有可显示的实体</div>}</div>
       </div>
       {contextScene && contextMenu && <div className="scene-library-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerEnter={cancelMenuClose} onPointerLeave={scheduleMenuClose} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}><button onClick={() => { closeMenus(); onLoadScene(contextScene.id, contextScene.name) }}>打开场景</button><button onClick={() => { closeMenus(); onDuplicateScene(contextScene.id, contextScene.name) }}>创建副本</button><button className="danger" onClick={() => { closeMenus(); onDeleteScene(contextScene.id, contextScene.name) }}>删除场景</button></div>}

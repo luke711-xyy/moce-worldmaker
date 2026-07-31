@@ -253,7 +253,11 @@ async function sceneFileFromPayload(payload: unknown) {
 }
 
 async function projectFromScene(env: Env & { DB: D1Database; BLOBS: R2Bucket }, owner: string, sceneFile: JsonRecord) {
-  const embeddedAssets = Array.isArray(sceneFile.sceneAssets) ? structuredClone(sceneFile.sceneAssets) as JsonRecord[] : []
+  // Older records stored the complete ProjectState directly. Normalize both
+  // shapes here so the scene library entity pane receives instances/assets
+  // instead of an empty project when a legacy scene is selected.
+  const portable = parseSceneFile(sceneFile) as unknown as JsonRecord
+  const embeddedAssets = Array.isArray(portable.sceneAssets) ? structuredClone(portable.sceneAssets) as JsonRecord[] : []
   const embeddedIds = new Set(embeddedAssets.map((asset) => asset.id))
   const templateRows = await listObjects(env, owner, 'asset')
   // A historical D1 migration can leave a summary row whose R2 blob is
@@ -263,7 +267,7 @@ async function projectFromScene(env: Env & { DB: D1Database; BLOBS: R2Bucket }, 
     .filter((row) => !embeddedIds.has(row.id))
     .map((row) => getJsonBlob<JsonRecord>(env, row.blob_key))))
     .flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])
-  const scene = structuredClone(sceneFile.scene) as JsonRecord
+  const scene = structuredClone(portable.scene) as JsonRecord
   return {
     ...scene,
     assets: [...embeddedAssets.map((asset) => ({ ...asset, isTemplate: false })), ...templateAssets.map((asset) => ({ ...asset, isTemplate: true }))],

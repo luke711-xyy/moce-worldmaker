@@ -153,6 +153,12 @@ function sceneRecordFromFile(sceneFile, id) {
 }
 
 function projectFromScene(database, scene) {
+  // Keep legacy direct ProjectState records readable by the scene library.
+  // They must be converted to the embedded scene shape before rebuilding the
+  // project, otherwise the entity pane receives no instances.
+  if (scene.format !== 'moce-scene' && Array.isArray(scene.assets) && Array.isArray(scene.instances)) {
+    scene = sceneFileFromPayload(scene)
+  }
   if (scene.format === 'moce-scene') {
     const sceneAssets = structuredClone(scene.sceneAssets ?? []).map((asset) => {
       const libraryAsset = database.assets[asset.id]
