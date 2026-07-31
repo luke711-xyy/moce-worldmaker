@@ -10,6 +10,14 @@ describe('莫测造境体素核心数据', () => {
     expect(project.instances.filter((instance) => instance.style !== '基础件')).toHaveLength(4)
   })
 
+  it('keeps sample instances as snapshots and counts their editable parts', () => {
+    const project = makeDefaultProject()
+    expect(project.assets.filter((asset) => asset.isTemplate !== false)).toHaveLength(7)
+    expect(project.assets.filter((asset) => asset.isTemplate === false)).toHaveLength(7)
+    expect(project.instances[0].assetId).toBe('scene-sample-house-greek')
+    expect(sceneEntityParts(project)).toHaveLength(19)
+  })
+
   it('uses one shared viewport conversion for every 1mm voxel', () => {
     expect(VOXEL_WORLD_SIZE).toBe(0.1)
     expect(voxelToWorld(10)).toBe(1)

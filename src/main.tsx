@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, CircleUserRound, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
@@ -233,33 +233,34 @@ function scenePartVoxelDisplayColor(project: ProjectState, part: SceneEntityPart
 }
 
 function normalizeStoredProject(loaded: ProjectState): ProjectState {
+  const migrated = isLegacyDefaultSampleProject(loaded) ? migrateLegacyDefaultSampleProject(loaded) : loaded
   const defaultAssets = new Map(makeDefaultProject().assets.map((asset) => [asset.id, asset]))
   const normalized: ProjectState = {
-    ...loaded,
-    voxelSizeMm: normalizeVoxelSizeMm(loaded.voxelSizeMm),
-    sceneBounds: sceneBoundsForProject(loaded),
-    assets: (loaded.assets ?? []).map((asset) => ({
+    ...migrated,
+    voxelSizeMm: normalizeVoxelSizeMm(migrated.voxelSizeMm),
+    sceneBounds: sceneBoundsForProject(migrated),
+    assets: (migrated.assets ?? []).map((asset) => ({
       ...asset,
       categoryPath: normalizeAssetCategoryPath(asset.categoryPath),
       partVoxels: asset.partVoxels ?? defaultAssets.get(asset.id)?.partVoxels,
       isTemplate: asset.isTemplate ?? (!asset.source || asset.source === '场景实体保存' || (asset.kind !== 'imported' && !asset.source.includes('拆分子实体'))),
     })),
-    customVoxels: (loaded.customVoxels ?? []).map((voxel, index) => ({ ...voxel, entityId: voxel.entityId ?? `legacy-${voxel.x}-${voxel.y}-${voxel.z}-${index}` })),
-    customColors: { ...(loaded.customColors ?? {}) },
-    entityNames: { ...(loaded.entityNames ?? {}) },
-    entityNameModes: { ...(loaded.entityNameModes ?? {}) },
-    entityNameSequences: { ...(loaded.entityNameSequences ?? {}) },
-    entityNameParents: { ...(loaded.entityNameParents ?? {}) },
-    entitySequenceCounters: { ...(loaded.entitySequenceCounters ?? {}) },
-    assemblySequence: Math.max(1, loaded.assemblySequence ?? 1),
-    assemblyChildSequence: { ...(loaded.assemblyChildSequence ?? {}) },
-    childSequenceCounters: { ...(loaded.childSequenceCounters ?? {}) },
-    assemblies: (loaded.assemblies ?? []).map((assembly) => ({ ...assembly, memberKeys: [...assembly.memberKeys] })),
+    customVoxels: (migrated.customVoxels ?? []).map((voxel, index) => ({ ...voxel, entityId: voxel.entityId ?? `legacy-${voxel.x}-${voxel.y}-${voxel.z}-${index}` })),
+    customColors: { ...(migrated.customColors ?? {}) },
+    entityNames: { ...(migrated.entityNames ?? {}) },
+    entityNameModes: { ...(migrated.entityNameModes ?? {}) },
+    entityNameSequences: { ...(migrated.entityNameSequences ?? {}) },
+    entityNameParents: { ...(migrated.entityNameParents ?? {}) },
+    entitySequenceCounters: { ...(migrated.entitySequenceCounters ?? {}) },
+    assemblySequence: Math.max(1, migrated.assemblySequence ?? 1),
+    assemblyChildSequence: { ...(migrated.assemblyChildSequence ?? {}) },
+    childSequenceCounters: { ...(migrated.childSequenceCounters ?? {}) },
+    assemblies: (migrated.assemblies ?? []).map((assembly) => ({ ...assembly, memberKeys: [...assembly.memberKeys] })),
     instances: [],
-    lockedMemberKeys: [...new Set(loaded.lockedMemberKeys ?? [])],
+    lockedMemberKeys: [...new Set(migrated.lockedMemberKeys ?? [])],
   }
   const assetMap = new Map(normalized.assets.map((asset) => [asset.id, asset]))
-  normalized.instances = (loaded.instances ?? []).map((instance) => {
+  normalized.instances = (migrated.instances ?? []).map((instance) => {
     const asset = assetMap.get(instance.assetId)
     return {
       ...instance,

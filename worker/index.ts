@@ -49,6 +49,52 @@ function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function voxelKey(value: unknown): string {
+  if (!isRecord(value)) return ''
+  return `${String(value.x)},${String(value.y)},${String(value.z)}`
+}
+
+/** Count the same editable parts that the scene tree exposes. */
+function sceneEntityCount(state: JsonRecord, sceneAssets: JsonRecord[]): number {
+  const assetMap = new Map(sceneAssets.filter((asset) => typeof asset.id === 'string').map((asset) => [asset.id as string, asset]))
+  const instances = Array.isArray(state.instances) ? state.instances : []
+  const instanceCount = instances.reduce((total, instance) => {
+    if (!isRecord(instance)) return total
+    const asset = assetMap.get(typeof instance.assetId === 'string' ? instance.assetId : '')
+    if (!asset || !Array.isArray(asset.voxels)) return total + 1
+    const resolved = new Map<string, JsonRecord>()
+    asset.voxels.filter(isRecord).forEach((voxel) => resolved.set(voxelKey(voxel), voxel))
+    if (Array.isArray(instance.overrides)) {
+      instance.overrides.filter(isRecord).forEach((override) => {
+        const key = voxelKey(override)
+        if (override.mode === 'remove') resolved.delete(key)
+        else resolved.set(key, { x: override.x, y: override.y, z: override.z, materialId: override.materialId })
+      })
+    }
+    const partVoxels = isRecord(asset.partVoxels) ? asset.partVoxels : undefined
+    if (!partVoxels) return total + (resolved.size ? 1 : 0)
+    const claimed = new Set<string>()
+    let parts = 0
+    Object.values(partVoxels).forEach((part) => {
+      if (!Array.isArray(part)) return
+      let hasVoxel = false
+      part.filter(isRecord).forEach((voxel) => {
+        const key = voxelKey(voxel)
+        if (resolved.has(key)) hasVoxel = true
+        claimed.add(key)
+      })
+      if (hasVoxel) parts += 1
+    })
+    if ([...resolved.keys()].some((key) => !claimed.has(key))) parts += 1
+    return total + (parts || (resolved.size ? 1 : 0))
+  }, 0)
+  const customVoxels = Array.isArray(state.customVoxels) ? state.customVoxels : []
+  const customEntityIds = new Set(customVoxels.map((voxel, index) => isRecord(voxel) && typeof voxel.entityId === 'string'
+    ? voxel.entityId
+    : `legacy-${voxelKey(voxel)}-${index}`))
+  return instanceCount + customEntityIds.size
+}
+
 function normalizeCategories(categories: unknown): string[][] {
   const paths = new Map<string, string[]>()
   for (const value of Array.isArray(categories) ? categories : []) {
@@ -68,7 +114,6 @@ function sceneSummary(scene: JsonRecord, id: string, updatedAt: string) {
   const instances = Array.isArray(state.instances) ? state.instances : []
   const customVoxels = Array.isArray(state.customVoxels) ? state.customVoxels : []
   const assemblies = Array.isArray(state.assemblies) ? state.assemblies : []
-  const customEntityIds = new Set(customVoxels.map((voxel) => isRecord(voxel) && typeof voxel.entityId === 'string' ? voxel.entityId : '__legacy_custom_entity__'))
   return {
     id,
     name: typeof state.name === 'string' ? state.name : '未命名场景',
@@ -80,7 +125,7 @@ function sceneSummary(scene: JsonRecord, id: string, updatedAt: string) {
     customVoxelCount: Array.isArray(state.customVoxels) ? customVoxels.length : typeof scene.customVoxelCount === 'number' ? scene.customVoxelCount : 0,
     assemblyCount: Array.isArray(state.assemblies) ? assemblies.length : typeof scene.assemblyCount === 'number' ? scene.assemblyCount : 0,
     entityCount: Array.isArray(state.instances) || Array.isArray(state.customVoxels)
-      ? instances.length + customEntityIds.size
+      ? sceneEntityCount(state, sceneAssets)
       : typeof scene.entityCount === 'number' ? scene.entityCount : (typeof scene.instanceCount === 'number' ? scene.instanceCount : 0) + (typeof scene.customVoxelCount === 'number' && scene.customVoxelCount > 0 ? 1 : 0),
     updatedAt,
   }

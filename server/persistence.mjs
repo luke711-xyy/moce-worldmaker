@@ -232,7 +232,35 @@ function sceneSummary(scene) {
   const instances = Array.isArray(state.instances) ? state.instances : []
   const customVoxels = Array.isArray(state.customVoxels) ? state.customVoxels : []
   const assemblies = Array.isArray(state.assemblies) ? state.assemblies : []
-  const customEntityIds = new Set(customVoxels.map((voxel) => typeof voxel?.entityId === 'string' ? voxel.entityId : '__legacy_custom_entity__'))
+  const assetMap = new Map(sceneAssets.map((asset) => [asset.id, asset]))
+  const partCountForInstance = (instance) => {
+    const asset = assetMap.get(instance.assetId)
+    if (!asset || !Array.isArray(asset.voxels)) return 1
+    const resolved = new Map(asset.voxels.map((voxel) => [`${voxel.x},${voxel.y},${voxel.z}`, voxel]))
+    for (const override of Array.isArray(instance.overrides) ? instance.overrides : []) {
+      const key = `${override.x},${override.y},${override.z}`
+      if (override.mode === 'remove') resolved.delete(key)
+      else resolved.set(key, override)
+    }
+    const partVoxels = asset.partVoxels && typeof asset.partVoxels === 'object' ? asset.partVoxels : null
+    if (!partVoxels) return resolved.size ? 1 : 0
+    const claimed = new Set()
+    let count = 0
+    for (const part of Object.values(partVoxels)) {
+      if (!Array.isArray(part)) continue
+      let present = false
+      for (const voxel of part) {
+        const key = `${voxel.x},${voxel.y},${voxel.z}`
+        if (resolved.has(key)) present = true
+        claimed.add(key)
+      }
+      if (present) count += 1
+    }
+    if ([...resolved.keys()].some((key) => !claimed.has(key))) count += 1
+    return count || (resolved.size ? 1 : 0)
+  }
+  const logicalEntityCount = instances.reduce((total, instance) => total + partCountForInstance(instance), 0)
+  const customEntityIds = new Set(customVoxels.map((voxel, index) => typeof voxel?.entityId === 'string' ? voxel.entityId : `legacy-${voxel?.x},${voxel?.y},${voxel?.z}-${index}`))
   return {
     id: scene.id,
     name: state.name ?? scene.name,
@@ -241,7 +269,7 @@ function sceneSummary(scene) {
     customVoxelCount: Array.isArray(state.customVoxels) ? customVoxels.length : typeof scene.customVoxelCount === 'number' ? scene.customVoxelCount : 0,
     assemblyCount: Array.isArray(state.assemblies) ? assemblies.length : typeof scene.assemblyCount === 'number' ? scene.assemblyCount : 0,
     entityCount: Array.isArray(state.instances) || Array.isArray(state.customVoxels)
-      ? instances.length + customEntityIds.size
+      ? logicalEntityCount + customEntityIds.size
       : typeof scene.entityCount === 'number' ? scene.entityCount : (typeof scene.instanceCount === 'number' ? scene.instanceCount : 0) + (typeof scene.customVoxelCount === 'number' && scene.customVoxelCount > 0 ? 1 : 0),
     updatedAt: scene.updatedAt,
   }

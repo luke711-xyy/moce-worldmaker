@@ -71,6 +71,8 @@ export type SceneInstance = {
 export type ProjectState = {
   version: 1
   name: string
+  /** Revision of the bundled sample scene. Used only for one-time migration. */
+  sampleRevision?: number
   voxelSizeMm: number
   sceneSizeCm: number
   /** Scene envelope in project voxels: X/Y are the ground plane, Z is height. */
@@ -94,6 +96,7 @@ export type ProjectState = {
 }
 
 export const DEFAULT_ASSET_CATEGORY = '未命名类别'
+export const DEFAULT_SAMPLE_REVISION = 2
 
 export function normalizeAssetCategoryPath(path: unknown): string[] {
   if (!Array.isArray(path)) return [DEFAULT_ASSET_CATEGORY]
@@ -147,7 +150,9 @@ export function uniqueAssetName(assets: VoxelAsset[], requestedName: string): st
 
 export function uniqueTemplateAssetName(assets: VoxelAsset[], requestedName: string, excludedAssetId?: string): string {
   const baseName = requestedName.trim() || '未命名实体'
-  const existing = new Set(assets.filter((asset) => asset.id !== excludedAssetId).map((asset) => asset.name.trim()))
+  // Scene snapshots intentionally reuse the source asset name, but they are
+  // not visible in the template library and must not reserve a template name.
+  const existing = new Set(assets.filter((asset) => asset.id !== excludedAssetId && asset.isTemplate !== false).map((asset) => asset.name.trim()))
   if (!existing.has(baseName)) return baseName
   let index = 1
   while (existing.has(`${baseName} (${index})`)) index += 1
@@ -809,7 +814,7 @@ export function makeTree(id: string): VoxelAsset {
 }
 
 export function makeDefaultProject(): ProjectState {
-  const assets = [
+  const templateAssets = [
     makeHouse('house-greek', '希腊建筑·主屋', '希腊风格', '#5f83bd', '#e9e1d1'),
     makeHouse('house-indian', '印度建筑·主屋', '印度风格', '#d2a354', '#c96043'),
     makeHouse('house-chinese', '中式建筑·主屋', '中式风格', '#2e6f70', '#c96043'),
@@ -818,16 +823,47 @@ export function makeDefaultProject(): ProjectState {
     makePlaza('plaza-center'),
     makeTree('tree-basic'),
   ].map((asset) => ({ ...asset, isTemplate: true }))
+  const sceneAssets = templateAssets.map((asset) => ({
+    ...structuredClone(asset),
+    id: `scene-sample-${asset.id}`,
+    source: '初始样例场景',
+    isTemplate: false,
+    templateSourceId: asset.id,
+  }))
+  const sceneAssetId = (templateId: string) => `scene-sample-${templateId}`
   const instances: SceneInstance[] = [
-    { id: 'inst-greek', assetId: 'house-greek', x: -6, y: 0, z: -6, rotation: 0, style: '希腊风格', visible: true, overrides: [] },
-    { id: 'inst-indian', assetId: 'house-indian', x: 3, y: 0, z: -6, rotation: 0, style: '印度风格', visible: true, overrides: [] },
-    { id: 'inst-chinese', assetId: 'house-chinese', x: -6, y: 0, z: 3, rotation: 0, style: '中式风格', visible: true, overrides: [] },
-    { id: 'inst-japanese', assetId: 'house-japanese', x: 3, y: 0, z: 3, rotation: 0, style: '日式风格', visible: true, overrides: [] },
-    { id: 'inst-plaza', assetId: 'plaza-center', x: -1, y: 0, z: -1, rotation: 0, style: '基础件', visible: true, overrides: [] },
-    { id: 'inst-tree-a', assetId: 'tree-basic', x: -9, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
-    { id: 'inst-tree-b', assetId: 'tree-basic', x: 8, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
+    { id: 'inst-greek', assetId: sceneAssetId('house-greek'), x: -6, y: 0, z: -6, rotation: 0, style: '希腊风格', visible: true, overrides: [] },
+    { id: 'inst-indian', assetId: sceneAssetId('house-indian'), x: 3, y: 0, z: -6, rotation: 0, style: '印度风格', visible: true, overrides: [] },
+    { id: 'inst-chinese', assetId: sceneAssetId('house-chinese'), x: -6, y: 0, z: 3, rotation: 0, style: '中式风格', visible: true, overrides: [] },
+    { id: 'inst-japanese', assetId: sceneAssetId('house-japanese'), x: 3, y: 0, z: 3, rotation: 0, style: '日式风格', visible: true, overrides: [] },
+    { id: 'inst-plaza', assetId: sceneAssetId('plaza-center'), x: -1, y: 0, z: -1, rotation: 0, style: '基础件', visible: true, overrides: [] },
+    { id: 'inst-tree-a', assetId: sceneAssetId('tree-basic'), x: -9, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
+    { id: 'inst-tree-b', assetId: sceneAssetId('tree-basic'), x: 8, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
   ]
-  return { version: 1, name: '莫测里·第一街区', voxelSizeMm: DEFAULT_VOXEL_SIZE_MM, sceneSizeCm: 20, sceneBounds: { x: 200, y: 200, z: 200 }, materials: MATERIALS, assets, instances, customVoxels: [], customColors: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
+  return { version: 1, sampleRevision: DEFAULT_SAMPLE_REVISION, name: '莫测里·第一街区', voxelSizeMm: DEFAULT_VOXEL_SIZE_MM, sceneSizeCm: 20, sceneBounds: { x: 200, y: 200, z: 200 }, materials: MATERIALS, assets: [...templateAssets, ...sceneAssets], instances, customVoxels: [], customColors: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
+}
+
+function defaultSampleInstanceIds(project: ProjectState): boolean {
+  const expected = new Set(['inst-greek', 'inst-indian', 'inst-chinese', 'inst-japanese', 'inst-plaza', 'inst-tree-a', 'inst-tree-b'])
+  return project.instances.length === expected.size && project.instances.every((instance) => expected.has(instance.id))
+}
+
+/** Return true only for the old untouched bundled sample, not a user scene. */
+export function isLegacyDefaultSampleProject(project: ProjectState): boolean {
+  if (project.sampleRevision === DEFAULT_SAMPLE_REVISION || project.name !== '莫测里·第一街区') return false
+  if (project.customVoxels.length || (project.assemblies?.length ?? 0) || !defaultSampleInstanceIds(project)) return false
+  return project.instances.every((instance) => /^house-|^plaza-|^tree-/.test(instance.assetId))
+}
+
+/** Rebuild the old sample from current asset definitions while preserving user templates. */
+export function migrateLegacyDefaultSampleProject(project: ProjectState): ProjectState {
+  if (!isLegacyDefaultSampleProject(project)) return project
+  const fresh = makeDefaultProject()
+  const freshIds = new Set(fresh.assets.map((asset) => asset.id))
+  const preservedTemplates = project.assets
+    .filter((asset) => asset.isTemplate !== false && !freshIds.has(asset.id))
+    .map((asset) => structuredClone(asset))
+  return { ...fresh, name: project.name, assets: [...fresh.assets, ...preservedTemplates] }
 }
 
 type StlPoint = [number, number, number]
