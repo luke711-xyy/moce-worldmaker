@@ -67,6 +67,8 @@ function sceneSummary(scene: JsonRecord, id: string, updatedAt: string) {
   const sceneAssets = Array.isArray(scene.sceneAssets) ? scene.sceneAssets : []
   const instances = Array.isArray(state.instances) ? state.instances : []
   const customVoxels = Array.isArray(state.customVoxels) ? state.customVoxels : []
+  const assemblies = Array.isArray(state.assemblies) ? state.assemblies : []
+  const customEntityIds = new Set(customVoxels.map((voxel) => isRecord(voxel) && typeof voxel.entityId === 'string' ? voxel.entityId : '__legacy_custom_entity__'))
   return {
     id,
     name: typeof state.name === 'string' ? state.name : '未命名场景',
@@ -76,6 +78,10 @@ function sceneSummary(scene: JsonRecord, id: string, updatedAt: string) {
     assetCount: Array.isArray(scene.sceneAssets) ? sceneAssets.length : typeof scene.assetCount === 'number' ? scene.assetCount : 0,
     instanceCount: Array.isArray(state.instances) ? instances.length : typeof scene.instanceCount === 'number' ? scene.instanceCount : 0,
     customVoxelCount: Array.isArray(state.customVoxels) ? customVoxels.length : typeof scene.customVoxelCount === 'number' ? scene.customVoxelCount : 0,
+    assemblyCount: Array.isArray(state.assemblies) ? assemblies.length : typeof scene.assemblyCount === 'number' ? scene.assemblyCount : 0,
+    entityCount: Array.isArray(state.instances) || Array.isArray(state.customVoxels)
+      ? instances.length + customEntityIds.size
+      : typeof scene.entityCount === 'number' ? scene.entityCount : (typeof scene.instanceCount === 'number' ? scene.instanceCount : 0) + (typeof scene.customVoxelCount === 'number' && scene.customVoxelCount > 0 ? 1 : 0),
     updatedAt,
   }
 }
@@ -250,7 +256,13 @@ async function projectFromScene(env: Env & { DB: D1Database; BLOBS: R2Bucket }, 
   const embeddedAssets = Array.isArray(sceneFile.sceneAssets) ? structuredClone(sceneFile.sceneAssets) as JsonRecord[] : []
   const embeddedIds = new Set(embeddedAssets.map((asset) => asset.id))
   const templateRows = await listObjects(env, owner, 'asset')
-  const templateAssets = await Promise.all(templateRows.filter((row) => !embeddedIds.has(row.id)).map((row) => getJsonBlob<JsonRecord>(env, row.blob_key)))
+  // A historical D1 migration can leave a summary row whose R2 blob is
+  // missing. Such a template must not prevent embedded scene entities from
+  // loading; skip only the unavailable template and keep the scene usable.
+  const templateAssets = (await Promise.allSettled(templateRows
+    .filter((row) => !embeddedIds.has(row.id))
+    .map((row) => getJsonBlob<JsonRecord>(env, row.blob_key))))
+    .flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])
   const scene = structuredClone(sceneFile.scene) as JsonRecord
   return {
     ...scene,
@@ -268,14 +280,22 @@ async function handleApi(request: Request, env: Env, owner: string): Promise<Res
   const route = url.pathname.replace(/\/$/, '')
 
   if (request.method === 'GET' && route === '/api/library') {
-    const [assets, scenes, assetCategories] = await Promise.all([
+    const [assets, sceneRows, assetCategories] = await Promise.all([
       listObjects(env, owner, 'asset'),
       listObjects(env, owner, 'scene'),
       categoryPaths(env, owner),
     ])
+    const scenes = await Promise.all(sceneRows.map(async (row) => {
+      try {
+        return sceneSummary(await getJsonBlob<JsonRecord>(env, row.blob_key), row.id, row.updated_at)
+      } catch {
+        // Preserve a usable summary for legacy records whose blob is missing.
+        return sceneSummary(JSON.parse(row.summary_json) as JsonRecord, row.id, row.updated_at)
+      }
+    }))
     return json({
       assets: assets.map((row) => assetSummary(JSON.parse(row.summary_json) as JsonRecord, row.updated_at)),
-      scenes: scenes.map((row) => sceneSummary(JSON.parse(row.summary_json) as JsonRecord, row.id, row.updated_at)),
+      scenes,
       assetCategories,
     }, 200, request, env)
   }

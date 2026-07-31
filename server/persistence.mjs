@@ -225,12 +225,18 @@ function sceneSummary(scene) {
   const sceneAssets = Array.isArray(scene.sceneAssets) ? scene.sceneAssets : []
   const instances = Array.isArray(state.instances) ? state.instances : []
   const customVoxels = Array.isArray(state.customVoxels) ? state.customVoxels : []
+  const assemblies = Array.isArray(state.assemblies) ? state.assemblies : []
+  const customEntityIds = new Set(customVoxels.map((voxel) => typeof voxel?.entityId === 'string' ? voxel.entityId : '__legacy_custom_entity__'))
   return {
     id: scene.id,
     name: state.name ?? scene.name,
     assetCount: Array.isArray(scene.sceneAssets) ? sceneAssets.length : typeof scene.assetCount === 'number' ? scene.assetCount : scene.assetIds?.length ?? 0,
     instanceCount: Array.isArray(state.instances) ? instances.length : typeof scene.instanceCount === 'number' ? scene.instanceCount : 0,
     customVoxelCount: Array.isArray(state.customVoxels) ? customVoxels.length : typeof scene.customVoxelCount === 'number' ? scene.customVoxelCount : 0,
+    assemblyCount: Array.isArray(state.assemblies) ? assemblies.length : typeof scene.assemblyCount === 'number' ? scene.assemblyCount : 0,
+    entityCount: Array.isArray(state.instances) || Array.isArray(state.customVoxels)
+      ? instances.length + customEntityIds.size
+      : typeof scene.entityCount === 'number' ? scene.entityCount : (typeof scene.instanceCount === 'number' ? scene.instanceCount : 0) + (typeof scene.customVoxelCount === 'number' && scene.customVoxelCount > 0 ? 1 : 0),
     updatedAt: scene.updatedAt,
   }
 }
