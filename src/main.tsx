@@ -12,6 +12,7 @@ import { SceneOccupancyIndex } from './runtime/spatial-index'
 import { AssetTransformCache } from './runtime/asset-transform-cache'
 import { raycastVoxelDda } from './runtime/voxel-dda'
 import { ChunkMeshWorkerClient } from './runtime/chunk-mesh-client'
+import { previewVoxelKey, selectPreviewVoxels } from './preview-voxels'
 import './styles.css'
 
 declare global {
@@ -3244,12 +3245,17 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
 
 function VoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, materialColors = {} }: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string> }) {
   if (!voxels.length) return <div className="mini-preview-empty">暂无预览</div>
-  const minX = Math.min(...voxels.map((voxel) => voxel.x))
-  const minY = Math.min(...voxels.map((voxel) => voxel.y))
-  const minZ = Math.min(...voxels.map((voxel) => voxel.z))
-  const maxX = Math.max(...voxels.map((voxel) => voxel.x))
-  const maxY = Math.max(...voxels.map((voxel) => voxel.y))
-  const maxZ = Math.max(...voxels.map((voxel) => voxel.z))
+  const previewSelection = selectPreviewVoxels(voxels)
+  const previewVoxels = previewSelection.voxels
+  const bounds = voxels.slice(1).reduce((result, voxel) => ({
+    minX: Math.min(result.minX, voxel.x),
+    minY: Math.min(result.minY, voxel.y),
+    minZ: Math.min(result.minZ, voxel.z),
+    maxX: Math.max(result.maxX, voxel.x),
+    maxY: Math.max(result.maxY, voxel.y),
+    maxZ: Math.max(result.maxZ, voxel.z),
+  }), { minX: voxels[0].x, minY: voxels[0].y, minZ: voxels[0].z, maxX: voxels[0].x, maxY: voxels[0].y, maxZ: voxels[0].z })
+  const { minX, minY, minZ, maxX, maxY, maxZ } = bounds
   const spanX = Math.max(1, maxX - minX + 1)
   const spanY = Math.max(1, maxY - minY + 1)
   const spanZ = Math.max(1, maxZ - minZ + 1)
@@ -3278,10 +3284,9 @@ function VoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, mate
     const channels = [0, 2, 4].map((offset) => Math.max(0, Math.min(255, Math.round(parseInt(color.slice(offset + 1, offset + 3), 16) * amount))))
     return `#${channels.map((channel) => channel.toString(16).padStart(2, '0')).join('')}`
   }
-  const orderedVoxels = voxels.slice(0, 600).map((voxel) => ({ ...voxel, sourceVoxel: voxel, x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ }))
+  const orderedVoxels = previewVoxels.map((voxel) => ({ ...voxel, sourceVoxel: voxel, x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ }))
     .sort((left, right) => (left.x + left.z + left.y * 0.02) - (right.x + right.z + right.y * 0.02))
-  const voxelKeys = new Set(orderedVoxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
-  const hasVoxel = (x: number, y: number, z: number) => voxelKeys.has(`${x},${y},${z}`)
+  const hasVoxel = (x: number, y: number, z: number) => previewSelection.occupancyKeys.has(previewVoxelKey({ x: x + minX, y: y + minY, z: z + minZ }))
   return <div className="mini-preview" aria-label="固定斜前方实体预览"><svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet" role="img" aria-label="组合式 3D 体素预览">
     {orderedVoxels.map((voxel, index) => {
       const p000 = project(voxel.x, voxel.y, voxel.z)
