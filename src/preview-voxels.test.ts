@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { selectPreviewVoxels } from './preview-voxels'
+import { mergePreviewFaceCells, selectPreviewVoxels } from './preview-voxels'
 import { Voxel } from './voxel'
 
 function cube(size: number): Voxel[] {
@@ -26,5 +26,12 @@ describe('体素预览采样', () => {
     expect(result.voxels.some((voxel) => voxel.x === 19)).toBe(true)
     expect(result.voxels.some((voxel) => voxel.y === 19)).toBe(true)
     expect(result.voxels.some((voxel) => voxel.z === 19)).toBe(true)
+  })
+
+  it('merges adjacent coplanar faces into one preview rectangle', () => {
+    const cells = [0, 1, 2, 3].map((a) => ({ orientation: 'top' as const, plane: 1, a, b: 0, color: '#d2a354', sortKey: a }))
+    const rectangles = mergePreviewFaceCells(cells)
+    expect(rectangles).toHaveLength(1)
+    expect(rectangles[0]).toMatchObject({ a: 0, b: 0, width: 4, height: 1 })
   })
 })

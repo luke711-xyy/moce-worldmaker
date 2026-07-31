@@ -221,12 +221,16 @@ function uniqueStoredAssetName(database, asset) {
 }
 
 function sceneSummary(scene) {
+  const state = scene.scene && typeof scene.scene === 'object' ? scene.scene : scene
+  const sceneAssets = Array.isArray(scene.sceneAssets) ? scene.sceneAssets : []
+  const instances = Array.isArray(state.instances) ? state.instances : []
+  const customVoxels = Array.isArray(state.customVoxels) ? state.customVoxels : []
   return {
     id: scene.id,
-    name: scene.scene?.name ?? scene.name,
-    assetCount: scene.sceneAssets?.length ?? scene.assetIds?.length ?? 0,
-    instanceCount: scene.scene?.instances?.length ?? scene.instances?.length ?? 0,
-    customVoxelCount: scene.scene?.customVoxels?.length ?? scene.customVoxels?.length ?? 0,
+    name: state.name ?? scene.name,
+    assetCount: Array.isArray(scene.sceneAssets) ? sceneAssets.length : typeof scene.assetCount === 'number' ? scene.assetCount : scene.assetIds?.length ?? 0,
+    instanceCount: Array.isArray(state.instances) ? instances.length : typeof scene.instanceCount === 'number' ? scene.instanceCount : 0,
+    customVoxelCount: Array.isArray(state.customVoxels) ? customVoxels.length : typeof scene.customVoxelCount === 'number' ? scene.customVoxelCount : 0,
     updatedAt: scene.updatedAt,
   }
 }

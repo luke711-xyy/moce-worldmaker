@@ -47,7 +47,7 @@ type NormalizedTriangle = Omit<ModelTriangle, 'a' | 'b' | 'c'> & {
 }
 
 const DEFAULT_TARGET_SIZE_MM = 32
-const MAX_TARGET_SIZE_MM = 256
+export const MAX_TARGET_SIZE_MM = 256
 const SURFACE_DISTANCE_SQ = 0.75 // half the diagonal of a 1 mm voxel, squared
 const EPSILON = 1e-7
 

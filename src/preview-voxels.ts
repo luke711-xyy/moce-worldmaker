@@ -1,6 +1,13 @@
 import { Voxel } from './voxel'
+import { MAX_TARGET_SIZE_MM } from './model-import'
 
-export const MAX_PREVIEW_VOXELS = 3200
+/**
+ * At 1 mm resolution, a solid model at the maximum import dimension has at
+ * most this many cells on its six outer faces. The preview renders visible
+ * surface cells, so this is a useful upper bound without tying the preview to
+ * the full 256^3 internal volume.
+ */
+export const MAX_PREVIEW_VOXELS = 6 * MAX_TARGET_SIZE_MM * MAX_TARGET_SIZE_MM
 
 export type PreviewVoxelSelection = {
   voxels: Voxel[]
@@ -9,8 +16,69 @@ export type PreviewVoxelSelection = {
   occupancyKeys: Set<string>
 }
 
+export type PreviewFaceOrientation = 'top' | 'x' | 'z'
+
+export type PreviewFaceCell = {
+  orientation: PreviewFaceOrientation
+  plane: number
+  a: number
+  b: number
+  color: string
+  sortKey: number
+}
+
+export type PreviewFaceRect = PreviewFaceCell & {
+  width: number
+  height: number
+}
+
 export function previewVoxelKey(voxel: Pick<Voxel, 'x' | 'y' | 'z'>): string {
   return `${voxel.x},${voxel.y},${voxel.z}`
+}
+
+/** Merge coplanar same-color unit faces into rectangles for SVG rendering. */
+export function mergePreviewFaceCells(cells: PreviewFaceCell[]): PreviewFaceRect[] {
+  const groups = new Map<string, Map<string, PreviewFaceCell>>()
+  cells.forEach((cell) => {
+    const groupKey = `${cell.orientation}:${cell.plane}`
+    const group = groups.get(groupKey) ?? new Map<string, PreviewFaceCell>()
+    group.set(`${cell.a},${cell.b}`, cell)
+    groups.set(groupKey, group)
+  })
+
+  const rectangles: PreviewFaceRect[] = []
+  groups.forEach((remaining) => {
+    while (remaining.size) {
+      const first = remaining.values().next().value as PreviewFaceCell
+      let width = 1
+      while (true) {
+        const candidate = remaining.get(`${first.a + width},${first.b}`)
+        if (!candidate || candidate.color !== first.color) break
+        width += 1
+      }
+
+      let height = 1
+      while (true) {
+        let completeRow = true
+        for (let offset = 0; offset < width; offset += 1) {
+          const candidate = remaining.get(`${first.a + offset},${first.b + height}`)
+          if (!candidate || candidate.color !== first.color) {
+            completeRow = false
+            break
+          }
+        }
+        if (!completeRow) break
+        height += 1
+      }
+
+      for (let row = 0; row < height; row += 1) for (let column = 0; column < width; column += 1) {
+        remaining.delete(`${first.a + column},${first.b + row}`)
+      }
+      rectangles.push({ ...first, width, height })
+    }
+  })
+
+  return rectangles.sort((left, right) => left.sortKey - right.sortKey)
 }
 
 /**
@@ -18,9 +86,10 @@ export function previewVoxelKey(voxel: Pick<Voxel, 'x' | 'y' | 'z'>): string {
  *
  * The old preview used voxels.slice(0, 600), which made large imported models
  * look truncated because the view box still represented the whole asset. For
- * large models, render exposed cells and reduce them by spatial buckets. This
- * keeps the whole silhouette and all extrema while keeping DOM/SVG work
- * bounded. The source occupancy remains available for face occlusion.
+ * large models, render exposed cells and reduce them by a stable spatially
+ * distributed ranking. This keeps the whole silhouette and all extrema while
+ * keeping DOM/SVG work bounded. The source occupancy remains available for
+ * face occlusion.
  */
 export function selectPreviewVoxels(voxels: Voxel[], maxVoxels = MAX_PREVIEW_VOXELS): PreviewVoxelSelection {
   const unique = new Map<string, Voxel>()
@@ -48,7 +117,6 @@ export function selectPreviewVoxels(voxels: Voxel[], maxVoxels = MAX_PREVIEW_VOX
     maxZ: Math.max(result.maxZ, voxel.z),
   }), { minX: first.x, minY: first.y, minZ: first.z, maxX: first.x, maxY: first.y, maxZ: first.z })
   const { minX, minY, minZ, maxX, maxY, maxZ } = extents
-  const maxSpan = Math.max(maxX - minX + 1, maxY - minY + 1, maxZ - minZ + 1)
   const required = new Map<string, Voxel>()
   const keepExtremum = (predicate: (voxel: Voxel) => boolean) => {
     const voxel = source.find(predicate)
@@ -60,30 +128,27 @@ export function selectPreviewVoxels(voxels: Voxel[], maxVoxels = MAX_PREVIEW_VOX
   keepExtremum((voxel) => voxel.y === maxY)
   keepExtremum((voxel) => voxel.z === minZ)
   keepExtremum((voxel) => voxel.z === maxZ)
-  let stride = Math.max(1, Math.ceil(Math.cbrt(source.length / maxVoxels)))
-  let sampled: Voxel[] = []
-  while (stride <= maxSpan) {
-    const buckets = new Map<string, Voxel>()
-    source.forEach((voxel) => {
-      const key = `${Math.floor((voxel.x - minX) / stride)},${Math.floor((voxel.y - minY) / stride)},${Math.floor((voxel.z - minZ) / stride)}`
-      if (!buckets.has(key)) buckets.set(key, voxel)
-    })
-    const sampledKeys = new Set(required.keys())
-    sampled = [...required.values()]
-    for (const voxel of buckets.values()) {
-      if (sampled.length >= maxVoxels) break
-      const key = previewVoxelKey(voxel)
-      if (!sampledKeys.has(key)) {
-        sampledKeys.add(key)
-        sampled.push(voxel)
-      }
+  const stableHash = (voxel: Voxel) => {
+    let hash = 2166136261
+    hash = Math.imul(hash ^ voxel.x, 16777619)
+    hash = Math.imul(hash ^ voxel.y, 16777619)
+    hash = Math.imul(hash ^ voxel.z, 16777619)
+    return hash >>> 0
+  }
+  // Ranking all exposed voxels by a coordinate-derived hash gives a stable,
+  // near-uniform sample. Unlike one-cell-per-bucket sampling, a model that is
+  // only slightly over the limit keeps almost all of its visible cells.
+  const ranked = source.slice().sort((left, right) => stableHash(left) - stableHash(right) || previewVoxelKey(left).localeCompare(previewVoxelKey(right)))
+  const sampledKeys = new Set(required.keys())
+  const sampled = [...required.values()]
+  for (const voxel of ranked) {
+    if (sampled.length >= maxVoxels) break
+    const key = previewVoxelKey(voxel)
+    if (!sampledKeys.has(key)) {
+      sampledKeys.add(key)
+      sampled.push(voxel)
     }
-    if (sampled.length <= maxVoxels) break
-    stride += 1
   }
 
-  // Extremely sparse models can still have more spatial buckets than the
-  // budget. Keep the deterministic spatial result and trim only as a final
-  // guard; this branch is no longer dependent on source array ordering.
-  return { voxels: sampled.slice(0, maxVoxels), occupancyKeys }
+  return { voxels: sampled, occupancyKeys }
 }

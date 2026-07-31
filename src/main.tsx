@@ -12,7 +12,7 @@ import { SceneOccupancyIndex } from './runtime/spatial-index'
 import { AssetTransformCache } from './runtime/asset-transform-cache'
 import { raycastVoxelDda } from './runtime/voxel-dda'
 import { ChunkMeshWorkerClient } from './runtime/chunk-mesh-client'
-import { previewVoxelKey, selectPreviewVoxels } from './preview-voxels'
+import { mergePreviewFaceCells, previewVoxelKey, selectPreviewVoxels } from './preview-voxels'
 import './styles.css'
 
 declare global {
@@ -1891,7 +1891,7 @@ function App() {
     setAssetCategorySave({ asset: localAsset })
   }
 
-  const saveAssetToLibrary = (requestedName: string, categoryPath: string[]) => {
+  const saveAssetToLibrary = async (requestedName: string, categoryPath: string[]) => {
     if (!assetCategorySave) return
     const name = uniqueTemplateAssetName(projectRef.current.assets, requestedName.trim() || assetCategorySave.asset.name || '未命名实体')
     const asset: VoxelAsset = {
@@ -1900,8 +1900,17 @@ function App() {
       categoryPath: normalizeAssetCategoryPath(categoryPath),
       isTemplate: true,
     }
-    updateProject((draft) => { draft.assets.push(asset) })
-    void saveAsset(asset).catch(() => setPersistenceStatus('offline'))
+    try {
+      // Confirm the durable remote write before presenting the asset as saved.
+      // This prevents a refresh racing an unfinished R2/D1 request from
+      // making a just-created template appear to have disappeared.
+      await saveAsset(asset)
+      updateProject((draft) => { draft.assets.push(asset) })
+    } catch (error) {
+      setPersistenceStatus('offline')
+      setNotice(`保存实体到资产库失败 · ${error instanceof Error ? error.message : '请检查线上连接'}`)
+      return
+    }
     setAssetCategorySave(null)
     setNotice(`已保存实体到当前资产库 · ${asset.name} · ${asset.categoryPath?.join(' / ') ?? DEFAULT_ASSET_CATEGORY}`)
   }
@@ -2569,6 +2578,11 @@ function App() {
 
   const selectedColor = scenePartsDisplayColor(project, selectedEntityParts, selectedAsset)
   const previewVoxelColors = useMemo(() => {
+    // A single selected entity already carries its color/material fallback in
+    // the preview props. Building a coordinate -> color entry for every voxel
+    // here was an avoidable O(n) pass on every selection. Keep this map only
+    // for multi-entity previews, where source assets need independent colors.
+    if (selectedEntityParts.length <= 1) return {}
     const colors: Record<string, string> = {}
     selectedEntityParts.forEach((part) => {
       const instance = part.instanceId ? project.instances.find((item) => item.id === part.instanceId) : undefined
@@ -2590,6 +2604,7 @@ function App() {
     })
     return colors
   }, [project, selectedEntityParts])
+  const previewMaterialColors = useMemo(() => Object.fromEntries(project.materials.map((material) => [material.id, material.color])), [project.materials])
   const changeSelectedColor = (color: string) => {
     if (!selectedEntityParts.length) return
     const instanceIds = new Set(selectedEntityParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
@@ -2878,7 +2893,7 @@ function App() {
             <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { if (cameraControlApi) cameraControlApi.zoomOut(); else setZoomLevel((value) => clampZoomLevel(value - (value > 100 ? 50 : 10))); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${((zoomLevel - MIN_ZOOM_LEVEL) / (MAX_ZOOM_LEVEL - MIN_ZOOM_LEVEL)) * 100}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { if (cameraControlApi) cameraControlApi.zoomIn(); else setZoomLevel((value) => clampZoomLevel(value + (value >= 100 ? 50 : 10))); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{Math.round(zoomLevel)}%</span></div>
           </div>
         </section>
-        <Inspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? selectedEntityParts[0]?.colorOverride : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={Object.fromEntries(project.materials.map((material) => [material.id, material.color]))} copyPreview={copyPreview} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportEntityFile={exportSelectedEntityFile} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => setCopyPreview(null)} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
+        <Inspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportEntityFile={exportSelectedEntityFile} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => setCopyPreview(null)} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
       </main>
       {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} currentSceneId={sceneFileRef?.libraryId ?? CURRENT_SCENE_ID} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null) }} onImportScene={() => sceneLibraryImportInputRef.current?.click()} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} />}
       {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
@@ -3079,9 +3094,9 @@ function ModelImportDialog({ state, targetSizeMm, mode, preserveParts, onTargetS
   </div>
 }
 
-function VoxelThumbnail({ asset }: { asset: VoxelAsset }) {
+const VoxelThumbnail = React.memo(function VoxelThumbnail({ asset }: { asset: VoxelAsset }) {
   return <div className="thumbnail-scene" aria-label={`${asset.name} 3D 预览`}><VoxelMiniPreview voxels={asset.voxels} asset={asset} /></div>
-}
+})
 
 function SceneLibraryDialog({ library, busy, currentSceneId, selectedSceneId, selectedSceneProject, onClose, onImportScene, onLoadScene, onSelectScene, onSaveSceneEntity, onAddSceneEntityToCurrentScene, onDeleteSceneEntity, contextMenu, onContextMenu, onCloseContextMenu, onDuplicateScene, onDeleteScene }: { library: LibraryResponse; busy: boolean; currentSceneId: string; selectedSceneId: string | null; selectedSceneProject: ProjectState | null; onClose: () => void; onImportScene: () => void; onLoadScene: (id: string, name: string) => void; onSelectScene: (id: string, name: string, x: number, y: number) => void; onSaveSceneEntity: (asset: VoxelAsset) => void; onAddSceneEntityToCurrentScene: (asset: VoxelAsset) => void; onDeleteSceneEntity: (sceneId: string, entity: SceneLibraryEntity) => void | Promise<void>; contextMenu: SceneLibraryContextMenuState; onContextMenu: (sceneId: string, x: number, y: number) => void; onCloseContextMenu: () => void; onDuplicateScene: (sceneId: string, name: string) => void; onDeleteScene: (sceneId: string, name: string) => void }) {
   const [entityContextMenu, setEntityContextMenu] = useState<SceneEntityContextMenuState>(null)
@@ -3209,7 +3224,7 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
     setRotateAxis('z')
     setRotateDegrees(90)
   }, [selectedPartsKey])
-  const previewVoxels = selectedParts.flatMap((part) => part.voxels)
+  const previewVoxels = useMemo(() => selectedParts.flatMap((part) => part.voxels), [selectedParts])
   return <aside className="inspector">
     <div className="inspector-heading"><div><h2>属性</h2><p>选中对象的编辑参数</p></div><ChevronRight size={18} className="muted-icon" /></div>
     <div className="inspector-section entity-summary-section">
@@ -3243,7 +3258,7 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
   </aside>
 }
 
-function VoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, materialColors = {} }: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string> }) {
+const VoxelMiniPreview = React.memo(function VoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, materialColors = {} }: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string> }) {
   if (!voxels.length) return <div className="mini-preview-empty">暂无预览</div>
   const previewSelection = selectPreviewVoxels(voxels)
   const previewVoxels = previewSelection.voxels
@@ -3284,29 +3299,37 @@ function VoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, mate
     const channels = [0, 2, 4].map((offset) => Math.max(0, Math.min(255, Math.round(parseInt(color.slice(offset + 1, offset + 3), 16) * amount))))
     return `#${channels.map((channel) => channel.toString(16).padStart(2, '0')).join('')}`
   }
-  const orderedVoxels = previewVoxels.map((voxel) => ({ ...voxel, sourceVoxel: voxel, x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ }))
-    .sort((left, right) => (left.x + left.z + left.y * 0.02) - (right.x + right.z + right.y * 0.02))
   const hasVoxel = (x: number, y: number, z: number) => previewSelection.occupancyKeys.has(previewVoxelKey({ x: x + minX, y: y + minY, z: z + minZ }))
+  const faceCells = previewVoxels.flatMap((sourceVoxel) => {
+    const voxel = { ...sourceVoxel, x: sourceVoxel.x - minX, y: sourceVoxel.y - minY, z: sourceVoxel.z - minZ, sourceVoxel }
+    const cells = []
+    const color = materialColor(voxel)
+    if (!hasVoxel(voxel.x, voxel.y + 1, voxel.z)) cells.push({ orientation: 'top' as const, plane: voxel.y + 1, a: voxel.x, b: voxel.z, color, sortKey: voxel.x + voxel.z + voxel.y * 0.02 })
+    if (!hasVoxel(voxel.x + 1, voxel.y, voxel.z)) cells.push({ orientation: 'x' as const, plane: voxel.x + 1, a: voxel.z, b: voxel.y, color, sortKey: voxel.x + voxel.z + voxel.y * 0.02 })
+    if (!hasVoxel(voxel.x, voxel.y, voxel.z + 1)) cells.push({ orientation: 'z' as const, plane: voxel.z + 1, a: voxel.x, b: voxel.y, color, sortKey: voxel.x + voxel.z + voxel.y * 0.02 })
+    return cells
+  })
+  const faceRects = mergePreviewFaceCells(faceCells)
+  const facePoints = (face: typeof faceRects[number]): Array<[number, number]> => {
+    if (face.orientation === 'top') return [project(face.a, face.plane, face.b), project(face.a + face.width, face.plane, face.b), project(face.a + face.width, face.plane, face.b + face.height), project(face.a, face.plane, face.b + face.height)]
+    if (face.orientation === 'x') return [project(face.plane, face.b, face.a), project(face.plane, face.b + face.height, face.a), project(face.plane, face.b + face.height, face.a + face.width), project(face.plane, face.b, face.a + face.width)]
+    return [project(face.a, face.b, face.plane), project(face.a + face.width, face.b, face.plane), project(face.a + face.width, face.b + face.height, face.plane), project(face.a, face.b + face.height, face.plane)]
+  }
+  const points = (values: Array<[number, number]>) => values.map(([x, y]) => `${x},${y}`).join(' ')
+  // One SVG polygon per visible face is still expensive for imported models.
+  // Group faces by final shaded color into compound paths: the browser parses
+  // a handful of paths instead of thousands of React/SVG elements, while the
+  // greedy rectangles above preserve the exact visible silhouette.
+  const facePaths = new Map<string, string>()
+  faceRects.forEach((face) => {
+    const fill = shadeColor(face.color, face.orientation === 'top' ? 1 : face.orientation === 'x' ? 0.72 : 0.54)
+    const path = `M ${points(facePoints(face)).replaceAll(' ', ' L ')} Z `
+    facePaths.set(fill, `${facePaths.get(fill) ?? ''}${path}`)
+  })
   return <div className="mini-preview" aria-label="固定斜前方实体预览"><svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet" role="img" aria-label="组合式 3D 体素预览">
-    {orderedVoxels.map((voxel, index) => {
-      const p000 = project(voxel.x, voxel.y, voxel.z)
-      const p100 = project(voxel.x + 1, voxel.y, voxel.z)
-      const p010 = project(voxel.x, voxel.y + 1, voxel.z)
-      const p110 = project(voxel.x + 1, voxel.y + 1, voxel.z)
-      const p001 = project(voxel.x, voxel.y, voxel.z + 1)
-      const p101 = project(voxel.x + 1, voxel.y, voxel.z + 1)
-      const p011 = project(voxel.x, voxel.y + 1, voxel.z + 1)
-      const p111 = project(voxel.x + 1, voxel.y + 1, voxel.z + 1)
-      const color = materialColor(voxel)
-      const points = (values: Array<[number, number]>) => values.map(([x, y]) => `${x},${y}`).join(' ')
-      return <g key={`${voxel.x}-${voxel.y}-${voxel.z}-${index}`}>
-        {!hasVoxel(voxel.x, voxel.y + 1, voxel.z) && <polygon points={points([p010, p110, p111, p011])} fill={color} />}
-        {!hasVoxel(voxel.x + 1, voxel.y, voxel.z) && <polygon points={points([p100, p110, p111, p101])} fill={shadeColor(color, 0.72)} />}
-        {!hasVoxel(voxel.x, voxel.y, voxel.z + 1) && <polygon points={points([p001, p101, p111, p011])} fill={shadeColor(color, 0.54)} />}
-      </g>
-    })}
+    {[...facePaths].map(([fill, d]) => <path key={fill} d={d} fill={fill} />)}
   </svg></div>
-}
+})
 
 function TransformRow({ icon, label, values, editable, onChange }: { icon: React.ReactNode; label: string; values: number[]; editable: boolean; onChange: (axis: number, value: number) => void }) {
   return <div className="transform-row"><div className="transform-label">{icon}{label}</div><div className="transform-values">{values.map((value, index) => <label key={index}><span>{['X', 'Y', 'Z'][index]}</span><input aria-label={`位置 ${['X', 'Y', 'Z'][index]}`} type="number" step="0.1" value={Number(value.toFixed(3))} disabled={!editable} onChange={(event) => onChange(index, Number(event.target.value))} /></label>)}</div></div>

@@ -70,9 +70,12 @@ function sceneSummary(scene: JsonRecord, id: string, updatedAt: string) {
   return {
     id,
     name: typeof state.name === 'string' ? state.name : '未命名场景',
-    assetCount: sceneAssets.length,
-    instanceCount: instances.length,
-    customVoxelCount: customVoxels.length,
+    // /api/library reads summary_json from D1, while import/save responses
+    // pass the complete scene file. Support both shapes; treating a summary
+    // as a full scene was the reason every scene was displayed as 0 entities.
+    assetCount: Array.isArray(scene.sceneAssets) ? sceneAssets.length : typeof scene.assetCount === 'number' ? scene.assetCount : 0,
+    instanceCount: Array.isArray(state.instances) ? instances.length : typeof scene.instanceCount === 'number' ? scene.instanceCount : 0,
+    customVoxelCount: Array.isArray(state.customVoxels) ? customVoxels.length : typeof scene.customVoxelCount === 'number' ? scene.customVoxelCount : 0,
     updatedAt,
   }
 }
