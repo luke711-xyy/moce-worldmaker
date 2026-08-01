@@ -13,6 +13,7 @@ import { AssetTransformCache } from './runtime/asset-transform-cache'
 import { raycastVoxelDda } from './runtime/voxel-dda'
 import { ChunkMeshWorkerClient } from './runtime/chunk-mesh-client'
 import { mergePreviewFaceCells, previewVoxelKey, selectPreviewVoxels } from './preview-voxels'
+import { clearLocalSceneDraft, LocalSceneDraft, LocalSceneRef, readLocalSceneDraft, readLocalSceneRef, writeLocalSceneDraft, writeLocalSceneRef } from './local-scene-session'
 import './styles.css'
 
 declare global {
@@ -163,10 +164,7 @@ type PendingEntityImport = {
   entityCount: number
 }
 
-type SceneFileRef = {
-  name: string
-  libraryId?: string
-}
+type SceneFileRef = LocalSceneRef
 
 type UnsavedDecision = 'cancel' | 'save' | 'discard'
 
@@ -573,6 +571,12 @@ function sceneNameFromFileName(fileName: string, fallback = '未命名场景'): 
   return baseName || fallback
 }
 
+function sameSceneRef(left: SceneFileRef | null, right: SceneFileRef | null): boolean {
+  if (left?.libraryId || right?.libraryId) return Boolean(left?.libraryId && right?.libraryId && left.libraryId === right.libraryId)
+  if (!left || !right) return !left && !right
+  return left.name.trim() === right.name.trim()
+}
+
 function assetCategoryTreeFromAssetsAndPaths(assets: VoxelAsset[], paths: string[][]): AssetCategoryNode[] {
   return buildAssetCategoryTree([
     ...paths.map((path) => ({ path })),
@@ -625,6 +629,7 @@ function App() {
   const [assetCategoryPaths, setAssetCategoryPaths] = useState<string[][]>(() => collectAssetCategoryPaths(makeDefaultProject().assets))
   const [assetCategorySave, setAssetCategorySave] = useState<AssetCategorySaveState>(null)
   const persistenceReadyRef = useRef(false)
+  const localDraftRevisionRef = useRef(0)
   const interactionActiveRef = useRef(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sceneLibraryImportInputRef = useRef<HTMLInputElement>(null)
@@ -925,31 +930,71 @@ function App() {
 
   useEffect(() => {
     let cancelled = false
-    loadScene(CURRENT_SCENE_ID).then((loaded) => {
+    const restoreSession = async () => {
+      const storedRef = readLocalSceneRef()
+      let loaded: ProjectState | null = null
+      let loadedFromCurrentScene = false
+      if (storedRef?.libraryId) {
+        try {
+          loaded = await loadScene(storedRef.libraryId)
+        } catch {
+          writeLocalSceneRef(null)
+        }
+      }
+      if (!loaded) {
+        try {
+          loaded = await loadScene(CURRENT_SCENE_ID)
+          loadedFromCurrentScene = true
+        } catch {
+          loaded = null
+        }
+      }
       if (cancelled) return
-      const migratedDefault = isLegacyDefaultSampleProject(loaded)
-      const normalized = normalizeStoredProject(loaded)
-      replaceProject(normalized, false)
-      setRecentMaterialIds(normalized.materials.slice(0, 8).map((material) => material.id))
-      setSelectedId(normalized.instances[0]?.id ?? sceneEntityParts(normalized)[0]?.id ?? '')
+
+      const normalized = normalizeStoredProject(loaded ?? projectRef.current)
+      const migratedDefault = loadedFromCurrentScene && isLegacyDefaultSampleProject(loaded as ProjectState)
+      const activeRef: SceneFileRef | null = loaded
+        ? storedRef?.libraryId && !loadedFromCurrentScene
+          ? { ...storedRef, name: normalized.name }
+          : { name: normalized.name, libraryId: CURRENT_SCENE_ID }
+        : null
+      const draft = await readLocalSceneDraft()
+      let restored = normalized
+      let recoveredDraft = false
+      const draftRef = storedRef ?? activeRef
+      if (draft && sameSceneRef(draft.ref, draftRef)) {
+        try {
+          const draftProject = normalizeStoredProject(restoreProject(draft.sceneFile))
+          const draftIds = new Set(draftProject.assets.map((asset) => asset.id))
+          const templateAssets = normalized.assets.filter((asset) => asset.isTemplate !== false && !draftIds.has(asset.id))
+          restored = { ...draftProject, assets: [...draftProject.assets, ...structuredClone(templateAssets)] }
+          recoveredDraft = true
+        } catch {
+          await clearLocalSceneDraft()
+        }
+      }
+      if (cancelled) return
+      replaceProject(restored, false)
+      setRecentMaterialIds(restored.materials.slice(0, 8).map((material) => material.id))
+      setSelectedId(restored.instances[0]?.id ?? sceneEntityParts(restored)[0]?.id ?? '')
       persistenceReadyRef.current = true
-      setPersistenceStatus('saved')
-      markSceneSaved(normalized, null)
-      if (migratedDefault) {
+      setPersistenceStatus(loaded ? 'saved' : 'offline')
+      setSavedSceneSignature(sceneContentSignature(normalized))
+      setSceneFileRef(activeRef)
+      if (migratedDefault && loaded) {
         void saveScene(CURRENT_SCENE_ID, createSceneFile(normalized)).catch(() => setPersistenceStatus('offline'))
       }
-      setNotice(`已加载场景 · ${normalized.name}`)
-    }).catch(async (error: unknown) => {
+      if (recoveredDraft) setNotice(`已恢复上次未保存编辑 · ${restored.name}`)
+      else if (loaded) setNotice(`已加载场景 · ${normalized.name}`)
+      else setNotice('已加载默认场景 · 尚未保存到场景库')
+    }
+    void restoreSession().catch(() => {
       if (cancelled) return
-      if (error instanceof Error && error.message.includes('场景不存在')) {
-        persistenceReadyRef.current = true
-        setPersistenceStatus('saved')
-        markSceneSaved(projectRef.current, null)
-        setNotice('已加载默认场景 · 尚未保存到场景库')
-      } else {
-        setPersistenceStatus('offline')
-        setNotice('后端连接失败 · 当前使用本地草稿')
-      }
+      persistenceReadyRef.current = true
+      setPersistenceStatus('offline')
+      setSavedSceneSignature(sceneContentSignature(projectRef.current))
+      setSceneFileRef(null)
+      setNotice('后端连接失败 · 当前使用本地草稿')
     })
     return () => { cancelled = true }
   }, [])
@@ -963,6 +1008,35 @@ function App() {
     }).catch(() => undefined)
     return () => { cancelled = true }
   }, [])
+
+  useEffect(() => {
+    writeLocalSceneRef(sceneFileRef)
+  }, [sceneFileRef?.libraryId, sceneFileRef?.name])
+
+  useEffect(() => {
+    if (!persistenceReadyRef.current) return
+    const revision = ++localDraftRevisionRef.current
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        if (revision !== localDraftRevisionRef.current) return
+        if (!sceneDirty) {
+          await clearLocalSceneDraft()
+          return
+        }
+        try {
+          const draft: LocalSceneDraft = {
+            ref: sceneFileRef,
+            sceneFile: createSceneFile(projectRef.current),
+            updatedAt: Date.now(),
+          }
+          await writeLocalSceneDraft(draft)
+        } catch {
+          // Local recovery is best-effort and must not interrupt editing.
+        }
+      })()
+    }, 700)
+    return () => window.clearTimeout(timer)
+  }, [project, sceneDirty, savedSceneSignature, sceneFileRef?.libraryId, sceneFileRef?.name])
 
   const undoProject = () => {
     const previous = historyRef.current.past.pop()
