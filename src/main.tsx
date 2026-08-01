@@ -629,7 +629,9 @@ function App() {
   const [assetCategoryPaths, setAssetCategoryPaths] = useState<string[][]>(() => collectAssetCategoryPaths(makeDefaultProject().assets))
   const [assetCategorySave, setAssetCategorySave] = useState<AssetCategorySaveState>(null)
   const persistenceReadyRef = useRef(false)
-  const localDraftRevisionRef = useRef(0)
+  const savedSceneSignatureRef = useRef<string | null>(null)
+  const sceneFileRefRef = useRef<SceneFileRef | null>(null)
+  const exitDraftPersistedAtRef = useRef(0)
   const interactionActiveRef = useRef(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sceneLibraryImportInputRef = useRef<HTMLInputElement>(null)
@@ -806,8 +808,14 @@ function App() {
   }
 
   const markSceneSaved = (savedProject: ProjectState, fileRef?: SceneFileRef | null) => {
-    setSavedSceneSignature(sceneContentSignature(savedProject))
-    if (fileRef !== undefined) setSceneFileRef(fileRef)
+    const signature = sceneContentSignature(savedProject)
+    savedSceneSignatureRef.current = signature
+    setSavedSceneSignature(signature)
+    if (fileRef !== undefined) {
+      sceneFileRefRef.current = fileRef
+      setSceneFileRef(fileRef)
+    }
+    void clearLocalSceneDraft()
   }
 
   const requestSceneReplace = (operation: () => Promise<void>) => {
@@ -979,7 +987,10 @@ function App() {
       setSelectedId(restored.instances[0]?.id ?? sceneEntityParts(restored)[0]?.id ?? '')
       persistenceReadyRef.current = true
       setPersistenceStatus(loaded ? 'saved' : 'offline')
-      setSavedSceneSignature(sceneContentSignature(normalized))
+      const savedSignature = sceneContentSignature(normalized)
+      savedSceneSignatureRef.current = savedSignature
+      setSavedSceneSignature(savedSignature)
+      sceneFileRefRef.current = activeRef
       setSceneFileRef(activeRef)
       if (migratedDefault && loaded) {
         void saveScene(CURRENT_SCENE_ID, createSceneFile(normalized)).catch(() => setPersistenceStatus('offline'))
@@ -992,7 +1003,10 @@ function App() {
       if (cancelled) return
       persistenceReadyRef.current = true
       setPersistenceStatus('offline')
-      setSavedSceneSignature(sceneContentSignature(projectRef.current))
+      const savedSignature = sceneContentSignature(projectRef.current)
+      savedSceneSignatureRef.current = savedSignature
+      setSavedSceneSignature(savedSignature)
+      sceneFileRefRef.current = null
       setSceneFileRef(null)
       setNotice('后端连接失败 · 当前使用本地草稿')
     })
@@ -1011,32 +1025,46 @@ function App() {
 
   useEffect(() => {
     writeLocalSceneRef(sceneFileRef)
+    sceneFileRefRef.current = sceneFileRef
   }, [sceneFileRef?.libraryId, sceneFileRef?.name])
 
   useEffect(() => {
-    if (!persistenceReadyRef.current) return
-    const revision = ++localDraftRevisionRef.current
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        if (revision !== localDraftRevisionRef.current) return
-        if (!sceneDirty) {
-          await clearLocalSceneDraft()
+    savedSceneSignatureRef.current = savedSceneSignature
+  }, [savedSceneSignature])
+
+  useEffect(() => {
+    const persistDraftBeforeExit = () => {
+      if (!persistenceReadyRef.current) return
+      const now = Date.now()
+      if (now - exitDraftPersistedAtRef.current < 250) return
+      exitDraftPersistedAtRef.current = now
+      try {
+        const snapshot = projectRef.current
+        const sceneFile = createSceneFile(snapshot)
+        if (savedSceneSignatureRef.current && sceneContentSignature(snapshot) === savedSceneSignatureRef.current) {
+          void clearLocalSceneDraft()
           return
         }
-        try {
-          const draft: LocalSceneDraft = {
-            ref: sceneFileRef,
-            sceneFile: createSceneFile(projectRef.current),
-            updatedAt: Date.now(),
-          }
-          await writeLocalSceneDraft(draft)
-        } catch {
-          // Local recovery is best-effort and must not interrupt editing.
+        const draft: LocalSceneDraft = {
+          ref: sceneFileRefRef.current,
+          sceneFile,
+          updatedAt: now,
         }
-      })()
-    }, 700)
-    return () => window.clearTimeout(timer)
-  }, [project, sceneDirty, savedSceneSignature, sceneFileRef?.libraryId, sceneFileRef?.name])
+        void writeLocalSceneDraft(draft)
+      } catch {
+        // Exit-time recovery is best-effort and must never block page closing.
+      }
+    }
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') persistDraftBeforeExit()
+    }
+    window.addEventListener('pagehide', persistDraftBeforeExit)
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => {
+      window.removeEventListener('pagehide', persistDraftBeforeExit)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+  }, [])
 
   const undoProject = () => {
     const previous = historyRef.current.past.pop()
