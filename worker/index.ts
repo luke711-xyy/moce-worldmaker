@@ -334,14 +334,20 @@ async function handleApi(request: Request, env: Env, owner: string): Promise<Res
       listObjects(env, owner, 'scene'),
       categoryPaths(env, owner),
     ])
-    const scenes = await Promise.all(sceneRows.map(async (row) => {
+    // The library endpoint is a list/summary endpoint.  Do not read every
+    // complete scene blob from R2 here: a scene may contain hundreds of
+    // thousands of voxels, and rebuilding its entity count on every library
+    // open can exceed the Worker CPU limit.  The D1 row already contains the
+    // summary produced when the scene was saved, so use that as the source of
+    // truth and leave full scene loading to GET /api/scenes/:id.
+    const scenes = sceneRows.map((row) => {
       try {
-        return sceneSummary(await getJsonBlob<JsonRecord>(env, row.blob_key), row.id, row.updated_at)
-      } catch {
-        // Preserve a usable summary for legacy records whose blob is missing.
         return sceneSummary(JSON.parse(row.summary_json) as JsonRecord, row.id, row.updated_at)
+      } catch {
+        // A malformed summary must not make the whole library disappear.
+        return sceneSummary({ name: row.name }, row.id, row.updated_at)
       }
-    }))
+    })
     return json({
       assets: assets.map((row) => assetSummary(JSON.parse(row.summary_json) as JsonRecord, row.updated_at)),
       scenes,

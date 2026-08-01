@@ -613,6 +613,7 @@ function App() {
   const [libraryOpen, setLibraryOpen] = useState(false)
   const [library, setLibrary] = useState<LibraryResponse>({ assets: [], scenes: [], assetCategories: [] })
   const [libraryBusy, setLibraryBusy] = useState(false)
+  const [libraryError, setLibraryError] = useState<string | null>(null)
   const [sceneFileRef, setSceneFileRef] = useState<SceneFileRef | null>(null)
   const [savedSceneSignature, setSavedSceneSignature] = useState<string | null>(null)
   const [unsavedDialogOpen, setUnsavedDialogOpen] = useState(false)
@@ -1018,8 +1019,12 @@ function App() {
     loadLibrary().then((loaded) => {
       if (cancelled) return
       setLibrary(loaded)
+      setLibraryError(null)
       setAssetCategoryPaths(normalizeAssetCategoryPaths(loaded.assetCategories ?? [], projectRef.current.assets))
-    }).catch(() => undefined)
+    }).catch((error) => {
+      if (cancelled) return
+      setLibraryError(error instanceof Error ? error.message : '场景库加载失败')
+    })
     return () => { cancelled = true }
   }, [])
 
@@ -1903,6 +1908,7 @@ function App() {
     try {
       const loaded = await loadLibrary()
       setLibrary(loaded)
+      setLibraryError(null)
       setAssetCategoryPaths(normalizeAssetCategoryPaths(loaded.assetCategories ?? [], projectRef.current.assets))
 
       // The scene list and the entity list have separate state.  When a scene
@@ -1918,8 +1924,10 @@ function App() {
         setSelectedLibrarySceneProject(null)
         setSceneLibraryContextMenu(null)
       }
-    } catch {
-      setNotice('资产库加载失败 · 请检查后端服务')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '场景库加载失败'
+      setLibraryError(message)
+      setNotice(`场景库加载失败 · ${message}`)
     } finally {
       setLibraryBusy(false)
     }
@@ -2992,7 +3000,7 @@ function App() {
         </section>
         <Inspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportEntityFile={exportSelectedEntityFile} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => setCopyPreview(null)} onDelete={deleteSelected} onResetTransform={resetSelectedTransform} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
       </main>
-      {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null) }} onImportScene={() => sceneLibraryImportInputRef.current?.click()} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} />}
+      {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} error={libraryError} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null) }} onImportScene={() => sceneLibraryImportInputRef.current?.click()} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} />}
       {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
       {modelImportDialog && <ModelImportDialog state={modelImportDialog} targetSizeMm={modelImportTargetSize} mode={modelImportMode} preserveParts={modelImportPreserveParts} onTargetSizeChange={setModelImportTargetSize} onModeChange={setModelImportMode} onPreservePartsChange={setModelImportPreserveParts} onStart={runModelImport} onConfirm={confirmModelImport} onCancel={() => setModelImportDialog(null)} />}
       {unsavedDialogOpen && <UnsavedChangesDialog onDecision={handleUnsavedDecision} />}
@@ -3195,7 +3203,7 @@ const VoxelThumbnail = React.memo(function VoxelThumbnail({ asset }: { asset: Vo
   return <div className="thumbnail-scene" aria-label={`${asset.name} 3D 预览`}><VoxelMiniPreview voxels={asset.voxels} asset={asset} /></div>
 })
 
-function SceneLibraryDialog({ library, busy, selectedSceneId, selectedSceneProject, onClose, onImportScene, onLoadScene, onSelectScene, onSaveSceneEntity, onAddSceneEntityToCurrentScene, onDeleteSceneEntity, contextMenu, onContextMenu, onCloseContextMenu, onDuplicateScene, onDeleteScene }: { library: LibraryResponse; busy: boolean; selectedSceneId: string | null; selectedSceneProject: ProjectState | null; onClose: () => void; onImportScene: () => void; onLoadScene: (id: string, name: string) => void; onSelectScene: (id: string, name: string, x: number, y: number) => void; onSaveSceneEntity: (asset: VoxelAsset) => void; onAddSceneEntityToCurrentScene: (asset: VoxelAsset) => void; onDeleteSceneEntity: (sceneId: string, entity: SceneLibraryEntity) => void | Promise<void>; contextMenu: SceneLibraryContextMenuState; onContextMenu: (sceneId: string, x: number, y: number) => void; onCloseContextMenu: () => void; onDuplicateScene: (sceneId: string, name: string) => void; onDeleteScene: (sceneId: string, name: string) => void }) {
+function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSceneProject, onClose, onImportScene, onLoadScene, onSelectScene, onSaveSceneEntity, onAddSceneEntityToCurrentScene, onDeleteSceneEntity, contextMenu, onContextMenu, onCloseContextMenu, onDuplicateScene, onDeleteScene }: { library: LibraryResponse; busy: boolean; error: string | null; selectedSceneId: string | null; selectedSceneProject: ProjectState | null; onClose: () => void; onImportScene: () => void; onLoadScene: (id: string, name: string) => void; onSelectScene: (id: string, name: string, x: number, y: number) => void; onSaveSceneEntity: (asset: VoxelAsset) => void; onAddSceneEntityToCurrentScene: (asset: VoxelAsset) => void; onDeleteSceneEntity: (sceneId: string, entity: SceneLibraryEntity) => void | Promise<void>; contextMenu: SceneLibraryContextMenuState; onContextMenu: (sceneId: string, x: number, y: number) => void; onCloseContextMenu: () => void; onDuplicateScene: (sceneId: string, name: string) => void; onDeleteScene: (sceneId: string, name: string) => void }) {
   const [entityContextMenu, setEntityContextMenu] = useState<SceneEntityContextMenuState>(null)
   const menuCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const contextScene = contextMenu ? library.scenes.find((scene) => scene.id === contextMenu.sceneId) : undefined
@@ -3283,7 +3291,8 @@ function SceneLibraryDialog({ library, busy, selectedSceneId, selectedSceneProje
   return <div className="modal-backdrop" onPointerDown={(event) => event.target === event.currentTarget && onClose()}>
     <section className="library-dialog" role="dialog" aria-modal="true" aria-label="场景库" onPointerDown={(event) => { const target = event.target as HTMLElement; if (!target.closest('button, input, .scene-library-context-menu')) closeMenus() }}>
       <div className="library-dialog-heading"><div><h2>场景库</h2><p>场景文件与场景实体由当前工程自动管理</p></div><button className="icon-button" aria-label="关闭场景库" onClick={onClose}><X size={17} /></button></div>
-      <div className="library-dialog-toolbar"><span>{library.scenes.length} 个场景 · {selectedSceneId ? `${selectedSceneEntities.length} 个实体` : '未选择场景'}</span><div className="library-toolbar-actions"><button className="tiny-button" onClick={onImportScene} disabled={busy}><FolderOpen size={13} /> 导入场景文件</button></div></div>
+      <div className="library-dialog-toolbar"><span>{error ? '场景库暂时无法访问' : `${library.scenes.length} 个场景 · ${selectedSceneId ? `${selectedSceneEntities.length} 个实体` : '未选择场景'}`}</span><div className="library-toolbar-actions"><button className="tiny-button" onClick={onImportScene} disabled={busy}><FolderOpen size={13} /> 导入场景文件</button></div></div>
+      {error && <div className="library-error" role="alert"><span>加载失败：{error}</span><button className="tiny-button" onClick={() => window.location.reload()}>刷新页面重试</button></div>}
       <div className="library-columns">
         <div className="library-column"><div className="library-column-title">场景</div>{library.scenes.length ? library.scenes.map((scene) => <button className={`library-row ${selectedSceneId === scene.id ? 'selected' : ''}`} data-scene-id={scene.id} key={scene.id} onClick={openSceneMenu} onContextMenu={openSceneMenu}><div><strong>{scene.name}</strong><span>{scene.assemblyCount} 个装配体 · {scene.entityCount} 个实体</span></div><div className="library-row-actions"><ChevronRight size={15} /></div></button>) : <div className="empty-panel">尚无场景</div>}</div>
         <div className="library-column"><div className="library-column-title">实体</div>{!selectedSceneId ? <div className="empty-panel">请选择场景查看实体</div> : selectedSceneEntities.length ? selectedSceneEntities.map((entity) => <button className="library-row" key={entity.id} onClick={(event) => openEntityMenu(event, entity.id)} onContextMenu={(event) => openEntityMenu(event, entity.id)}><div><strong>{entity.name}</strong><span>{entity.subtitle}</span></div><ChevronRight size={15} /></button>) : <div className="empty-panel">当前场景没有可显示的实体</div>}</div>
