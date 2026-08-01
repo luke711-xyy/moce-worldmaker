@@ -941,6 +941,7 @@ function App() {
     let cancelled = false
     const restoreSession = async () => {
       const storedRef = readLocalSceneRef()
+      let resolvedRef = storedRef
       let loaded: ProjectState | null = null
       let loadedFromCurrentScene = false
       if (storedRef?.libraryId) {
@@ -954,6 +955,24 @@ function App() {
         try {
           loaded = await loadScene(CURRENT_SCENE_ID)
           loadedFromCurrentScene = true
+          resolvedRef = { name: loaded.name, libraryId: CURRENT_SCENE_ID }
+        } catch {
+          loaded = null
+        }
+      }
+      // An older browser session can retain a scene id that belongs to a
+      // different Access owner (or was deleted).  Do not silently fall back
+      // to the seven built-in assets in that case; recover the latest scene
+      // visible to the current owner so its scene assets and templates return
+      // with the session.
+      if (!loaded) {
+        try {
+          const available = await loadLibrary()
+          const fallback = available.scenes[0]
+          if (fallback) {
+            loaded = await loadScene(fallback.id)
+            resolvedRef = { name: fallback.name, libraryId: fallback.id }
+          }
         } catch {
           loaded = null
         }
@@ -963,8 +982,8 @@ function App() {
       const normalized = normalizeStoredProject(loaded ?? projectRef.current)
       const migratedDefault = loadedFromCurrentScene && isLegacyDefaultSampleProject(loaded as ProjectState)
       const activeRef: SceneFileRef | null = loaded
-        ? storedRef?.libraryId && !loadedFromCurrentScene
-          ? { ...storedRef, name: normalized.name }
+        ? !loadedFromCurrentScene && resolvedRef?.libraryId
+          ? { ...resolvedRef, name: normalized.name }
           : { name: normalized.name, libraryId: CURRENT_SCENE_ID }
         : null
       const draft = await readLocalSceneDraft()
