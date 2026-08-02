@@ -164,12 +164,18 @@ export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEn
     ...voxel,
     materialId: materialIdResolver ? materialIdResolver(voxel, part) : voxel.materialId,
   })))
-  const minX = Math.min(...sourceVoxels.map((voxel) => voxel.x), 0)
-  const minY = Math.min(...sourceVoxels.map((voxel) => voxel.y), 0)
-  const minZ = Math.min(...sourceVoxels.map((voxel) => voxel.z), 0)
-  const maxX = Math.max(...sourceVoxels.map((voxel) => voxel.x), 0)
-  const maxY = Math.max(...sourceVoxels.map((voxel) => voxel.y), 0)
-  const maxZ = Math.max(...sourceVoxels.map((voxel) => voxel.z), 0)
+  // Avoid spreading a large voxel array into Math.min/Math.max. Imported
+  // scenes can contain tens of thousands of voxels, which otherwise exceeds
+  // the browser call stack while building a scene-library preview.
+  const bounds = sourceVoxels.reduce((result, voxel) => ({
+    minX: Math.min(result.minX, voxel.x),
+    minY: Math.min(result.minY, voxel.y),
+    minZ: Math.min(result.minZ, voxel.z),
+    maxX: Math.max(result.maxX, voxel.x),
+    maxY: Math.max(result.maxY, voxel.y),
+    maxZ: Math.max(result.maxZ, voxel.z),
+  }), { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 })
+  const { minX, minY, minZ, maxX, maxY, maxZ } = bounds
   const voxels = deduplicateVoxels(sourceVoxels.map((voxel) => ({
     x: voxel.x - minX,
     y: voxel.y - minY,

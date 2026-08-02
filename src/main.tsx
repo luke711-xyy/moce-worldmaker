@@ -3225,6 +3225,19 @@ const VoxelThumbnail = React.memo(function VoxelThumbnail({ asset }: { asset: Vo
 function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSceneProject, onClose, onImportScene, onLoadScene, onSelectScene, onSaveSceneEntity, onAddSceneEntityToCurrentScene, onDeleteSceneEntity, contextMenu, onContextMenu, onCloseContextMenu, onDuplicateScene, onDeleteScene }: { library: LibraryResponse; busy: boolean; error: string | null; selectedSceneId: string | null; selectedSceneProject: ProjectState | null; onClose: () => void; onImportScene: () => void; onLoadScene: (id: string, name: string) => void; onSelectScene: (id: string, name: string, x: number, y: number) => void; onSaveSceneEntity: (asset: VoxelAsset) => void; onAddSceneEntityToCurrentScene: (asset: VoxelAsset) => void; onDeleteSceneEntity: (sceneId: string, entity: SceneLibraryEntity) => void | Promise<void>; contextMenu: SceneLibraryContextMenuState; onContextMenu: (sceneId: string, x: number, y: number) => void; onCloseContextMenu: () => void; onDuplicateScene: (sceneId: string, name: string) => void; onDeleteScene: (sceneId: string, name: string) => void }) {
   const [entityContextMenu, setEntityContextMenu] = useState<SceneEntityContextMenuState>(null)
   const menuCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const scenePreviewAsset = useMemo(() => {
+    if (!selectedSceneProject) return null
+    const parts = sceneEntityParts(selectedSceneProject)
+    if (!parts.length) return null
+    return makeAssetFromSceneParts(
+      `scene-library-preview-${selectedSceneProject.name}`,
+      selectedSceneProject.name,
+      parts,
+      '#6c827d',
+      '#d2a354',
+      (voxel, part) => scenePartVoxelDisplayColor(selectedSceneProject, part, voxel),
+    )
+  }, [selectedSceneProject])
   const contextScene = contextMenu ? library.scenes.find((scene) => scene.id === contextMenu.sceneId) : undefined
   const selectedSceneEntities = useMemo<SceneLibraryEntity[]>(() => {
     if (!selectedSceneProject) return []
@@ -3313,7 +3326,13 @@ function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSce
       <div className="library-dialog-toolbar"><span>{error ? '场景库暂时无法访问' : `${library.scenes.length} 个场景 · ${selectedSceneId ? `${selectedSceneEntities.length} 个实体` : '未选择场景'}`}</span><div className="library-toolbar-actions"><button className="tiny-button" onClick={onImportScene} disabled={busy}><FolderOpen size={13} /> 导入场景文件</button></div></div>
       {error && <div className="library-error" role="alert"><span>加载失败：{error}</span><button className="tiny-button" onClick={() => window.location.reload()}>刷新页面重试</button></div>}
       <div className="library-columns">
-        <div className="library-column"><div className="library-column-title">场景</div>{library.scenes.length ? library.scenes.map((scene) => <button className={`library-row ${selectedSceneId === scene.id ? 'selected' : ''}`} data-scene-id={scene.id} key={scene.id} onClick={openSceneMenu} onContextMenu={openSceneMenu}><div><strong>{scene.name}</strong><span>{scene.assemblyCount} 个装配体 · {scene.entityCount} 个实体</span></div><div className="library-row-actions"><ChevronRight size={15} /></div></button>) : <div className="empty-panel">尚无场景</div>}</div>
+        <div className="library-column library-scene-column">
+          <div className="library-column-title">场景</div>
+          <div className="library-scene-list">{library.scenes.length ? library.scenes.map((scene) => <button className={`library-row ${selectedSceneId === scene.id ? 'selected' : ''}`} data-scene-id={scene.id} key={scene.id} onClick={openSceneMenu} onContextMenu={openSceneMenu}><div><strong>{scene.name}</strong><span>{scene.assemblyCount} 个装配体 · {scene.entityCount} 个实体</span></div><div className="library-row-actions"><ChevronRight size={15} /></div></button>) : <div className="empty-panel">尚无场景</div>}</div>
+          <div className="library-scene-preview" aria-label="选中场景完整预览">
+            {scenePreviewAsset ? <VoxelMiniPreview voxels={scenePreviewAsset.voxels} asset={scenePreviewAsset} /> : <div className="empty-panel">请选择场景查看完整预览</div>}
+          </div>
+        </div>
         <div className="library-column"><div className="library-column-title">实体</div>{!selectedSceneId ? <div className="empty-panel">请选择场景查看实体</div> : selectedSceneEntities.length ? selectedSceneEntities.map((entity) => <button className="library-row" key={entity.id} onClick={(event) => openEntityMenu(event, entity.id)} onContextMenu={(event) => openEntityMenu(event, entity.id)}><div><strong>{entity.name}</strong><span>{entity.subtitle}</span></div><ChevronRight size={15} /></button>) : <div className="empty-panel">当前场景没有可显示的实体</div>}</div>
       </div>
       {contextScene && contextMenu && <div className="scene-library-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerEnter={cancelMenuClose} onPointerLeave={scheduleMenuClose} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}><button onClick={() => { closeMenus(); onLoadScene(contextScene.id, contextScene.name) }}>打开场景</button><button onClick={() => { closeMenus(); onDuplicateScene(contextScene.id, contextScene.name) }}>创建副本</button><button className="danger" onClick={() => { closeMenus(); onDeleteScene(contextScene.id, contextScene.name) }}>删除场景</button></div>}

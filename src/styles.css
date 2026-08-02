@@ -356,7 +356,12 @@ button { border: 0; cursor: pointer; color: inherit; }
 .library-toolbar-actions { display: flex; align-items: center; gap: 5px; }
 .library-columns { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 1px; overflow: hidden; background: #303b3d; }
 .library-column { min-height: 0; padding: 14px; overflow-y: auto; overflow-x: hidden; background: #202729; }
+.library-scene-column { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
 .library-column-title { position: sticky; top: -14px; z-index: 2; margin: -14px -14px 8px; padding: 14px 14px 8px; color: #cbd0ca; background: #202729; font-size: 11px; }
+.library-scene-column > .library-column-title { position: static; flex: 0 0 auto; margin: 0; padding: 14px 14px 8px; }
+.library-scene-list { flex: 1 1 auto; min-height: 0; padding: 0 14px 12px; overflow-y: auto; overflow-x: hidden; }
+.library-scene-preview { flex: 0 0 168px; min-height: 0; margin: 0 14px 14px; overflow: hidden; border: 1px solid #354043; background: #171d1f; }
+.library-scene-preview .mini-preview { background: radial-gradient(circle at 50% 38%, #293437 0, #171d1f 78%); }
 .library-row { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 8px; color: #aeb8b4; background: #1b2224; border: 1px solid #354043; text-align: left; }
 .library-row + .library-row { margin-top: 5px; }
 .library-row:hover { color: #fff0df; border-color: #ae5b44; background: #2c2523; }
