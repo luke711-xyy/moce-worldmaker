@@ -152,7 +152,7 @@ function sceneRecordFromFile(sceneFile, id) {
   return { ...sceneFile, id, updatedAt: new Date().toISOString() }
 }
 
-function projectFromScene(database, scene) {
+function projectFromScene(database, scene, previewOnly = false) {
   // Keep legacy direct ProjectState records readable by the scene library.
   // They must be converted to the embedded scene shape before rebuilding the
   // project, otherwise the entity pane receives no instances.
@@ -169,7 +169,9 @@ function projectFromScene(database, scene) {
       }
     })
     const sceneAssetIds = new Set(sceneAssets.map((asset) => asset.id))
-    const libraryAssets = Object.values(database.assets).filter((asset) => !sceneAssetIds.has(asset.id)).map((asset) => ({ ...structuredClone(asset), isTemplate: asset.isTemplate !== false }))
+    const libraryAssets = previewOnly
+      ? []
+      : Object.values(database.assets).filter((asset) => !sceneAssetIds.has(asset.id)).map((asset) => ({ ...structuredClone(asset), isTemplate: asset.isTemplate !== false }))
     return {
       ...structuredClone(scene.scene),
       assets: [...sceneAssets, ...libraryAssets],
@@ -351,7 +353,7 @@ export function createPersistenceMiddleware() {
       const sceneMatch = route.match(/^\/api\/scenes\/([^/]+)$/)
       if (sceneMatch && request.method === 'GET') {
         const scene = database.scenes[decodeURIComponent(sceneMatch[1])]
-        return scene ? sendJson(response, 200, projectFromScene(database, scene)) : sendJson(response, 404, { error: '场景不存在' })
+        return scene ? sendJson(response, 200, projectFromScene(database, scene, url.searchParams.get('preview') === '1')) : sendJson(response, 404, { error: '场景不存在' })
       }
 
       if (sceneMatch && (request.method === 'PUT' || request.method === 'POST')) {

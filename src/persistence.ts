@@ -43,6 +43,10 @@ export function loadScene(sceneId: string): Promise<ProjectState> {
   return request<ProjectState>(`/api/scenes/${encodeURIComponent(sceneId)}`)
 }
 
+export function loadScenePreview(sceneId: string): Promise<ProjectState> {
+  return request<ProjectState>(`/api/scenes/${encodeURIComponent(sceneId)}?preview=1`)
+}
+
 export function saveScene(sceneId: string, sceneFile: MoceSceneFile | ProjectState): Promise<{ ok: boolean; scene?: LibrarySceneSummary }> {
   const previous = sceneSaveQueues.get(sceneId) ?? Promise.resolve()
   const next = previous

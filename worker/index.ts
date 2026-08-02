@@ -297,14 +297,16 @@ async function sceneFileFromPayload(payload: unknown) {
   return parseSceneFile(payload)
 }
 
-async function projectFromScene(env: Env & { DB: D1Database; BLOBS: R2Bucket }, owner: string, sceneFile: JsonRecord) {
+async function projectFromScene(env: Env & { DB: D1Database; BLOBS: R2Bucket }, owner: string, sceneFile: JsonRecord, previewOnly = false) {
   // Older records stored the complete ProjectState directly. Normalize both
   // shapes here so the scene library entity pane receives instances/assets
   // instead of an empty project when a legacy scene is selected.
   const portable = parseSceneFile(sceneFile) as unknown as JsonRecord
   const embeddedAssets = Array.isArray(portable.sceneAssets) ? structuredClone(portable.sceneAssets) as JsonRecord[] : []
   const embeddedIds = new Set(embeddedAssets.map((asset) => asset.id))
-  const templateRows = await listObjects(env, owner, 'asset')
+  const templateRows = previewOnly
+    ? []
+    : await listObjects(env, owner, 'asset')
   // A historical D1 migration can leave a summary row whose R2 blob is
   // missing. Such a template must not prevent embedded scene entities from
   // loading; skip only the unavailable template and keep the scene usable.
@@ -399,7 +401,7 @@ async function handleApi(request: Request, env: Env, owner: string): Promise<Res
     const row = await getObject(env, owner, 'scene', id)
     if (request.method === 'GET') {
       if (!row) return errorResponse(new Error('场景不存在'), 404, request, env)
-      return json(await projectFromScene(env, owner, await getJsonBlob<JsonRecord>(env, row.blob_key)), 200, request, env)
+      return json(await projectFromScene(env, owner, await getJsonBlob<JsonRecord>(env, row.blob_key), url.searchParams.get('preview') === '1'), 200, request, env)
     }
     if (request.method === 'DELETE') {
       if (!row) return errorResponse(new Error('场景不存在'), 404, request, env)

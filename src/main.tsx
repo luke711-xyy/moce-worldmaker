@@ -5,7 +5,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, CircleUserRound, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
 import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
-import { LibraryResponse, LibrarySceneSummary, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
+import { LibraryResponse, LibrarySceneSummary, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, loadScenePreview, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
 import { importModelAsVoxelAssetInWorker, ModelImportResult, VoxelizeMode } from './model-import'
 import { SceneOccupancyIndex } from './runtime/spatial-index'
@@ -634,6 +634,8 @@ function App() {
   const sceneFileRefRef = useRef<SceneFileRef | null>(null)
   const exitDraftPersistedAtRef = useRef(0)
   const interactionActiveRef = useRef(false)
+  const sceneLibraryLoadRequestRef = useRef(0)
+  const sceneLibraryProjectCacheRef = useRef(new Map<string, ProjectState>())
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sceneLibraryImportInputRef = useRef<HTMLInputElement>(null)
   const entityFileInputRef = useRef<HTMLInputElement>(null)
@@ -1928,6 +1930,9 @@ function App() {
       const loaded = await loadLibrary()
       setLibrary(loaded)
       setLibraryError(null)
+      // Scene contents may have changed after a save, duplicate, import, or
+      // delete. A refreshed library starts a fresh preview-cache generation.
+      sceneLibraryProjectCacheRef.current.clear()
       setAssetCategoryPaths(normalizeAssetCategoryPaths(loaded.assetCategories ?? [], projectRef.current.assets))
 
       // The scene list and the entity list have separate state.  When a scene
@@ -1988,16 +1993,32 @@ function App() {
   }
 
   const selectLibraryScene = async (sceneId: string, name: string, x: number, y: number) => {
+    const requestId = ++sceneLibraryLoadRequestRef.current
     setSelectedLibrarySceneId(sceneId)
     setSceneLibraryContextMenu({ sceneId, x, y })
+    const cachedProject = sceneLibraryProjectCacheRef.current.get(sceneId)
+    if (cachedProject) {
+      setSelectedLibrarySceneProject(cachedProject)
+      setLibraryBusy(false)
+      return
+    }
+    setSelectedLibrarySceneProject(null)
     setLibraryBusy(true)
     try {
-      setSelectedLibrarySceneProject(normalizeStoredProject(await loadScene(sceneId)))
-    } catch {
+      const loaded = normalizeStoredProject(await loadScenePreview(sceneId))
+      // A user can click several scene rows before a remote scene finishes
+      // loading. Only the latest request is allowed to update the selected
+      // scene preview; an older response must not replace it or clear it on
+      // a late error.
+      sceneLibraryProjectCacheRef.current.set(sceneId, loaded)
+      if (requestId !== sceneLibraryLoadRequestRef.current) return
+      setSelectedLibrarySceneProject(loaded)
+    } catch (error) {
+      if (requestId !== sceneLibraryLoadRequestRef.current) return
       setSelectedLibrarySceneProject(null)
-      setNotice(`场景实体加载失败 · ${name}`)
+      setNotice(`场景实体加载失败 · ${name}${error instanceof Error ? ` · ${error.message}` : ''}`)
     } finally {
-      setLibraryBusy(false)
+      if (requestId === sceneLibraryLoadRequestRef.current) setLibraryBusy(false)
     }
   }
 
@@ -3330,10 +3351,10 @@ function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSce
           <div className="library-column-title">场景</div>
           <div className="library-scene-list">{library.scenes.length ? library.scenes.map((scene) => <button className={`library-row ${selectedSceneId === scene.id ? 'selected' : ''}`} data-scene-id={scene.id} key={scene.id} onClick={openSceneMenu} onContextMenu={openSceneMenu}><div><strong>{scene.name}</strong><span>{scene.assemblyCount} 个装配体 · {scene.entityCount} 个实体</span></div><div className="library-row-actions"><ChevronRight size={15} /></div></button>) : <div className="empty-panel">尚无场景</div>}</div>
           <div className="library-scene-preview" aria-label="选中场景完整预览">
-            {scenePreviewAsset ? <VoxelMiniPreview voxels={scenePreviewAsset.voxels} asset={scenePreviewAsset} /> : <div className="empty-panel">请选择场景查看完整预览</div>}
+            {scenePreviewAsset ? <VoxelMiniPreview voxels={scenePreviewAsset.voxels} asset={scenePreviewAsset} maxPreviewVoxels={50000} /> : selectedSceneId && busy ? <div className="empty-panel">正在加载场景预览…</div> : <div className="empty-panel">请选择场景查看完整预览</div>}
           </div>
         </div>
-        <div className="library-column"><div className="library-column-title">实体</div>{!selectedSceneId ? <div className="empty-panel">请选择场景查看实体</div> : selectedSceneEntities.length ? selectedSceneEntities.map((entity) => <button className="library-row" key={entity.id} onClick={(event) => openEntityMenu(event, entity.id)} onContextMenu={(event) => openEntityMenu(event, entity.id)}><div><strong>{entity.name}</strong><span>{entity.subtitle}</span></div><ChevronRight size={15} /></button>) : <div className="empty-panel">当前场景没有可显示的实体</div>}</div>
+        <div className="library-column"><div className="library-column-title">实体</div>{!selectedSceneId ? <div className="empty-panel">请选择场景查看实体</div> : busy && !selectedSceneProject ? <div className="empty-panel">正在加载场景实体…</div> : selectedSceneEntities.length ? selectedSceneEntities.map((entity) => <button className="library-row" key={entity.id} onClick={(event) => openEntityMenu(event, entity.id)} onContextMenu={(event) => openEntityMenu(event, entity.id)}><div><strong>{entity.name}</strong><span>{entity.subtitle}</span></div><ChevronRight size={15} /></button>) : <div className="empty-panel">当前场景没有可显示的实体</div>}</div>
       </div>
       {contextScene && contextMenu && <div className="scene-library-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerEnter={cancelMenuClose} onPointerLeave={scheduleMenuClose} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}><button onClick={() => { closeMenus(); onLoadScene(contextScene.id, contextScene.name) }}>打开场景</button><button onClick={() => { closeMenus(); onDuplicateScene(contextScene.id, contextScene.name) }}>创建副本</button><button className="danger" onClick={() => { closeMenus(); onDeleteScene(contextScene.id, contextScene.name) }}>删除场景</button></div>}
       {entityContextMenu && selectedSceneId && (() => {
@@ -3402,9 +3423,9 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
   </aside>
 }
 
-const VoxelMiniPreview = React.memo(function VoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, materialColors = {} }: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string> }) {
+const VoxelMiniPreview = React.memo(function VoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, materialColors = {}, maxPreviewVoxels }: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string>; maxPreviewVoxels?: number }) {
   if (!voxels.length) return <div className="mini-preview-empty">暂无预览</div>
-  const previewSelection = selectPreviewVoxels(voxels)
+  const previewSelection = selectPreviewVoxels(voxels, maxPreviewVoxels)
   const previewVoxels = previewSelection.voxels
   const bounds = voxels.slice(1).reduce((result, voxel) => ({
     minX: Math.min(result.minX, voxel.x),
