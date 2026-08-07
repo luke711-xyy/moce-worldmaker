@@ -890,7 +890,7 @@ function App() {
   const voxelStrokePublishFrameRef = useRef<number | null>(null)
   const voxelStrokePartsRef = useRef<SceneEntityPart[] | null>(null)
   const voxelStrokeNoticeRef = useRef<string | null>(null)
-  const sceneMoveBoundsRef = useRef<{ parts: SceneEntityPart[]; voxels: Voxel[]; bounds: GridVoxelBounds | null } | null>(null)
+  const sceneMoveBoundsRef = useRef<{ parts: SceneEntityPart[]; voxels: Voxel[]; movingIds: string[]; bounds: GridVoxelBounds | null } | null>(null)
   const sceneLibraryLoadRequestRef = useRef(0)
   const sceneLibraryAbortRef = useRef<AbortController | null>(null)
   const sceneLibraryProjectCacheRef = useRef(new Map<string, ProjectState>())
@@ -2187,10 +2187,10 @@ function App() {
     }
     const cachedMove = sceneMoveBoundsRef.current?.parts === parts ? sceneMoveBoundsRef.current : null
     const movingVoxels = cachedMove?.voxels ?? movableParts.flatMap((part) => scenePartVoxels(part))
-    const movingIds = movableParts.map((part) => part.id)
     const bounds = sceneBoundsForProject(projectRef.current)
     const cachedBounds = cachedMove?.bounds ?? gridVoxelBounds(movingVoxels)
-    sceneMoveBoundsRef.current = { parts, voxels: movingVoxels, bounds: cachedBounds }
+    const movingIds = cachedMove?.movingIds ?? movableParts.map((part) => part.id)
+    sceneMoveBoundsRef.current = { parts, voxels: movingVoxels, movingIds, bounds: cachedBounds }
     if (!cachedBounds) return { moved: false, blocked: true, deltaX: 0, deltaY: 0, deltaZ: 0 }
     return resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => {
       return translatedVoxelBoundsWithinScene(cachedBounds, bounds, stepX, stepY, stepZ)
@@ -2201,6 +2201,10 @@ function App() {
   const commitScenePartsMove = (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number): GridMoveResult => {
     const result = previewScenePartsMove(parts, deltaX, deltaY, deltaZ)
     if (!result.moved) {
+      // This snapshot can contain every voxel of a large moved entity. It is
+      // valid only for the current pointer gesture, so release it immediately
+      // when the move is blocked or otherwise has no effect.
+      sceneMoveBoundsRef.current = null
       if (result.blocked) setNotice('实体已抵达碰撞边界 · 该方向无法继续')
       return result
     }
@@ -2266,6 +2270,10 @@ function App() {
       instance.partOffsets = offsets
     })
     commitScenePartsMoveFast(nextProject, movableParts, result.deltaX, result.deltaY, result.deltaZ)
+    // The occupancy index now owns the lightweight lazy translation. Keeping
+    // the temporary scene-coordinate voxel array would retain the whole model
+    // until the next drag and increase GC pressure after repeated moves.
+    sceneMoveBoundsRef.current = null
     if (result.blocked) setNotice('已抵达碰撞边界 · 该方向无法继续')
     return result
   }
@@ -7631,11 +7639,25 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
   return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextRenameTargetId && <button onClick={() => { onRename(sceneContextRenameTargetId); setSceneContextMenu(null) }}>重命名</button>}{sceneContextEditTargetId && <button onClick={() => { onEnterEditMode(sceneContextEditTargetId); setSceneContextMenu(null) }}>进入编辑修改模式</button>}{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { applyCameraView('default', 100); onZoomChange(100); onNotice('视角已回中 · 缩放已恢复 100%') }} /></div>
 }
 
+const voxelRenderSignatureCache = new WeakMap<Voxel[], Map<string, string>>()
+const voxelRenderOriginCache = new WeakMap<ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>, { x: number; y: number; z: number }>()
+
 function voxelRenderSignature(component: Voxel[], componentColor?: string): string {
-  // Keep the cache key O(n) but avoid allocating one large string per voxel.
-  // The previous join(';') signature was especially expensive after a 2x/3x
-  // enlargement because it temporarily duplicated hundreds of MB of text on
-  // the main thread before Three.js could start the greedy-mesh worker.
+  // A scene move changes only the component group's transform. The canonical
+  // voxel array is shared by sceneEntityParts across transform-only project
+  // commits, so cache the expensive content hash by array identity and color.
+  // Voxel arrays are treated as immutable ProjectState data; edits publish a
+  // new array and therefore naturally receive a new cache entry.
+  const colorKey = componentColor ?? ''
+  const cachedVariants = voxelRenderSignatureCache.get(component)
+  const cached = cachedVariants?.get(colorKey)
+  if (cached) return cached
+
+  // Keep the actual signature calculation O(n) but avoid allocating one large
+  // string per voxel. The previous join(';') signature was especially
+  // expensive after a 2x/3x enlargement because it temporarily duplicated
+  // hundreds of MB of text on the main thread before Three.js could start the
+  // greedy-mesh worker.
   let hash = 2166136261
   const origin = customComponentRenderOrigin(component)
   const addNumber = (value: number) => {
@@ -7651,7 +7673,7 @@ function voxelRenderSignature(component: Voxel[], componentColor?: string): stri
     hash = Math.imul(hash, 16777619)
   }
   addNumber(component.length)
-  addText(componentColor ?? '')
+  addText(colorKey)
   component.forEach((voxel) => {
     // Translation is represented by the component group position. Hash the
     // local shape so moving a large custom entity does not invalidate its
@@ -7662,16 +7684,24 @@ function voxelRenderSignature(component: Voxel[], componentColor?: string): stri
     addText(voxel.materialId)
     addText(voxel.paintMaterialId ?? '')
   })
-  return `${component.length}|${hash >>> 0}`
+  const signature = `${component.length}|${hash >>> 0}`
+  const variants = cachedVariants ?? new Map<string, string>()
+  variants.set(colorKey, signature)
+  if (!cachedVariants) voxelRenderSignatureCache.set(component, variants)
+  return signature
 }
 
 function customComponentRenderOrigin(component: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>): { x: number; y: number; z: number } {
   if (!component.length) return { x: 0, y: 0, z: 0 }
-  return component.reduce((origin, voxel) => ({
+  const cached = voxelRenderOriginCache.get(component)
+  if (cached) return cached
+  const origin = component.reduce((origin, voxel) => ({
     x: Math.min(origin.x, voxel.x),
     y: Math.min(origin.y, voxel.y),
     z: Math.min(origin.z, voxel.z),
   }), { x: component[0].x, y: component[0].y, z: component[0].z })
+  voxelRenderOriginCache.set(component, origin)
+  return origin
 }
 
 const CUSTOM_INSTANCE_RENDER_LIMIT = 16_384
