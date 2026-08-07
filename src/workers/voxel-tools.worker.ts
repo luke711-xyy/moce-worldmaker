@@ -1,9 +1,9 @@
 import { makePlaneVoxel, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine } from '../voxel-tools'
 import { buildGreedyMesh } from '../runtime/greedy-mesher'
-import { computeScale, computeShell, VoxelGeometryMesh, VoxelGeometryPreview } from '../voxel-geometry'
-import type { VoxelToolsGeometryRequest, VoxelToolsShapeRequest } from '../runtime/voxel-tools-client'
+import { computeScale, computeShell, validShellThicknesses, VoxelGeometryMesh, VoxelGeometryPreview } from '../voxel-geometry'
+import type { VoxelToolsGeometryRequest, VoxelToolsShapeRequest, VoxelToolsShellOptionsRequest } from '../runtime/voxel-tools-client'
 
-type WorkerRequest = { id: number; request: VoxelToolsShapeRequest | VoxelToolsGeometryRequest }
+type WorkerRequest = { id: number; request: VoxelToolsShapeRequest | VoxelToolsGeometryRequest | VoxelToolsShellOptionsRequest }
 
 const voxelColorKey = (voxel: { materialId: string; paintMaterialId?: string }) => voxel.paintMaterialId ?? voxel.materialId
 
@@ -41,6 +41,10 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       const geometry = computeScale(request.voxels, request.mode, request.factor)
       const mesh = buildGeometryPreviewMesh(geometry)
       self.postMessage({ id, geometry, mesh }, mesh ? [mesh.positions.buffer, mesh.normals.buffer, mesh.materialIds.buffer, mesh.indices.buffer] : [])
+      return
+    }
+    if (request.kind === 'shell-options') {
+      self.postMessage({ id, shellThicknesses: validShellThicknesses(request.voxels) })
       return
     }
     let voxels

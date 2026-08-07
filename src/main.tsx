@@ -21,7 +21,7 @@ import { DrawingPlane, DrawOperation, VoxelAxis, VoxelTool, clampPlanePointToGro
 import { VoxelToolsGeometryResult, VoxelToolsWorkerClient, VoxelToolsShapeRequest } from './runtime/voxel-tools-client'
 import { adjustHexHsl, hexToHsl } from './color-utils'
 import { SliceLayer, SlicePlane, SliceVoxel, sliceEntityParts, sliceLayerToAsset, slicePlaneLabel } from './slicing'
-import { computeScale, computeShell, GeometryScaleMode, GeometryVoxel, validScaleFactors, validShellThicknesses, VoxelGeometryMesh, VoxelGeometryPreview } from './voxel-geometry'
+import { computeScale, computeShell, GeometryScaleMode, GeometryVoxel, validScaleFactors, VoxelGeometryMesh, VoxelGeometryPreview } from './voxel-geometry'
 import { createZip } from './zip'
 import './styles.css'
 
@@ -1261,7 +1261,27 @@ function App() {
     materialId: scenePartVoxelDisplayColor(projectRef.current, part, voxel),
     sourcePartId: part.id,
   })))
-  const geometryShellThicknessOptions = useMemo(() => validShellThicknesses(geometrySourceVoxels), [geometrySourceVoxels])
+  const [geometryShellThicknessOptions, setGeometryShellThicknessOptions] = useState<number[]>([])
+  const geometryShellOptionsRevisionRef = useRef(0)
+  useEffect(() => {
+    const client = geometryWorkerRef.current
+    const revision = ++geometryShellOptionsRevisionRef.current
+    if (!geometrySourceVoxels.length || !client) {
+      setGeometryShellThicknessOptions([])
+      return
+    }
+    // Shell availability performs cavity filling and repeated erosion. It is
+    // useful UI metadata, but it must never block App rendering after a large
+    // entity is selected or replaced. Calculate it in the same worker as the
+    // geometry preview and ignore results for obsolete selections.
+    setGeometryShellThicknessOptions([])
+    void client.computeShellThicknessesLatest(geometrySourceVoxels).then((options) => {
+      if (revision !== geometryShellOptionsRevisionRef.current) return
+      setGeometryShellThicknessOptions(options ?? [])
+    }).catch(() => {
+      if (revision === geometryShellOptionsRevisionRef.current) setGeometryShellThicknessOptions([])
+    })
+  }, [geometrySourceVoxels])
   const geometryScaleOptions = useMemo(() => validScaleFactors(geometrySourceVoxels), [geometrySourceVoxels])
   // A transform-only move changes scene offsets, but never changes the file
   // tree. Keep the tree calculation keyed to structural fields so releasing a

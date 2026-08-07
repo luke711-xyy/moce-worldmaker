@@ -22,11 +22,14 @@ export type VoxelToolsGeometryRequest =
   | { kind: 'shell'; voxels: GeometryVoxel[]; thickness: number }
   | { kind: 'scale'; voxels: GeometryVoxel[]; mode: GeometryScaleMode; factor: number }
 
+export type VoxelToolsShellOptionsRequest = { kind: 'shell-options'; voxels: GeometryVoxel[] }
+
 type WorkerResponse = {
   id: number
   voxels?: Voxel[]
   geometry?: VoxelGeometryPreview
   mesh?: VoxelGeometryMesh | null
+  shellThicknesses?: number[]
   error?: string
 }
 
@@ -48,6 +51,8 @@ export class VoxelToolsWorkerClient {
   private latestQueued: { request: VoxelToolsShapeRequest; resolve: (voxels: Voxel[]) => void; reject: (error: Error) => void } | null = null
   private latestGeometryInFlightId: number | null = null
   private latestGeometryQueued: { request: VoxelToolsGeometryRequest; resolve: (result: VoxelToolsGeometryResult | null) => void; reject: (error: Error) => void } | null = null
+  private latestShellOptionsInFlightId: number | null = null
+  private latestShellOptionsQueued: { request: VoxelToolsShellOptionsRequest; resolve: (result: number[] | null) => void; reject: (error: Error) => void } | null = null
 
   constructor() {
     this.worker = new Worker(new URL('../workers/voxel-tools.worker.ts', import.meta.url), { type: 'module' })
@@ -58,11 +63,14 @@ export class VoxelToolsWorkerClient {
       this.pending.delete(response.id)
       if (this.latestInFlightId === response.id) this.latestInFlightId = null
       if (this.latestGeometryInFlightId === response.id) this.latestGeometryInFlightId = null
+      if (this.latestShellOptionsInFlightId === response.id) this.latestShellOptionsInFlightId = null
       if (response.error) request.reject(new Error(response.error))
       else if (response.geometry) request.resolve(response.geometry ? { geometry: response.geometry, mesh: response.mesh ?? null } : [])
+      else if (response.shellThicknesses) request.resolve(response.shellThicknesses)
       else request.resolve(response.voxels ?? [])
       this.flushLatest()
       this.flushLatestGeometry()
+      this.flushLatestShellOptions()
     }
     this.worker.onerror = (event) => {
       const error = new Error(event.message || '体素工具 Worker 执行失败')
@@ -74,6 +82,9 @@ export class VoxelToolsWorkerClient {
       this.latestGeometryInFlightId = null
       this.latestGeometryQueued?.reject(error)
       this.latestGeometryQueued = null
+      this.latestShellOptionsInFlightId = null
+      this.latestShellOptionsQueued?.reject(error)
+      this.latestShellOptionsQueued = null
     }
   }
 
@@ -103,6 +114,19 @@ export class VoxelToolsWorkerClient {
       this.latestGeometryQueued?.resolve(null)
       this.latestGeometryQueued = { request, resolve, reject }
       this.flushLatestGeometry()
+    })
+  }
+
+  /**
+   * Shell thickness availability performs cavity filling and repeated
+   * morphology passes. Keep it off the React render path and only calculate
+   * the newest selection, just like geometry previews.
+   */
+  computeShellThicknessesLatest(voxels: GeometryVoxel[]): Promise<number[] | null> {
+    return new Promise((resolve, reject) => {
+      this.latestShellOptionsQueued?.resolve(null)
+      this.latestShellOptionsQueued = { request: { kind: 'shell-options', voxels }, resolve, reject }
+      this.flushLatestShellOptions()
     })
   }
 
@@ -140,6 +164,16 @@ export class VoxelToolsWorkerClient {
     this.worker.postMessage({ id, request: queued.request })
   }
 
+  private flushLatestShellOptions() {
+    if (this.latestShellOptionsInFlightId !== null || !this.latestShellOptionsQueued) return
+    const queued = this.latestShellOptionsQueued
+    this.latestShellOptionsQueued = null
+    const id = this.nextId++
+    this.latestShellOptionsInFlightId = id
+    this.pending.set(id, { resolve: (value) => queued.resolve(value as number[]), reject: queued.reject })
+    this.worker.postMessage({ id, request: queued.request })
+  }
+
   dispose() {
     this.worker.terminate()
     const error = new Error('体素工具 Worker 已关闭')
@@ -151,5 +185,8 @@ export class VoxelToolsWorkerClient {
     this.latestGeometryInFlightId = null
     this.latestGeometryQueued?.reject(error)
     this.latestGeometryQueued = null
+    this.latestShellOptionsInFlightId = null
+    this.latestShellOptionsQueued?.reject(error)
+    this.latestShellOptionsQueued = null
   }
 }
