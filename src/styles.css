@@ -284,8 +284,8 @@ button { border: 0; cursor: pointer; color: inherit; }
 .viewport-footer > .viewport-camera-controls .camera-cube-button,
 .viewport-footer > .viewport-camera-controls .camera-reset-button { position: static; right: auto; top: auto; width: 30px; height: 30px; flex: 0 0 30px; }
 .viewport-footer > .viewport-camera-controls .camera-view-menu { right: 0; bottom: 38px; }
-.viewport-footer { height: calc(50px + var(--safe-bottom)); flex: 0 0 calc(50px + var(--safe-bottom)); display: flex; align-items: center; gap: 9px; padding: 0 max(13px, calc(13px + var(--safe-right))) var(--safe-bottom) max(13px, calc(13px + var(--safe-left))); overflow-x: auto; overflow-y: hidden; border-top: 1px solid #2c3538; background: #1b2225; }
-.viewport-footer > * { flex: 0 0 auto; }
+.viewport-footer { min-height: calc(50px + var(--safe-bottom)); height: auto; flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; align-content: center; column-gap: 9px; row-gap: 5px; padding: 7px max(13px, calc(13px + var(--safe-right))) calc(7px + var(--safe-bottom)) max(13px, calc(13px + var(--safe-left))); overflow-x: hidden; overflow-y: visible; border-top: 1px solid #2c3538; background: #1b2225; }
+.viewport-footer > * { flex: 0 0 auto; max-width: 100%; }
 .tool-group { display: flex; gap: 2px; }
 .tool-button { position: relative; width: 30px; height: 29px; display: grid; place-items: center; color: #7f8b8a; background: transparent; border: 1px solid transparent; }
 .tool-button:hover, .tool-button.active { color: #fff1df; background: #a9523c; border-color: #c46b50; }
@@ -531,7 +531,7 @@ button { border: 0; cursor: pointer; color: inherit; }
   .brand-mark { width: 27px; height: 27px; }
   .brand-name { font-size: 16px; }
   .viewport-toolbar { height: 40px; flex-basis: 40px; }
-  .viewport-footer { height: calc(44px + var(--safe-bottom)); flex-basis: calc(44px + var(--safe-bottom)); }
+  .viewport-footer { min-height: calc(44px + var(--safe-bottom)); height: auto; flex-basis: auto; }
   .viewport-scene-tree-overlay { height: min(300px, calc(100% - 24px - var(--safe-top) - var(--safe-bottom))); }
   .viewport-palette { bottom: max(8px, calc(8px + var(--safe-bottom))); }
   .toolbox-popover { bottom: max(50px, calc(50px + var(--safe-bottom))); }
