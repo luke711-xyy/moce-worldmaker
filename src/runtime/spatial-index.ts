@@ -70,6 +70,14 @@ function projectVoxelBounds(voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>)
   return bounds
 }
 
+function scenePartOffset(part: Pick<SceneEntityPart, 'sceneOffset' | 'partSceneOffset'>): { x: number; y: number; z: number } {
+  return {
+    x: (part.sceneOffset?.x ?? 0) + (part.partSceneOffset?.x ?? 0),
+    y: (part.sceneOffset?.y ?? 0) + (part.partSceneOffset?.y ?? 0),
+    z: (part.sceneOffset?.z ?? 0) + (part.partSceneOffset?.z ?? 0),
+  }
+}
+
 function boundsOverlap(owner: RuntimeVoxelBounds, target: RuntimeVoxelBounds, translation?: RuntimeVoxelCoord): boolean {
   const offsetX = translation?.gx ?? 0
   const offsetY = translation?.gy ?? 0
@@ -114,6 +122,11 @@ export class SceneOccupancyIndex {
   // comparison entirely on steady brush frames.
   private readonly ownerVoxelRefs = new Map<string, ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>>()
   private readonly ownerVoxelKeys = new Map<string, string[]>()
+  // Keep canonical topology and scene translation separate. A transform-only
+  // sync can then update one offset instead of expanding and sorting every
+  // voxel in a large entity.
+  private readonly ownerSourceRefs = new Map<string, ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>>()
+  private readonly ownerBaseOffsets = new Map<string, RuntimeVoxelCoord>()
   private readonly projectVoxelKeyCache = new WeakMap<object, Set<string>>()
   private readonly projectVoxelBoundsCache = new WeakMap<object, RuntimeVoxelBounds>()
   private readonly materialIdToIndex = new Map<string, number>()
@@ -121,7 +134,7 @@ export class SceneOccupancyIndex {
 
   static fromParts(parts: SceneEntityPart[]): SceneOccupancyIndex {
     const index = new SceneOccupancyIndex()
-    parts.forEach((part) => index.insertOwner(part.id, scenePartVoxels(part)))
+    parts.forEach((part) => index.insertPart(part))
     return index
   }
 
@@ -135,6 +148,8 @@ export class SceneOccupancyIndex {
     this.ownerBounds.clear()
     this.ownerVoxelRefs.clear()
     this.ownerVoxelKeys.clear()
+    this.ownerSourceRefs.clear()
+    this.ownerBaseOffsets.clear()
     this.materialIdToIndex.clear()
     this.nextMaterialIndex = 1
   }
@@ -143,7 +158,12 @@ export class SceneOccupancyIndex {
     return this.ownerIdToHandle.has(ownerId)
   }
 
-  insertOwner(ownerId: string, voxels: Voxel[]): void {
+  insertOwner(
+    ownerId: string,
+    voxels: Voxel[],
+    sourceVoxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>> = voxels,
+    baseOffset: Pick<Voxel, 'x' | 'y' | 'z'> = { x: 0, y: 0, z: 0 },
+  ): void {
     if (this.ownerIdToHandle.has(ownerId)) this.removeOwner(ownerId)
     const ownerHandle = this.registerOwner(ownerId)
     const runtimeVoxels = voxels.map(projectVoxelToRuntime)
@@ -154,6 +174,8 @@ export class SceneOccupancyIndex {
     this.ownerTranslations.delete(ownerHandle)
     this.ownerVoxelRefs.set(ownerId, voxels)
     this.ownerVoxelKeys.set(ownerId, this.sortedVoxelKeys(voxels))
+    this.ownerSourceRefs.set(ownerId, sourceVoxels)
+    this.ownerBaseOffsets.set(ownerId, projectVoxelToRuntime(baseOffset))
     voxels.forEach((voxel, index) => {
       const runtimeVoxel = runtimeVoxels[index]
       const { chunkKey, localIndex } = runtimeVoxelAddress(runtimeVoxel)
@@ -207,13 +229,25 @@ export class SceneOccupancyIndex {
     this.ownerBounds.delete(ownerHandle)
     this.ownerVoxelRefs.delete(ownerId)
     this.ownerVoxelKeys.delete(ownerId)
+    this.ownerSourceRefs.delete(ownerId)
+    this.ownerBaseOffsets.delete(ownerId)
     this.ownerIdToHandle.delete(ownerId)
     this.handleToOwnerId[ownerHandle] = ''
   }
 
-  replaceOwner(ownerId: string, voxels: Voxel[]): void {
+  replaceOwner(
+    ownerId: string,
+    voxels: Voxel[],
+    sourceVoxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>> = voxels,
+    baseOffset: Pick<Voxel, 'x' | 'y' | 'z'> = { x: 0, y: 0, z: 0 },
+  ): void {
     this.removeOwner(ownerId)
-    this.insertOwner(ownerId, voxels)
+    this.insertOwner(ownerId, voxels, sourceVoxels, baseOffset)
+  }
+
+  private insertPart(part: SceneEntityPart): void {
+    const offset = scenePartOffset(part)
+    this.insertOwner(part.id, scenePartVoxels(part), part.voxels, offset)
   }
 
   /**
@@ -234,33 +268,55 @@ export class SceneOccupancyIndex {
   }
 
   syncParts(parts: SceneEntityPart[]): OccupancySyncResult {
-    const incoming = new Map(parts.map((part) => [part.id, scenePartVoxels(part)]))
     const result: OccupancySyncResult = { inserted: 0, updated: 0, removed: 0, unchanged: 0 }
+    const incomingIds = new Set(parts.map((part) => part.id))
     for (const ownerId of [...this.ownerIdToHandle.keys()]) {
-      if (incoming.has(ownerId)) continue
+      if (incomingIds.has(ownerId)) continue
       this.removeOwner(ownerId)
       result.removed += 1
     }
-    incoming.forEach((voxels, ownerId) => {
+    parts.forEach((part) => {
+      const ownerId = part.id
       const existingKeys = this.ownerVoxelKeys.get(ownerId)
       if (!existingKeys) {
-        this.insertOwner(ownerId, voxels)
+        this.insertPart(part)
         result.inserted += 1
         return
       }
       const ownerHandle = this.ownerIdToHandle.get(ownerId)
+      const sourceVoxels = this.ownerSourceRefs.get(ownerId)
+      if (ownerHandle !== undefined && sourceVoxels === part.voxels) {
+        // Project updates preserve the canonical voxel array for pure moves
+        // and part offsets. Keep the chunks at their base position and make
+        // queries use the current absolute translation instead. This path is
+        // O(1), including when the entity contains hundreds of thousands of
+        // voxels.
+        const currentOffset = projectVoxelToRuntime(scenePartOffset(part))
+        const baseOffset = this.ownerBaseOffsets.get(ownerId) ?? { gx: 0, gy: 0, gz: 0 }
+        const translation = {
+          gx: currentOffset.gx - baseOffset.gx,
+          gy: currentOffset.gy - baseOffset.gy,
+          gz: currentOffset.gz - baseOffset.gz,
+        }
+        if (translation.gx || translation.gy || translation.gz) this.ownerTranslations.set(ownerHandle, translation)
+        else this.ownerTranslations.delete(ownerHandle)
+        result.unchanged += 1
+        return
+      }
+      const voxels = scenePartVoxels(part)
       const lazyTranslation = ownerHandle ? this.ownerTranslations.get(ownerHandle) : undefined
       if (ownerHandle !== undefined && lazyTranslation) {
+        // Undo can restore a freshly cloned project snapshot. When its
+        // absolute coordinates match the stored base topology, clear the
+        // pending translation without rebuilding chunks.
         const nextKeys = this.sortedVoxelKeys(voxels)
-        // Undo/redo can present the original absolute coordinates while the
-        // index still contains a lazy transform. The chunk data is already at
-        // those original coordinates, so only clear the transform and refresh
-        // the source reference instead of rebuilding the owner.
         const isOriginalTopology = existingKeys.length === nextKeys.length && existingKeys.every((key, index) => key === nextKeys[index])
         if (isOriginalTopology) {
           this.ownerTranslations.delete(ownerHandle)
           this.ownerVoxelRefs.set(ownerId, voxels)
           this.ownerVoxelKeys.set(ownerId, nextKeys)
+          this.ownerSourceRefs.set(ownerId, part.voxels)
+          this.ownerBaseOffsets.set(ownerId, projectVoxelToRuntime(scenePartOffset(part)))
           result.unchanged += 1
           return
         }
@@ -275,7 +331,7 @@ export class SceneOccupancyIndex {
         result.unchanged += 1
         return
       }
-      this.replaceOwner(ownerId, voxels)
+      this.replaceOwner(ownerId, voxels, part.voxels, scenePartOffset(part))
       result.updated += 1
     })
     return result

@@ -106,6 +106,21 @@ describe('SceneOccupancyIndex', () => {
     expect(index.queryProjectVoxel(voxel(41, 7, 1)).occupied).toBe(false)
   })
 
+  it('updates a moved scene part by offset without expanding its voxel array', () => {
+    const topology = Array.from({ length: 5000 }, (_, x) => voxel(x, 0, 0))
+    const initial = { ...part('entity', topology), sceneOffset: { x: 10, y: 0, z: 4 } }
+    const index = SceneOccupancyIndex.fromParts([initial])
+    const originalChunk = index.chunks.get('0,0,0')
+    const moved = { ...initial, sceneOffset: { x: 70, y: 0, z: 4 } }
+
+    const result = index.syncParts([moved])
+
+    expect(result).toEqual({ inserted: 0, updated: 0, removed: 0, unchanged: 1 })
+    expect(index.chunks.get('0,0,0')).toBe(originalChunk)
+    expect(index.queryProjectVoxel(voxel(10, 0, 4)).occupied).toBe(false)
+    expect(index.queryProjectVoxel(voxel(70, 0, 4)).ownerIds).toEqual(['entity'])
+  })
+
   it('tracks overlapping legacy occupants without hiding non-excluded owners', () => {
     const index = SceneOccupancyIndex.fromParts([
       part('first', [voxel(4, 1, 2)]),
