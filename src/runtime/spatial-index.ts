@@ -465,6 +465,7 @@ export class SceneOccupancyIndex {
         maxGz: movingBounds.maxGz + runtimeDelta.gz,
       }
       const candidates: Array<[ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>, RuntimeVoxelCoord | undefined]> = []
+      let candidateVoxelCount = 0
       for (const [ownerId, ownerVoxels] of this.ownerVoxelRefs) {
         if (excluded.has(ownerId)) continue
         const ownerHandle = this.ownerIdToHandle.get(ownerId)
@@ -472,10 +473,23 @@ export class SceneOccupancyIndex {
         const bounds = ownerHandle ? this.ownerBounds.get(ownerHandle) : undefined
         if (!bounds || !boundsOverlap(bounds, translatedMovingBounds, translation)) continue
         candidates.push([ownerVoxels, translation])
+        candidateVoxelCount += ownerVoxels.length
       }
       if (!candidates.length) return false
       const movingKeys = this.projectVoxelKeyCache.get(cacheKey) ?? new Set(voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
       this.projectVoxelKeyCache.set(cacheKey, movingKeys)
+      // Scan the smaller side of the exact intersection. A small selected
+      // part beside a huge stationary model should not pay for the huge
+      // model's entire voxel array on every pointermove. queryRuntimeVoxel()
+      // remains exact for the moving-side path and already accounts for lazy
+      // translations and overlapping owners.
+      if (voxels.length <= candidateVoxelCount) {
+        return voxels.some((voxel) => {
+          const translated = translateRuntimeVoxel(projectVoxelToRuntime(voxel), runtimeDelta)
+          const hit = this.queryRuntimeVoxel(translated)
+          return hit.ownerIds.some((ownerId) => !excluded.has(ownerId))
+        })
+      }
       for (const [ownerVoxels, translation] of candidates) {
         for (const voxel of ownerVoxels) {
           const currentX = voxel.x + (translation?.gx ?? 0)
