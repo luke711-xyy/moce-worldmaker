@@ -667,7 +667,12 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
   for (let index = cache.customVoxelLength; index < project.customVoxels.length; index += 1) {
     const voxel = project.customVoxels[index]
     const entityId = voxelEntityId(voxel)
-    cache.customGroups.set(entityId, [...(cache.customGroups.get(entityId) ?? []), { ...voxel, entityId }])
+    const group = cache.customGroups.get(entityId)
+    // Voxel objects are immutable after they enter ProjectState. Reuse the
+    // object and append in place; spreading the previous group for every
+    // voxel made large generated entities quadratic to assemble.
+    if (group) group.push(voxel)
+    else cache.customGroups.set(entityId, [voxel])
   }
   cache.customVoxelLength = project.customVoxels.length
   cache.customGroups.forEach((voxels, entityId) => {
@@ -706,8 +711,11 @@ function rootAssemblyNumber(name: string | undefined): number | undefined {
  * sibling number. Sibling numbers live in persistent counters so deleting a
  * node never causes a later node to be renumbered.
  */
-export function normalizeProjectNaming(project: ProjectState): ProjectState {
-  const next = structuredClone(project)
+export function normalizeProjectNaming(project: ProjectState, options: { clone?: boolean } = {}): ProjectState {
+  // Geometry operations already create a new project root and copy only the
+  // mutable scene collections. Allow that hot path to reuse the immutable
+  // asset/material catalogs instead of cloning every voxel twice.
+  const next = options.clone === false ? project : structuredClone(project)
   const assemblies = next.assemblies ?? []
   const assemblyMap = new Map(assemblies.map((assembly) => [assembly.id, assembly]))
   const parentByAssembly = new Map<string, string | undefined>()

@@ -54,12 +54,34 @@ function voxelKey(value: unknown): string {
   return `${String(value.x)},${String(value.y)},${String(value.z)}`
 }
 
+function connectedComponentCount(voxels: JsonRecord[]): number {
+  const remaining = new Set(voxels.map(voxelKey))
+  let count = 0
+  while (remaining.size) {
+    count += 1
+    const first = remaining.values().next().value as string
+    remaining.delete(first)
+    const queue = [first.split(',').map(Number)]
+    for (let index = 0; index < queue.length; index += 1) {
+      const [x, y, z] = queue[index]
+      for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+        const nextKey = `${x + dx},${y + dy},${z + dz}`
+        if (!remaining.has(nextKey)) continue
+        remaining.delete(nextKey)
+        queue.push(nextKey.split(',').map(Number))
+      }
+    }
+  }
+  return count
+}
+
 /** Count the same editable parts that the scene tree exposes. */
 function sceneEntityCount(state: JsonRecord, sceneAssets: JsonRecord[]): number {
   const assetMap = new Map(sceneAssets.filter((asset) => typeof asset.id === 'string').map((asset) => [asset.id as string, asset]))
   const instances = Array.isArray(state.instances) ? state.instances : []
   const instanceCount = instances.reduce((total, instance) => {
     if (!isRecord(instance)) return total
+    if (instance.visible === false) return total
     const asset = assetMap.get(typeof instance.assetId === 'string' ? instance.assetId : '')
     if (!asset || !Array.isArray(asset.voxels)) return total + 1
     const resolved = new Map<string, JsonRecord>()
@@ -72,20 +94,25 @@ function sceneEntityCount(state: JsonRecord, sceneAssets: JsonRecord[]): number 
       })
     }
     const partVoxels = isRecord(asset.partVoxels) ? asset.partVoxels : undefined
-    if (!partVoxels) return total + (resolved.size ? 1 : 0)
+    const isImportedModel = asset.kind === 'imported'
+      && /\.(?:glb|gltf|obj|stl)$/i.test(String(asset.source ?? ''))
+      && !asset.assembly
+    if (isImportedModel || (asset.kind === 'imported' && !partVoxels && !asset.assembly)) return total + (resolved.size ? 1 : 0)
+    if (!partVoxels || !Object.keys(partVoxels).length) return total + connectedComponentCount([...resolved.values()])
     const claimed = new Set<string>()
     let parts = 0
     Object.values(partVoxels).forEach((part) => {
       if (!Array.isArray(part)) return
-      let hasVoxel = false
+      const present: JsonRecord[] = []
       part.filter(isRecord).forEach((voxel) => {
         const key = voxelKey(voxel)
-        if (resolved.has(key)) hasVoxel = true
+        if (resolved.has(key)) present.push(resolved.get(key)!)
         claimed.add(key)
       })
-      if (hasVoxel) parts += 1
+      parts += connectedComponentCount(present)
     })
-    if ([...resolved.keys()].some((key) => !claimed.has(key))) parts += 1
+    const additions = [...resolved.values()].filter((voxel) => !claimed.has(voxelKey(voxel)))
+    if (additions.length) parts += 1
     return total + (parts || (resolved.size ? 1 : 0))
   }, 0)
   const customVoxels = Array.isArray(state.customVoxels) ? state.customVoxels : []

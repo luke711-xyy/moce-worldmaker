@@ -949,7 +949,12 @@ function App() {
   if (!assetTransformCacheRef.current) assetTransformCacheRef.current = new AssetTransformCache()
   const sceneOccupancyRef = useRef<SceneOccupancyIndex | null>(null)
   if (!sceneOccupancyRef.current) sceneOccupancyRef.current = SceneOccupancyIndex.fromParts(sceneParts)
+  const skipSceneOccupancySyncRef = useRef(false)
   useEffect(() => {
+    if (skipSceneOccupancySyncRef.current) {
+      skipSceneOccupancySyncRef.current = false
+      return
+    }
     sceneOccupancyRef.current?.syncParts(sceneParts)
   }, [sceneParts])
   const lockedPartIds = useMemo(() => new Set(sceneParts.filter((part) => scenePartIsLocked(project, part)).map((part) => part.id)), [project, sceneParts])
@@ -1165,6 +1170,29 @@ function App() {
     sceneOccupancyRef.current?.syncParts(sceneEntityParts(normalizedNext))
     projectRef.current = normalizedNext
     setProject(normalizedNext)
+    setHistoryRevision((value) => value + 1)
+  }
+
+  const commitGeometryProject = (next: ProjectState, removedPartIds: string[], resultGroups: Array<{ entityId: string; voxels: Voxel[] }>) => {
+    // Geometry confirmation is already a validated, integer-grid batch. Do
+    // not send it through updateProject(): that path deep-clones the whole
+    // project and normalizeStoredProject() then walks every asset and voxel.
+    // The project root and mutable scene arrays were prepared by the caller;
+    // history can therefore retain the immutable previous root directly.
+    historyRef.current.past = [...historyRef.current.past, {
+      project: projectRef.current,
+      editEntityId,
+      selectedId,
+      checkedTreePartIds: [...checkedTreePartIds],
+    }].slice(-50)
+    historyRef.current.future = []
+    removedPartIds.forEach((partId) => sceneOccupancyRef.current?.removeOwner(partId))
+    resultGroups.forEach(({ entityId, voxels }) => sceneOccupancyRef.current?.insertOwner(`custom:${entityId}`, voxels))
+    // The occupancy index was updated incrementally above. The following
+    // sceneParts effect must not sort and rescan the same large result again.
+    skipSceneOccupancySyncRef.current = true
+    projectRef.current = next
+    setProject(next)
     setHistoryRevision((value) => value + 1)
   }
 
@@ -3397,7 +3425,12 @@ function App() {
     const selectedCustomIds = new Set(selectedEntityParts.filter((part) => part.kind === 'custom').map((part) => part.partId))
     const selectedInstanceIds = new Set(selectedEntityParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
     const allInstanceParts = new Map<string, SceneEntityPart[]>()
-    sceneParts.forEach((part) => { if (part.instanceId) allInstanceParts.set(part.instanceId, [...(allInstanceParts.get(part.instanceId) ?? []), part]) })
+    sceneParts.forEach((part) => {
+      if (!part.instanceId) return
+      const parts = allInstanceParts.get(part.instanceId)
+      if (parts) parts.push(part)
+      else allInstanceParts.set(part.instanceId, [part])
+    })
     for (const instanceId of selectedInstanceIds) {
       const all = allInstanceParts.get(instanceId) ?? []
       if (all.some((part) => !selectedIds.has(part.id))) {
@@ -3410,7 +3443,9 @@ function App() {
     const resultGroups = new Map<string, GeometryVoxel[]>()
     geometryPreview.result.voxels.forEach((voxel) => {
       const sourcePartId = voxel.sourcePartId && selectedIds.has(voxel.sourcePartId) ? voxel.sourcePartId : firstSourcePartId
-      resultGroups.set(sourcePartId, [...(resultGroups.get(sourcePartId) ?? []), voxel])
+      const group = resultGroups.get(sourcePartId)
+      if (group) group.push(voxel)
+      else resultGroups.set(sourcePartId, [voxel])
     })
     const sourcePartById = new Map(selectedEntityParts.map((part) => [part.id, part]))
     const groupEntries = [...resultGroups.entries()].filter(([, voxels]) => voxels.length > 0).map(([sourcePartId, voxels], index) => {
@@ -3420,7 +3455,11 @@ function App() {
         : `${operationBatchId}-${index + 1}`
       return { sourcePartId, entityId, sourcePart, voxels }
     })
-    const transformed = groupEntries.flatMap(({ entityId, voxels }) => voxels.map(({ sourcePartId: _sourcePartId, ...voxel }) => ({ ...voxel, entityId })))
+    const transformedGroups = groupEntries.map(({ entityId, voxels }) => ({
+      entityId,
+      voxels: voxels.map(({ sourcePartId: _sourcePartId, ...voxel }) => ({ ...voxel, entityId })),
+    }))
+    const transformed = transformedGroups.flatMap(({ voxels }) => voxels)
     const selectedReplacementKeys = new Map<string, string[]>()
     groupEntries.forEach(({ sourcePartId, entityId, sourcePart }) => {
       if (!sourcePart) return
@@ -3430,19 +3469,31 @@ function App() {
     })
     const selectedResultEntityIds = groupEntries.map(({ entityId }) => entityId)
     const firstResultEntityId = selectedResultEntityIds[0]
-    updateProject((draft) => {
-      draft.customVoxels = draft.customVoxels.filter((voxel) => !selectedCustomIds.has(voxelEntityId(voxel)))
-      draft.instances = draft.instances.filter((instance) => !selectedInstanceIds.has(instance.id))
-      draft.customVoxels.push(...transformed)
-      draft.assemblies = (draft.assemblies ?? []).map((assembly) => {
+    const remainingCustomVoxels = sourceProject.customVoxels.filter((voxel) => !selectedCustomIds.has(voxelEntityId(voxel)))
+    const nextCustomColors = { ...(sourceProject.customColors ?? {}) }
+    selectedCustomIds.forEach((entityId) => { delete nextCustomColors[entityId] })
+    const preservedCustomColor = selectedCustomIds.size === 1 && firstResultEntityId === [...selectedCustomIds][0]
+      ? sourceProject.customColors?.[[...selectedCustomIds][0]]
+      : undefined
+    if (preservedCustomColor && firstResultEntityId) nextCustomColors[firstResultEntityId] = preservedCustomColor
+    const nextProject: ProjectState = {
+      ...sourceProject,
+      // Geometry result data is already normalized by the worker. Reuse all
+      // unrelated catalogs and instance objects instead of cloning the whole
+      // project before the history/React commit.
+      instances: sourceProject.instances.filter((instance) => !selectedInstanceIds.has(instance.id)),
+      customVoxels: [...remainingCustomVoxels, ...transformed],
+      customColors: nextCustomColors,
+      assemblies: (sourceProject.assemblies ?? []).map((assembly) => {
         const memberKeys = assembly.memberKeys.flatMap((memberKey) => selectedReplacementKeys.get(memberKey) ?? [memberKey])
         return { ...assembly, memberKeys: [...new Set(memberKeys)] }
-      }).filter((assembly) => assembly.memberKeys.length >= 2)
-      const preservedCustomColor = selectedCustomIds.size === 1 && firstResultEntityId === [...selectedCustomIds][0]
-        ? sourceProject.customColors?.[[...selectedCustomIds][0]]
-        : undefined
-      if (preservedCustomColor && firstResultEntityId) draft.customColors = { ...(draft.customColors ?? {}), [firstResultEntityId]: preservedCustomColor }
-    })
+      }).filter((assembly) => assembly.memberKeys.length >= 2),
+    }
+    // Keep the established persistent naming rules, but run them in-place on
+    // this structurally shared project rather than paying for a second deep
+    // clone of the large voxel payload.
+    const namedNextProject = normalizeProjectNaming(nextProject, { clone: false })
+    commitGeometryProject(namedNextProject, [...selectedIds], transformedGroups)
     setSelectedId(firstResultEntityId ? `custom:${firstResultEntityId}` : '')
     setCheckedTreePartIds(firstResultEntityId ? [`custom:${firstResultEntityId}`] : [])
     setEditEntityId(null)
@@ -4265,7 +4316,14 @@ function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSce
       <div className="library-columns">
         <div className="library-column library-scene-column">
           <div className="library-column-title">场景</div>
-          <div className="library-scene-list">{library.scenes.length ? library.scenes.map((scene) => <button className={`library-row ${selectedSceneId === scene.id ? 'selected' : ''}`} data-scene-id={scene.id} key={scene.id} onClick={openSceneMenu} onContextMenu={openSceneMenu}><div><strong>{scene.name}</strong><span>{scene.assemblyCount} 个装配体 · {scene.entityCount} 个实体</span></div><div className="library-row-actions"><ChevronRight size={15} /></div></button>) : <div className="empty-panel">尚无场景</div>}</div>
+          <div className="library-scene-list">{library.scenes.length ? library.scenes.map((scene) => {
+            // A selected scene has already gone through the same full scene
+            // entity builder used by the right-hand list. Prefer that live
+            // count over a legacy D1 summary, so old records immediately show
+            // the corrected count without requiring a re-save.
+            const entityCount = selectedSceneId === scene.id && selectedSceneProject ? selectedSceneEntities.length : scene.entityCount
+            return <button className={`library-row ${selectedSceneId === scene.id ? 'selected' : ''}`} data-scene-id={scene.id} key={scene.id} onClick={openSceneMenu} onContextMenu={openSceneMenu}><div><strong>{scene.name}</strong><span>{scene.assemblyCount} 个装配体 · {entityCount} 个实体</span></div><div className="library-row-actions"><ChevronRight size={15} /></div></button>
+          }) : <div className="empty-panel">尚无场景</div>}</div>
           <div className="library-scene-preview" aria-label="选中场景完整预览">
             {selectedSceneProject && scenePreviewVoxels.length ? <SceneLibraryPreview cacheKey={selectedSceneId ?? selectedSceneProject.name} voxels={scenePreviewVoxels} maxVoxels={SCENE_LIBRARY_PREVIEW_MAX_VOXELS} /> : selectedSceneId && busy ? <div className="empty-panel">正在加载场景预览…</div> : <div className="empty-panel">请选择场景查看完整预览</div>}
           </div>
@@ -5020,7 +5078,15 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
     edgeGeometry = new THREE.BufferGeometry()
     edgeGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
   } else if (mesh.userData.greedyMesh) {
-    edgeGeometry = createGreedyVoxelOutlineGeometry(mesh.userData.greedyVoxels as Array<{ gx: number; gy: number; gz: number }> | undefined)
+    const greedyVoxels = mesh.userData.greedyVoxels as Array<{ gx: number; gy: number; gz: number }> | undefined
+    // A per-voxel outline is useful for small editable entities, but becomes
+    // the dominant main-thread cost after enlargement: one 500k-voxel model
+    // can otherwise allocate millions of line vertices just to highlight it.
+    // The merged greedy surface already contains the visible silhouette, so
+    // use its feature edges for large selections.
+    edgeGeometry = greedyVoxels && greedyVoxels.length > CUSTOM_INSTANCE_RENDER_LIMIT
+      ? new THREE.EdgesGeometry(mesh.geometry, 30)
+      : createGreedyVoxelOutlineGeometry(greedyVoxels)
   } else {
     edgeGeometry = createVoxelOutlineGeometry()
   }
@@ -5990,12 +6056,11 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
     })
 
     const existingCustom = group.children.find((child) => child.name === 'custom-voxels') as THREE.Group | undefined
-    const voxelsByEntity = new Map<string, Voxel[]>()
-    project.customVoxels.forEach((voxel) => {
-      const entityId = voxelEntityId(voxel)
-      voxelsByEntity.set(entityId, [...(voxelsByEntity.get(entityId) ?? []), voxel])
-    })
-    if (voxelsByEntity.size) {
+    // sceneEntityParts already maintains per-entity voxel groups for hit tests
+    // and occupancy. Reuse those groups here instead of rebuilding a second
+    // Map with an allocating `[...old, voxel]` operation for every voxel.
+    const customParts = sceneParts.filter((part) => part.kind === 'custom')
+    if (customParts.length) {
       const custom = existingCustom ?? new THREE.Group()
       custom.name = 'custom-voxels'
       if (!existingCustom) group.add(custom)
@@ -6003,9 +6068,11 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
       custom.children.filter((child): child is THREE.Group => child instanceof THREE.Group && typeof child.userData.scenePartId === 'string')
         .forEach((child) => existingComponents.set(child.userData.scenePartId as string, child))
       const retainedComponents = new Set<string>()
-      for (const [entityId, component] of voxelsByEntity) {
+      for (const part of customParts) {
+        const entityId = part.partId
+        const component = part.voxels
         const scenePartId = `custom:${entityId}`
-        const renderSignature = `${project.customColors?.[entityId] ?? ''}|${component.map((voxel) => `${voxel.x},${voxel.y},${voxel.z},${voxel.materialId},${voxel.paintMaterialId ?? ''}`).join(';')}`
+        const renderSignature = voxelRenderSignature(component, project.customColors?.[entityId])
         const existingComponent = existingComponents.get(scenePartId)
         const componentGroup = existingComponent && existingComponent.userData.renderSignature === renderSignature
           ? existingComponent
@@ -7404,23 +7471,55 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
   return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextRenameTargetId && <button onClick={() => { onRename(sceneContextRenameTargetId); setSceneContextMenu(null) }}>重命名</button>}{sceneContextEditTargetId && <button onClick={() => { onEnterEditMode(sceneContextEditTargetId); setSceneContextMenu(null) }}>进入编辑修改模式</button>}{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { applyCameraView('default', 100); onZoomChange(100); onNotice('视角已回中 · 缩放已恢复 100%') }} /></div>
 }
 
+function voxelRenderSignature(component: Voxel[], componentColor?: string): string {
+  // Keep the cache key O(n) but avoid allocating one large string per voxel.
+  // The previous join(';') signature was especially expensive after a 2x/3x
+  // enlargement because it temporarily duplicated hundreds of MB of text on
+  // the main thread before Three.js could start the greedy-mesh worker.
+  let hash = 2166136261
+  const addNumber = (value: number) => {
+    hash ^= value | 0
+    hash = Math.imul(hash, 16777619)
+  }
+  const addText = (value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      hash ^= value.charCodeAt(index)
+      hash = Math.imul(hash, 16777619)
+    }
+    hash ^= 124
+    hash = Math.imul(hash, 16777619)
+  }
+  addNumber(component.length)
+  addText(componentColor ?? '')
+  component.forEach((voxel) => {
+    addNumber(voxel.x)
+    addNumber(voxel.y)
+    addNumber(voxel.z)
+    addText(voxel.materialId)
+    addText(voxel.paintMaterialId ?? '')
+  })
+  return `${component.length}|${hash >>> 0}`
+}
+
+const CUSTOM_INSTANCE_RENDER_LIMIT = 16_384
+
 function buildCustomComponentGroup(component: Voxel[], entityId: string, materialMap: Map<string, THREE.MeshStandardMaterial>, componentColor?: string) {
   const componentGroup = new THREE.Group()
   const componentScenePartId = `custom:${entityId}`
   componentGroup.userData.scenePartId = componentScenePartId
-  const occupied = new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
   const greedyColorIds = new Map<string, number>()
   const greedyColors: string[] = ['#ffffff']
   const greedyVoxels = component.map((voxel) => {
-    const paintedColor = voxel.paintMaterialId ? (materialMap.get(voxel.paintMaterialId)?.color.clone() ?? (voxel.paintMaterialId.startsWith('#') ? new THREE.Color(voxel.paintMaterialId) : undefined)) : undefined
-    const color = paintedColor
-      ? paintedColor
+    const material = voxel.paintMaterialId ? materialMap.get(voxel.paintMaterialId) : undefined
+    const colorKey = material
+      ? `#${material.color.getHexString()}`
       : componentColor
-      ? new THREE.Color(componentColor)
-      : (voxel.materialId.startsWith('#') ? new THREE.Color(voxel.materialId) : (materialMap.get(voxel.materialId) ?? materialMap.get('terracotta')!).color.clone())
-    const colorKey = `#${color.getHexString()}`
+        ? componentColor
+        : voxel.materialId.startsWith('#')
+          ? voxel.materialId
+          : `#${(materialMap.get(voxel.materialId) ?? materialMap.get('terracotta')!).color.getHexString()}`
     let materialId = greedyColorIds.get(colorKey)
-    if (!materialId) {
+    if (materialId === undefined) {
       materialId = greedyColors.length
       greedyColorIds.set(colorKey, materialId)
       greedyColors.push(colorKey)
@@ -7429,14 +7528,22 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
   })
   componentGroup.userData.greedyVoxels = greedyVoxels
   componentGroup.userData.greedyColors = greedyColors
+  // Large results go straight to the worker-backed greedy mesh. Building one
+  // Matrix4 and one InstancedMesh entry per voxel here would block the main
+  // thread again immediately after the fast geometry commit.
+  if (component.length > CUSTOM_INSTANCE_RENDER_LIMIT) return componentGroup
+
+  const occupied = new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
   const batches = new Map<string, { color: THREE.Color; voxels: Voxel[] }>()
   component.forEach((voxel) => {
-    const paintedColor = voxel.paintMaterialId ? (materialMap.get(voxel.paintMaterialId)?.color.clone() ?? (voxel.paintMaterialId.startsWith('#') ? new THREE.Color(voxel.paintMaterialId) : undefined)) : undefined
-    const color = paintedColor
-      ? paintedColor
+    const material = voxel.paintMaterialId ? materialMap.get(voxel.paintMaterialId) : undefined
+    const color = material
+      ? material.color.clone()
       : componentColor
-      ? new THREE.Color(componentColor)
-      : (voxel.materialId.startsWith('#') ? new THREE.Color(voxel.materialId) : (materialMap.get(voxel.materialId) ?? materialMap.get('terracotta')!).color.clone())
+        ? new THREE.Color(componentColor)
+        : voxel.materialId.startsWith('#')
+          ? new THREE.Color(voxel.materialId)
+          : (materialMap.get(voxel.materialId) ?? materialMap.get('terracotta')!).color.clone()
     const key = color.getHexString()
     const batch = batches.get(key) ?? { color, voxels: [] }
     batch.voxels.push(voxel)

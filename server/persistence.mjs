@@ -228,6 +228,35 @@ function uniqueStoredAssetName(database, asset) {
   return `${baseName} (${index})`
 }
 
+function voxelKey(voxel) {
+  return `${voxel.x},${voxel.y},${voxel.z}`
+}
+
+// Keep the library summary consistent with the editor's voxelComponents()
+// rule. Counting asset.partVoxels entries directly is incorrect for old
+// imported GLB/OBJ/STL snapshots: those files may retain source mesh parts,
+// while the editor intentionally exposes the imported model as one entity.
+function connectedComponentCount(voxels) {
+  const remaining = new Set(voxels.map(voxelKey))
+  let count = 0
+  while (remaining.size) {
+    count += 1
+    const first = remaining.values().next().value
+    remaining.delete(first)
+    const queue = [first.split(',').map(Number)]
+    for (let index = 0; index < queue.length; index += 1) {
+      const [x, y, z] = queue[index]
+      for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+        const nextKey = `${x + dx},${y + dy},${z + dz}`
+        if (!remaining.has(nextKey)) continue
+        remaining.delete(nextKey)
+        queue.push(nextKey.split(',').map(Number))
+      }
+    }
+  }
+  return count
+}
+
 function sceneSummary(scene) {
   const state = scene.scene && typeof scene.scene === 'object' ? scene.scene : scene
   const sceneAssets = Array.isArray(scene.sceneAssets) ? scene.sceneAssets : []
@@ -236,6 +265,7 @@ function sceneSummary(scene) {
   const assemblies = Array.isArray(state.assemblies) ? state.assemblies : []
   const assetMap = new Map(sceneAssets.map((asset) => [asset.id, asset]))
   const partCountForInstance = (instance) => {
+    if (instance.visible === false) return 0
     const asset = assetMap.get(instance.assetId)
     if (!asset || !Array.isArray(asset.voxels)) return 1
     const resolved = new Map(asset.voxels.map((voxel) => [`${voxel.x},${voxel.y},${voxel.z}`, voxel]))
@@ -245,20 +275,27 @@ function sceneSummary(scene) {
       else resolved.set(key, override)
     }
     const partVoxels = asset.partVoxels && typeof asset.partVoxels === 'object' ? asset.partVoxels : null
-    if (!partVoxels) return resolved.size ? 1 : 0
+    const isImportedModel = asset.kind === 'imported'
+      && /\.(?:glb|gltf|obj|stl)$/i.test(String(asset.source ?? ''))
+      && !asset.assembly
+    if (isImportedModel || (asset.kind === 'imported' && !partVoxels && !asset.assembly)) return resolved.size ? 1 : 0
+    if (!partVoxels || !Object.keys(partVoxels).length) return connectedComponentCount([...resolved.values()])
     const claimed = new Set()
     let count = 0
     for (const part of Object.values(partVoxels)) {
       if (!Array.isArray(part)) continue
-      let present = false
+      const present = []
       for (const voxel of part) {
         const key = `${voxel.x},${voxel.y},${voxel.z}`
-        if (resolved.has(key)) present = true
+        if (resolved.has(key)) present.push(resolved.get(key))
         claimed.add(key)
       }
-      if (present) count += 1
+      count += connectedComponentCount(present)
     }
-    if ([...resolved.keys()].some((key) => !claimed.has(key))) count += 1
+    const additions = [...resolved.values()].filter((voxel) => !claimed.has(voxelKey(voxel)))
+    // This mirrors resolveInstanceComponents(): unclaimed overrides are kept
+    // as one additional component, even if they contain disconnected islands.
+    if (additions.length) count += 1
     return count || (resolved.size ? 1 : 0)
   }
   const logicalEntityCount = instances.reduce((total, instance) => total + partCountForInstance(instance), 0)
