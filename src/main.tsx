@@ -747,6 +747,8 @@ type VoxelStrokeTransaction = {
   occupiedCustomSceneKeys: Set<string>
   dirtyOwnerIds: Set<string>
   dirtyOwnerRoots: Set<string>
+  touchedOwnerIds: Set<string>
+  touchedOwnerRoots: Set<string>
   publishedOwnerIds: Map<string, Set<string>>
   dirty: boolean
 }
@@ -1166,13 +1168,17 @@ function App() {
   const markVoxelStrokeOwners = (ownerIds: Iterable<string>) => {
     const transaction = voxelStrokeTransactionRef.current
     if (!transaction) return
-    for (const ownerId of ownerIds) transaction.dirtyOwnerIds.add(ownerId)
+    for (const ownerId of ownerIds) {
+      transaction.dirtyOwnerIds.add(ownerId)
+      transaction.touchedOwnerIds.add(ownerId)
+    }
   }
 
   const markVoxelStrokeOwnerRoot = (instanceId: string) => {
     const transaction = voxelStrokeTransactionRef.current
     if (!transaction) return
     transaction.dirtyOwnerRoots.add(instanceId)
+    transaction.touchedOwnerRoots.add(instanceId)
   }
 
   const useMaterial = (materialId: string) => {
@@ -1255,6 +1261,8 @@ function App() {
         .map(sceneVoxelKey)),
       dirtyOwnerIds: new Set(),
       dirtyOwnerRoots: new Set(),
+      touchedOwnerIds: new Set(),
+      touchedOwnerRoots: new Set(),
       publishedOwnerIds: new Map(),
       dirty: false,
     }
@@ -1268,6 +1276,7 @@ function App() {
       voxelStrokePublishFrameRef.current = null
     }
     const transaction = voxelStrokeTransactionRef.current
+    const initialParts = voxelStrokePartsRef.current ?? []
     voxelStrokeTransactionRef.current = null
     voxelStrokePartsRef.current = null
     if (!transaction) return
@@ -1284,7 +1293,18 @@ function App() {
       checkedTreePartIds: [...transaction.historyCheckedTreePartIds],
     }].slice(-50)
     historyRef.current.future = []
-    sceneOccupancyRef.current?.syncParts(sceneEntityParts(next))
+    const finalParts = sceneEntityParts(next)
+    const touchedOwnerIds = new Set(transaction.touchedOwnerIds)
+    transaction.touchedOwnerRoots.forEach((instanceId) => {
+      initialParts.filter((part) => part.instanceId === instanceId).forEach((part) => touchedOwnerIds.add(part.id))
+      finalParts.filter((part) => part.instanceId === instanceId).forEach((part) => touchedOwnerIds.add(part.id))
+    })
+    // Brush operations already record the owners they touched while the
+    // transaction is published. Reconcile only those owners on pointer-up;
+    // rebuilding the complete scene index here was the remaining release-time
+    // hitch for scenes containing large unrelated entities.
+    if (touchedOwnerIds.size) sceneOccupancyRef.current?.syncOwnerParts(finalParts, touchedOwnerIds)
+    else sceneOccupancyRef.current?.syncParts(finalParts)
     projectRef.current = next
     markSceneDirty()
     setProject(next)
