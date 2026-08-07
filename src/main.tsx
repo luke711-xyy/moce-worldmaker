@@ -4591,7 +4591,7 @@ function App() {
             <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { if (cameraControlApi) cameraControlApi.zoomOut(); else setZoomLevel((value) => stepZoomLevel(value, -1)); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${zoomTrackProgress(zoomLevel)}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { if (cameraControlApi) cameraControlApi.zoomIn(); else setZoomLevel((value) => stepZoomLevel(value, 1)); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{Math.round(zoomLevel)}%</span></div>
           </div>
         </section>
-        <Inspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} geometryPreview={geometryPreview} shellThicknessOptions={geometryShellThicknessOptions} scaleOptions={geometryScaleOptions} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onPreviewHsl={previewSelectedHsl} onCommitHsl={commitSelectedHsl} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportGlb={exportSelectedPartGlb} onExportVox={exportSelectedPartVox} onExportEntityFile={exportSelectedEntityFile} onOpenSlicer={() => setSliceDialogOpen(true)} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => setCopyPreview(null)} onStartShell={startShellPreview} onStartScale={startScalePreview} onChangeShellThickness={changeGeometryShellThickness} onChangeScale={changeGeometryScale} onConfirmGeometry={confirmGeometryPreview} onCancelGeometry={cancelGeometryPreview} onDelete={deleteSelected} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
+        <MemoizedInspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} geometryPreview={geometryPreview} shellThicknessOptions={geometryShellThicknessOptions} scaleOptions={geometryScaleOptions} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onPreviewHsl={previewSelectedHsl} onCommitHsl={commitSelectedHsl} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportGlb={exportSelectedPartGlb} onExportVox={exportSelectedPartVox} onExportEntityFile={exportSelectedEntityFile} onOpenSlicer={() => setSliceDialogOpen(true)} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => setCopyPreview(null)} onStartShell={startShellPreview} onStartScale={startScalePreview} onChangeShellThickness={changeGeometryShellThickness} onChangeScale={changeGeometryScale} onConfirmGeometry={confirmGeometryPreview} onCancelGeometry={cancelGeometryPreview} onDelete={deleteSelected} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
       </main>
       {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} error={libraryError} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null) }} onImportScene={() => sceneLibraryImportInputRef.current?.click()} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} />}
       {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
@@ -5174,6 +5174,67 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
     </>}
   </aside>
 }
+
+type InspectorProps = Parameters<typeof Inspector>[0]
+
+function inspectorPartsSignature(parts: SceneEntityPart[]): string {
+  return parts.map((part) => {
+    const root = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
+    const local = part.partSceneOffset ?? { x: 0, y: 0, z: 0 }
+    return [
+      part.id,
+      part.kind,
+      part.instanceId ?? '',
+      part.partId,
+      previewVoxelArrayId(part.voxels),
+      part.voxels.length,
+      root.x + local.x,
+      root.y + local.y,
+      root.z + local.z,
+      part.colorOverride ?? '',
+    ].join(':')
+  }).join('|')
+}
+
+function inspectorAssetSignature(asset?: VoxelAsset): string {
+  if (!asset) return ''
+  return [asset.id, previewVoxelArrayId(asset.voxels), asset.voxels.length, asset.color, asset.accent, asset.templateColor ?? ''].join(':')
+}
+
+function sameNumberArray(left: number[], right: number[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
+function sameScaleOptions(left: InspectorProps['scaleOptions'], right: InspectorProps['scaleOptions']): boolean {
+  return sameNumberArray(left.up, right.up) && sameNumberArray(left.down, right.down)
+}
+
+function inspectorPropsEqual(previous: InspectorProps, next: InspectorProps): boolean {
+  // Pointer movement updates the viewport imperatively. The inspector only
+  // needs to publish the committed position once the gesture is released.
+  // Ignore callback identity: these callbacks are event handlers owned by App
+  // and the rendered inspector state below is compared explicitly, avoiding
+  // stale visual state without forcing a panel render on every parent update.
+  return previous.entityName === next.entityName
+    && previous.source === next.source
+    && inspectorAssetSignature(previous.selectedAsset) === inspectorAssetSignature(next.selectedAsset)
+    && inspectorPartsSignature(previous.selectedParts) === inspectorPartsSignature(next.selectedParts)
+    && previous.editEntityId === next.editEntityId
+    && previous.canEnterEditMode === next.canEnterEditMode
+    && previous.editTargetId === next.editTargetId
+    && previous.transformEditable === next.transformEditable
+    && sameNumberArray(previous.position, next.position)
+    && previous.selectedColor === next.selectedColor
+    && previous.previewColor === next.previewColor
+    && previous.previewVoxelColors === next.previewVoxelColors
+    && previous.previewMaterialColors === next.previewMaterialColors
+    && previous.copyPreview === next.copyPreview
+    && previous.geometryPreview === next.geometryPreview
+    && sameNumberArray(previous.shellThicknessOptions, next.shellThicknessOptions)
+    && sameScaleOptions(previous.scaleOptions, next.scaleOptions)
+}
+
+const MemoizedInspector = React.memo(Inspector, inspectorPropsEqual)
 
 function sliceCoordinates(plane: SlicePlane, voxel: SliceVoxel): { u: number; v: number } {
   if (plane === 'xy') return { u: voxel.x, v: voxel.y }
