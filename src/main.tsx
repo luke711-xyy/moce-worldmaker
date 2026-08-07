@@ -25,6 +25,12 @@ import { computeScale, computeShell, GeometryScaleMode, GeometryVoxel, validScal
 import { createZip } from './zip'
 import './styles.css'
 
+function useStableEvent<T extends (...args: any[]) => any>(handler: T): T {
+  const handlerRef = useRef(handler)
+  handlerRef.current = handler
+  return useMemo(() => ((...args: Parameters<T>) => handlerRef.current(...args)) as T, [])
+}
+
 declare global {
   interface Window {
     __MOCE_PERFORMANCE__?: {
@@ -1152,7 +1158,8 @@ function App() {
     }
     sceneOccupancyRef.current?.syncParts(sceneParts)
   }, [sceneParts])
-  const lockedPartIds = useMemo(() => new Set(sceneParts.filter((part) => scenePartIsLocked(project, part)).map((part) => part.id)), [project, sceneParts])
+  const sceneTreePartsKey = useMemo(() => sceneParts.map((part) => `${part.id}:${part.memberKey}:${part.assemblyIds?.join(',') ?? ''}`).join('|'), [sceneParts])
+  const lockedPartIds = useMemo(() => new Set(sceneParts.filter((part) => scenePartIsLocked(project, part)).map((part) => part.id)), [sceneTreePartsKey, project.lockedMemberKeys, project.assemblies])
   const selectedAssemblyId = selectedId.startsWith('assembly:') ? selectedId.slice('assembly:'.length) : undefined
   const selectedScenePart = sceneParts.find((part) => part.id === selectedId) ?? sceneParts.find((part) => part.instanceId === selectedId)
   const selectedInstance = selectedScenePart?.instanceId ? project.instances.find((instance) => instance.id === selectedScenePart.instanceId) : project.instances.find((instance) => instance.id === selectedId)
@@ -1259,7 +1266,6 @@ function App() {
   // A transform-only move changes scene offsets, but never changes the file
   // tree. Keep the tree calculation keyed to structural fields so releasing a
   // large voxel entity does not rebuild every assembly row.
-  const sceneTreePartsKey = useMemo(() => sceneParts.map((part) => `${part.id}:${part.memberKey}:${part.assemblyIds?.join(',') ?? ''}`).join('|'), [sceneParts])
   const sceneTreeItems = useMemo<SceneTreeItem[]>(() => {
     const baseNameForPart = (part: SceneEntityPart) => sceneEntityTreeName(project, part)
     const assemblies = project.assemblies ?? []
@@ -4525,6 +4531,35 @@ function App() {
     setTreeContextMenu(null)
   }
 
+  // These handlers are event-backed rather than render-data props. Keeping
+  // their identities stable lets the memoized side panels skip renders during
+  // camera/drag updates while still dispatching to the latest App state.
+  const assetToggleSelection = useStableEvent((assetId: string) => setSelectedAssetIds((current) => current.includes(assetId) ? current.filter((id) => id !== assetId) : [...current, assetId]))
+  const assetClearSelection = useStableEvent(() => setSelectedAssetIds([]))
+  const assetToggleCollapsed = useStableEvent(() => setAssetSidebarCollapsed((value) => !value))
+  const assetContextMenuHandler = useStableEvent((assetId: string, x: number, y: number) => { setAssetContextMenu({ assetId, x, y }); setAssetCategoryContextMenu(null) })
+  const assetCategoryContextMenuHandler = useStableEvent((path: string[], x: number, y: number) => { setAssetCategoryContextMenu({ path, x, y }); setAssetContextMenu(null) })
+  const treeToggleExpanded = useStableEvent((assemblyId: string) => setExpandedAssemblies((current) => ({ ...current, [assemblyId]: !(current[assemblyId] ?? true) })))
+  const treeContextMenuHandler = useStableEvent((targetId: string, x: number, y: number, assemblyId?: string) => { if (!editEntityId || targetId === editEntityId) setTreeContextMenu({ targetId, assemblyId, x, y }) })
+  const stableAssetExport = useStableEvent(exportTemplateAssets)
+  const stableAssetNotice = useStableEvent(setNotice)
+  const stableAssetBeginPlacement = useStableEvent(beginPlacement)
+  const stableAssetEndPlacement = useStableEvent(endPlacement)
+  const stableAssetCreateCategory = useStableEvent(createAssetCategory)
+  const stableAssetDeleteCategory = useStableEvent(deleteAssetCategory)
+  const stableAssetRename = useStableEvent(renameTemplateAsset)
+  const stableAssetDuplicate = useStableEvent(duplicateTemplateAsset)
+  const stableAssetDelete = useStableEvent(deleteTemplateAsset)
+  const stableAssetChangeColor = useStableEvent(changeTemplateAssetColor)
+  const stableTreeSelect = useStableEvent(selectTreeItem)
+  const stableTreeToggleChecked = useStableEvent(toggleTreeChecked)
+  const stableTreeAssemble = useStableEvent(assembleCheckedTreeParts)
+  const stableTreeDissolve = useStableEvent(dissolveSceneAssembly)
+  const stableTreeEnterEdit = useStableEvent(enterEditMode)
+  const stableTreeRename = useStableEvent(renameSceneEntity)
+  const stableTreeDelete = useStableEvent(deleteSceneTreeEntity)
+  const stableTreeToggleLock = useStableEvent(toggleTreeLock)
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -4554,7 +4589,7 @@ function App() {
       </header>
 
       <main className={`workspace ${assetSidebarCollapsed ? 'asset-sidebar-collapsed' : ''}`} onClick={() => { if (treeContextMenu) setTreeContextMenu(null); if (assetContextMenu) setAssetContextMenu(null); if (assetCategoryContextMenu) setAssetCategoryContextMenu(null); if (sceneLibraryContextMenu) setSceneLibraryContextMenu(null); if (voxelSizeOpen) setVoxelSizeOpen(false) }}>
-        <AssetSidebar assets={filteredAssets} categoryPaths={assetCategoryPaths} query={query} setQuery={setQuery} selectedAssetIds={selectedAssetIds} onToggleAssetSelection={(assetId) => setSelectedAssetIds((current) => current.includes(assetId) ? current.filter((id) => id !== assetId) : [...current, assetId])} onClearAssetSelection={() => setSelectedAssetIds([])} onExportAssets={exportTemplateAssets} collapsed={assetSidebarCollapsed} onToggleCollapsed={() => setAssetSidebarCollapsed((value) => !value)} onNotice={setNotice} onBeginPlacement={beginPlacement} onEndPlacement={endPlacement} onContextMenu={(assetId, x, y) => { setAssetContextMenu({ assetId, x, y }); setAssetCategoryContextMenu(null) }} contextMenu={assetContextMenu} categoryContextMenu={assetCategoryContextMenu} onCategoryContextMenu={(path, x, y) => { setAssetCategoryContextMenu({ path, x, y }); setAssetContextMenu(null) }} onCreateCategory={createAssetCategory} onDeleteCategory={deleteAssetCategory} onRenameAsset={renameTemplateAsset} onDuplicateAsset={duplicateTemplateAsset} onDeleteAsset={deleteTemplateAsset} onChangeAssetColor={changeTemplateAssetColor} />
+        <MemoizedAssetSidebar assets={filteredAssets} categoryPaths={assetCategoryPaths} query={query} setQuery={setQuery} selectedAssetIds={selectedAssetIds} onToggleAssetSelection={assetToggleSelection} onClearAssetSelection={assetClearSelection} onExportAssets={stableAssetExport} collapsed={assetSidebarCollapsed} onToggleCollapsed={assetToggleCollapsed} onNotice={stableAssetNotice} onBeginPlacement={stableAssetBeginPlacement} onEndPlacement={stableAssetEndPlacement} onContextMenu={assetContextMenuHandler} contextMenu={assetContextMenu} categoryContextMenu={assetCategoryContextMenu} onCategoryContextMenu={assetCategoryContextMenuHandler} onCreateCategory={stableAssetCreateCategory} onDeleteCategory={stableAssetDeleteCategory} onRenameAsset={stableAssetRename} onDuplicateAsset={stableAssetDuplicate} onDeleteAsset={stableAssetDelete} onChangeAssetColor={stableAssetChangeColor} />
         <section className="viewport-panel">
           <div className="viewport-toolbar">
             <div className="view-toggle">{(['正交', '透视'] as const).map((mode) => <button key={mode} className={viewMode === mode ? 'active' : ''} onClick={() => { setViewMode(mode); setNotice(`已切换视图 · ${mode}`) }}>{mode}</button>)}</div>
@@ -4584,7 +4619,7 @@ function App() {
             </div>
           </div>
           <VoxelViewport project={project} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={(value) => setZoomLevel(clampZoomLevel(value))} onCameraApiChange={setCameraControlApi} onInteractionChange={(active) => { interactionActiveRef.current = active; if (active && tool !== 'select') beginVoxelStroke(); if (!active) { commitVoxelStroke(); voxelStrokeEntityRef.current = null } }} onRaycastVoxel={raycastSceneVoxel} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onCancelPendingEntityOperation={() => { setCopyPreview(null); cancelGeometryPreview() }} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onRemoveVoxels={removeVoxels} onEditInstanceVoxel={editInstanceVoxel} onEditInstanceVoxels={editInstanceVoxels} onApplyVoxelBatch={applyVoxelBatch} onPreviewScenePartsMove={previewScenePartsMove} onCommitScenePartsMove={commitScenePartsMove} onPreviewPlacement={previewPlacementAt} onPlaceAsset={placeAssetAt} onNotice={notifyEditor} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
-            <SceneTreePanel items={sceneTreeItems} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} expandedAssemblies={expandedAssemblies} contextMenu={treeContextMenu} onToggleExpanded={(assemblyId) => setExpandedAssemblies((current) => ({ ...current, [assemblyId]: !(current[assemblyId] ?? true) }))} onSelect={selectTreeItem} onToggleChecked={toggleTreeChecked} onAssemble={assembleCheckedTreeParts} onDissolve={dissolveSceneAssembly} onEnterEdit={enterEditMode} onRename={renameSceneEntity} onDelete={deleteSceneTreeEntity} onToggleLock={toggleTreeLock} onContextMenu={(targetId, x, y, assemblyId) => { if (!editEntityId || targetId === editEntityId) setTreeContextMenu({ targetId, assemblyId, x, y }) }} />
+            <MemoizedSceneTreePanel items={sceneTreeItems} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} expandedAssemblies={expandedAssemblies} contextMenu={treeContextMenu} onToggleExpanded={treeToggleExpanded} onSelect={stableTreeSelect} onToggleChecked={stableTreeToggleChecked} onAssemble={stableTreeAssemble} onDissolve={stableTreeDissolve} onEnterEdit={stableTreeEnterEdit} onRename={stableTreeRename} onDelete={stableTreeDelete} onToggleLock={stableTreeToggleLock} onContextMenu={treeContextMenuHandler} />
           </VoxelViewport>
           <ToolboxPopover open={toolboxOpen} onClose={() => setToolboxOpen(false)} tool={tool} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} onToolChange={changeTool} onPlaneChange={setDrawingPlane} onOperationChange={setDrawOperation} onBrushSizeChange={setBrushSize} />
           <div className="viewport-footer">
@@ -4713,6 +4748,8 @@ function SceneTreePanel({ items, selectedId, selectedPartIds, expandedAssemblies
   </aside>
 }
 
+const MemoizedSceneTreePanel = React.memo(SceneTreePanel)
+
 function AssetSidebar({ assets, categoryPaths, query, setQuery, selectedAssetIds, onToggleAssetSelection, onClearAssetSelection, onExportAssets, collapsed, onToggleCollapsed, onNotice, onBeginPlacement, onEndPlacement, contextMenu, onContextMenu, categoryContextMenu, onCategoryContextMenu, onCreateCategory, onDeleteCategory, onRenameAsset, onDuplicateAsset, onDeleteAsset, onChangeAssetColor }: { assets: VoxelAsset[]; categoryPaths: string[][]; query: string; setQuery: (value: string) => void; selectedAssetIds: string[]; onToggleAssetSelection: (assetId: string) => void; onClearAssetSelection: () => void; onExportAssets: (assetIds: string[]) => void; collapsed: boolean; onToggleCollapsed: () => void; onNotice: (value: string) => void; onBeginPlacement: (asset: VoxelAsset) => void; onEndPlacement: () => void; contextMenu: AssetContextMenuState; onContextMenu: (assetId: string, x: number, y: number) => void; categoryContextMenu: AssetCategoryContextMenuState; onCategoryContextMenu: (path: string[], x: number, y: number) => void; onCreateCategory: (parentPath: string[] | null) => void; onDeleteCategory: (path: string[]) => void; onRenameAsset: (assetId: string) => void; onDuplicateAsset: (assetId: string) => void; onDeleteAsset: (assetId: string) => void; onChangeAssetColor: (assetId: string, color: string) => void }) {
   const categoryTree = assetCategoryTreeFromAssetsAndPaths(assets, categoryPaths)
   const [expandedCategoryKeys, setExpandedCategoryKeys] = useState<Record<string, boolean>>({})
@@ -4758,6 +4795,8 @@ function AssetSidebar({ assets, categoryPaths, query, setQuery, selectedAssetIds
     })()}
   </aside>
 }
+
+const MemoizedAssetSidebar = React.memo(AssetSidebar)
 
 function AssetCategorySaveDialog({ asset, assets, onCancel, onSave }: { asset: VoxelAsset; assets: VoxelAsset[]; onCancel: () => void; onSave: (name: string, categoryPath: string[]) => void }) {
   const existingPaths = collectAssetCategoryPaths(assets)
