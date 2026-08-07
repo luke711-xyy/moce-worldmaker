@@ -424,6 +424,32 @@ function normalizeStoredProject(loaded: ProjectState, options: NormalizeStoredPr
   return options.normalizeNaming === false ? normalized : normalizeProjectNaming(normalized)
 }
 
+/**
+ * Finalize a project that was edited through the voxel stroke transaction.
+ *
+ * The transaction starts from an already normalized project and clones its
+ * mutable scene collections up front. Running the general storage normalizer
+ * here would clone every asset and voxel again on pointer-up. Keep this path
+ * deliberately narrow: preserve immutable catalogs and existing voxel
+ * objects, repair only legacy IDs that may have been encountered, refresh the
+ * cheap derived bounds, and normalize the tree names in-place on the cloned
+ * scene collections.
+ */
+function finalizeVoxelStrokeProject(project: ProjectState): ProjectState {
+  if (isLegacyDefaultSampleProject(project)) return normalizeStoredProject(project)
+  const customVoxels = project.customVoxels.some((voxel) => !voxel.entityId)
+    ? project.customVoxels.map((voxel, index) => ({ ...voxel, entityId: voxel.entityId ?? `legacy-${voxel.x}-${voxel.y}-${voxel.z}-${index}` }))
+    : project.customVoxels
+  const next: ProjectState = {
+    ...project,
+    voxelSizeMm: normalizeVoxelSizeMm(project.voxelSizeMm),
+    sceneBounds: sceneBoundsForProject(project),
+    customVoxels,
+    lockedMemberKeys: project.lockedMemberKeys ? [...new Set(project.lockedMemberKeys)] : [],
+  }
+  return normalizeProjectNaming(next, { clone: false })
+}
+
 function scenePartIsLocked(project: ProjectState, part: SceneEntityPart): boolean {
   const lockedKeys = new Set(project.lockedMemberKeys ?? [])
   if (lockedKeys.has(part.memberKey)) return true
@@ -1299,7 +1325,10 @@ function App() {
       voxelStrokeNoticeRef.current = null
       return
     }
-    const next = normalizeStoredProject(transaction.draft)
+    // The draft already starts from a normalized project and owns the scene
+    // collections it can mutate. Avoid the general persistence normalizer's
+    // full asset/voxel clone on pointer-up.
+    const next = finalizeVoxelStrokeProject(transaction.draft)
     historyRef.current.past = [...historyRef.current.past, {
       project: transaction.original,
       editEntityId: transaction.historyEditEntityId,
