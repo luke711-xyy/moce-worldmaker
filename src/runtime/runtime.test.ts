@@ -79,6 +79,16 @@ describe('SceneOccupancyIndex', () => {
     expect(index.queryProjectVoxel(voxel(41, 7, 1)).occupied).toBe(false)
   })
 
+  it('collects only occupied owners inside a local erase region', () => {
+    const index = SceneOccupancyIndex.fromParts([
+      part('center', [voxel(0, 0, 0), voxel(1, 0, 0)]),
+      part('outside', [voxel(8, 0, 0)]),
+    ])
+    expect(index.collectProjectVoxelsInRegion({ minX: -1, maxX: 2, minY: -1, maxY: 1, minZ: -1, maxZ: 1 })).toEqual(new Map([
+      ['center', [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }]],
+    ]))
+  })
+
   it('clears a lazy translation when synchronization restores the original snapshot', () => {
     const original = [voxel(1, 2, 3)]
     const index = SceneOccupancyIndex.fromParts([part('entity', original)])

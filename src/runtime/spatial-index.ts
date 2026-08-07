@@ -29,6 +29,15 @@ export type OccupancySyncResult = {
   unchanged: number
 }
 
+export type ProjectVoxelRegion = {
+  minX: number
+  maxX: number
+  minY: number
+  maxY: number
+  minZ: number
+  maxZ: number
+}
+
 type RuntimeVoxelBounds = {
   minGx: number
   minGy: number
@@ -274,6 +283,39 @@ export class SceneOccupancyIndex {
 
   queryProjectVoxel(voxel: Pick<Voxel, 'x' | 'y' | 'z'>): OccupancyHit {
     return this.queryRuntimeVoxel(projectVoxelToRuntime(voxel))
+  }
+
+  /**
+   * Enumerate only the occupied project cells inside a small integer region.
+   *
+   * Tools such as quick erase need owner information around the pointer, not
+   * a flattened copy of every scene voxel. Walking the region through the
+   * chunk-backed query keeps the work proportional to the brush volume and
+   * also accounts for lazy owner translations created by entity dragging.
+   */
+  collectProjectVoxelsInRegion(region: ProjectVoxelRegion): Map<string, Array<Pick<Voxel, 'x' | 'y' | 'z'>>> {
+    const result = new Map<string, Array<Pick<Voxel, 'x' | 'y' | 'z'>>>()
+    const minX = Math.ceil(Math.min(region.minX, region.maxX))
+    const maxX = Math.floor(Math.max(region.minX, region.maxX))
+    const minY = Math.ceil(Math.min(region.minY, region.maxY))
+    const maxY = Math.floor(Math.max(region.minY, region.maxY))
+    const minZ = Math.ceil(Math.min(region.minZ, region.maxZ))
+    const maxZ = Math.floor(Math.max(region.minZ, region.maxZ))
+    for (let x = minX; x <= maxX; x += 1) {
+      for (let y = minY; y <= maxY; y += 1) {
+        for (let z = minZ; z <= maxZ; z += 1) {
+          const ownerIds = this.queryProjectVoxel({ x, y, z }).ownerIds
+          if (!ownerIds.length) continue
+          const point = { x, y, z }
+          ownerIds.forEach((ownerId) => {
+            const cells = result.get(ownerId)
+            if (cells) cells.push(point)
+            else result.set(ownerId, [point])
+          })
+        }
+      }
+    }
+    return result
   }
 
   queryRuntimeVoxel(voxel: RuntimeVoxelCoord): OccupancyHit {

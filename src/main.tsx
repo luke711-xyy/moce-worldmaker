@@ -1744,10 +1744,27 @@ function App() {
     if (!targets.size) return
     const parts = voxelStrokePartsRef.current ?? sceneEntityParts(projectRef.current)
     const storedTargetKeys = new Set<string>()
-    parts.filter((part) => part.kind === 'custom').forEach((part) => {
+    const customParts = parts.filter((part) => part.kind === 'custom')
+    const customPartsById = new Map(customParts.map((part) => [part.partId, part]))
+    const unresolvedTargets = new Set<string>()
+    // Quick erase supplies the owning entity id with each target voxel. Use
+    // that metadata to convert scene coordinates back to canonical storage
+    // coordinates directly; the previous fallback scanned every custom voxel
+    // for every erase sample, which made large hand-drawn entities expensive.
+    voxels.forEach((voxel) => {
+      const entityId = voxel.entityId
+      const part = entityId ? customPartsById.get(entityId) : undefined
+      if (!entityId || !part) {
+        unresolvedTargets.add(sceneVoxelKey(voxel))
+        return
+      }
+      const offset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
+      storedTargetKeys.add(`${entityId}:${sceneVoxelKey({ x: voxel.x - offset.x, y: voxel.y - offset.y, z: voxel.z - offset.z })}`)
+    })
+    if (unresolvedTargets.size) customParts.forEach((part) => {
       const sceneVoxels = scenePartVoxels(part)
       sceneVoxels.forEach((sceneVoxel, index) => {
-        if (targets.has(sceneVoxelKey(sceneVoxel))) storedTargetKeys.add(`${part.partId}:${sceneVoxelKey(part.voxels[index])}`)
+        if (unresolvedTargets.has(sceneVoxelKey(sceneVoxel))) storedTargetKeys.add(`${part.partId}:${sceneVoxelKey(part.voxels[index])}`)
       })
     })
     updateProject((draft) => {
@@ -4121,7 +4138,7 @@ function App() {
               </div>}
             </div>
           </div>
-          <VoxelViewport project={project} sceneParts={sceneParts} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={(value) => setZoomLevel(clampZoomLevel(value))} onCameraApiChange={setCameraControlApi} onInteractionChange={(active) => { interactionActiveRef.current = active; if (active && tool !== 'select') beginVoxelStroke(); if (!active) { commitVoxelStroke(); voxelStrokeEntityRef.current = null } }} onRaycastVoxel={raycastSceneVoxel} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onCancelPendingEntityOperation={() => { setCopyPreview(null); cancelGeometryPreview() }} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onRemoveVoxels={removeVoxels} onEditInstanceVoxel={editInstanceVoxel} onEditInstanceVoxels={editInstanceVoxels} onApplyVoxelBatch={applyVoxelBatch} onPreviewScenePartsMove={previewScenePartsMove} onCommitScenePartsMove={commitScenePartsMove} onPreviewPlacement={previewPlacementAt} onPlaceAsset={placeAssetAt} onNotice={notifyEditor} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
+          <VoxelViewport project={project} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={(value) => setZoomLevel(clampZoomLevel(value))} onCameraApiChange={setCameraControlApi} onInteractionChange={(active) => { interactionActiveRef.current = active; if (active && tool !== 'select') beginVoxelStroke(); if (!active) { commitVoxelStroke(); voxelStrokeEntityRef.current = null } }} onRaycastVoxel={raycastSceneVoxel} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onCancelPendingEntityOperation={() => { setCopyPreview(null); cancelGeometryPreview() }} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onRemoveVoxels={removeVoxels} onEditInstanceVoxel={editInstanceVoxel} onEditInstanceVoxels={editInstanceVoxels} onApplyVoxelBatch={applyVoxelBatch} onPreviewScenePartsMove={previewScenePartsMove} onCommitScenePartsMove={commitScenePartsMove} onPreviewPlacement={previewPlacementAt} onPlaceAsset={placeAssetAt} onNotice={notifyEditor} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
             <SceneTreePanel items={sceneTreeItems} selectedId={selectedId} selectedPartIds={selectedEntityParts.map((part) => part.id)} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} expandedAssemblies={expandedAssemblies} contextMenu={treeContextMenu} onToggleExpanded={(assemblyId) => setExpandedAssemblies((current) => ({ ...current, [assemblyId]: !(current[assemblyId] ?? true) }))} onSelect={selectTreeItem} onToggleChecked={toggleTreeChecked} onAssemble={assembleCheckedTreeParts} onDissolve={dissolveSceneAssembly} onEnterEdit={enterEditMode} onRename={renameSceneEntity} onDelete={deleteSceneTreeEntity} onToggleLock={toggleTreeLock} onContextMenu={(targetId, x, y, assemblyId) => { if (!editEntityId || targetId === editEntityId) setTreeContextMenu({ targetId, assemblyId, x, y }) }} />
           </VoxelViewport>
           <ToolboxPopover open={toolboxOpen} onClose={() => setToolboxOpen(false)} tool={tool} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} onToolChange={changeTool} onPlaneChange={setDrawingPlane} onOperationChange={setDrawOperation} onBrushSizeChange={setBrushSize} />
@@ -5490,7 +5507,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   </div>
 }
 
-function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, activeMaterial, materials, dragAxis, placementAsset, copyPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; sceneParts: SceneEntityPart[]; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
+function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, activeMaterial, materials, dragAxis, placementAsset, copyPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; sceneParts: SceneEntityPart[]; occupancyIndex: SceneOccupancyIndex | null; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.Camera | null>(null)
@@ -7159,42 +7176,58 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
       const assemblyId = editEntityId.slice('assembly:'.length)
       return (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(assemblyId)
     }
-    const customTargets = parts.filter((part) => part.kind === 'custom' && (!editEntityId || belongsToCurrentEdit(part)))
-      .flatMap((part) => scenePartVoxels(part))
-      .filter((voxel) => {
-        const dx = voxel.x - center.x
-        const dy = voxel.y - center.y
-        const dz = voxel.z - center.z
-        return dx * dx + dy * dy + dz * dz <= radiusSquared
-      }).filter((voxel) => {
-      const key = `quick:custom:${strokeVoxelKey(voxel)}`
-      if (editStrokeVisitedRef.current.has(key)) return false
-      editStrokeVisitedRef.current.add(key)
-      return true
+    const customTargets: Voxel[] = []
+    const assetSceneTargets = new Map<string, Set<string>>()
+    const partsById = new Map(parts.map((part) => [part.id, part]))
+    const regionOwners = occupancyIndex?.collectProjectVoxelsInRegion({
+      minX: center.x - radius,
+      maxX: center.x + radius,
+      minY: center.y - radius,
+      maxY: center.y + radius,
+      minZ: center.z - radius,
+      maxZ: center.z + radius,
+    })
+    regionOwners?.forEach((cells, ownerId) => {
+      const part = partsById.get(ownerId)
+      if (!part || !belongsToCurrentEdit(part)) return
+      cells.forEach((cell) => {
+        const dx = cell.x - center.x
+        const dy = cell.y - center.y
+        const dz = cell.z - center.z
+        if (dx * dx + dy * dy + dz * dz > radiusSquared) return
+        if (part.kind === 'custom') {
+          const key = `quick:custom:${strokeVoxelKey(cell)}`
+          if (editStrokeVisitedRef.current.has(key)) return
+          editStrokeVisitedRef.current.add(key)
+          customTargets.push({ ...cell, materialId: activeMaterial, entityId: part.partId })
+        } else if (part.instanceId) {
+          const key = strokeVoxelKey(cell)
+          const targetSet = assetSceneTargets.get(part.instanceId) ?? new Set<string>()
+          targetSet.add(key)
+          assetSceneTargets.set(part.instanceId, targetSet)
+        }
+      })
     })
     if (customTargets.length) onRemoveVoxels(customTargets)
 
     const assetTargets = new Map<string, Voxel[]>()
-    if (editEntityId) {
-      parts.filter((part) => part.kind === 'asset' && part.instanceId && belongsToCurrentEdit(part)).forEach((part) => {
-        const instance = project.instances.find((candidate) => candidate.id === part.instanceId)
-        const asset = instance ? project.assets.find((candidate) => candidate.id === instance.assetId) : undefined
-        if (!instance || !asset) return
-        scenePartVoxels(part).forEach((sceneVoxel) => {
-          const dx = sceneVoxel.x - center.x
-          const dy = sceneVoxel.y - center.y
-          const dz = sceneVoxel.z - center.z
-          if (dx * dx + dy * dy + dz * dz > radiusSquared) return
-          const localVoxel = findInstanceVoxelAtSceneVoxel(instance, asset, sceneVoxel)
-          if (!localVoxel) return
-          const key = `quick:instance:${instance.id}:${strokeVoxelKey(localVoxel)}`
-          if (editStrokeVisitedRef.current.has(key)) return
-          editStrokeVisitedRef.current.add(key)
-          assetTargets.set(instance.id, [...(assetTargets.get(instance.id) ?? []), localVoxel])
-        })
+    if (editEntityId) assetSceneTargets.forEach((targetKeys, instanceId) => {
+      const instance = project.instances.find((candidate) => candidate.id === instanceId)
+      const asset = instance ? project.assets.find((candidate) => candidate.id === instance.assetId) : undefined
+      if (!instance || !asset) return
+      // Resolve each candidate instance once, then filter the returned local /
+      // scene pairs. The former implementation called findInstanceVoxelAt...
+      // once per target and rebuilt the whole asset resolution each time.
+      const localTargets = instanceVoxelPairs(instance, asset).filter((pair) => targetKeys.has(strokeVoxelKey(pair.scene))).map((pair) => pair.local)
+      const uniqueTargets = localTargets.filter((voxel) => {
+        const key = `quick:instance:${instance.id}:${strokeVoxelKey(voxel)}`
+        if (editStrokeVisitedRef.current.has(key)) return false
+        editStrokeVisitedRef.current.add(key)
+        return true
       })
-      assetTargets.forEach((voxels, instanceId) => onEditInstanceVoxels(instanceId, voxels, 'remove'))
-    }
+      if (uniqueTargets.length) assetTargets.set(instance.id, uniqueTargets)
+    })
+    assetTargets.forEach((voxels, instanceId) => onEditInstanceVoxels(instanceId, voxels, 'remove'))
     const removedCount = customTargets.length + [...assetTargets.values()].reduce((count, voxels) => count + voxels.length, 0)
     if (removedCount) onNotice(`快速擦除完成 · ${removedCount} 个体素 · 半径 ${radius}`)
   }
