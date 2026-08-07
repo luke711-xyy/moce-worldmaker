@@ -1226,24 +1226,38 @@ function App() {
 
   const beginVoxelStroke = () => {
     if (voxelStrokeTransactionRef.current) return
-    const original = structuredClone(projectRef.current)
-    // Keep the history snapshot deep and immutable, but make the working copy
-    // by cloning only fields that brush/erase operations can mutate. Asset and
-    // material catalogs are read-only during a voxel stroke.
+    // The previous implementation deep-cloned the complete project here. That
+    // made pointer-down itself proportional to every asset and voxel in the
+    // scene, even though a brush stroke only writes a small set of scene
+    // collections. Keep the previous root as the immutable history snapshot
+    // and structurally share the read-only catalogs; clone only collections
+    // that the stroke handlers can replace or mutate.
+    const original = projectRef.current
     const draft: ProjectState = {
       ...original,
-      assets: projectRef.current.assets,
-      materials: projectRef.current.materials,
+      assets: original.assets,
+      materials: original.materials,
       instances: original.instances.map((instance) => ({
         ...instance,
         overrides: instance.overrides?.map((override) => ({ ...override })),
-        partOffsets: instance.partOffsets ? { ...instance.partOffsets } : undefined,
+        partOffsets: instance.partOffsets
+          ? Object.fromEntries(Object.entries(instance.partOffsets).map(([partId, offset]) => [partId, { ...offset }]))
+          : undefined,
         mirror: instance.mirror ? { ...instance.mirror } : undefined,
       })),
       customVoxels: [...original.customVoxels],
+      customVoxelRenderModes: original.customVoxelRenderModes ? { ...original.customVoxelRenderModes } : undefined,
       customColors: original.customColors ? { ...original.customColors } : undefined,
       customEntityOffsets: original.customEntityOffsets ? Object.fromEntries(Object.entries(original.customEntityOffsets).map(([entityId, offset]) => [entityId, { ...offset }])) : undefined,
+      entityNames: original.entityNames ? { ...original.entityNames } : undefined,
+      entityNameModes: original.entityNameModes ? { ...original.entityNameModes } : undefined,
+      entityNameSequences: original.entityNameSequences ? { ...original.entityNameSequences } : undefined,
+      entityNameParents: original.entityNameParents ? { ...original.entityNameParents } : undefined,
+      entitySequenceCounters: original.entitySequenceCounters ? { ...original.entitySequenceCounters } : undefined,
+      assemblyChildSequence: original.assemblyChildSequence ? { ...original.assemblyChildSequence } : undefined,
+      childSequenceCounters: original.childSequenceCounters ? { ...original.childSequenceCounters } : undefined,
       assemblies: original.assemblies?.map((assembly) => ({ ...assembly, memberKeys: [...assembly.memberKeys] })),
+      lockedMemberKeys: original.lockedMemberKeys ? [...original.lockedMemberKeys] : undefined,
     }
     const initialParts = sceneEntityParts(projectRef.current)
     voxelStrokeTransactionRef.current = {
