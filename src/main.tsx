@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, { startTransition, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
@@ -1299,8 +1299,16 @@ function App() {
     skipSceneOccupancySyncRef.current = true
     projectRef.current = nextProject
     markSceneDirty()
-    setProject(nextProject)
-    setHistoryRevision((value) => value + 1)
+    // The Three.js drag preview already moved the scene graph imperatively and
+    // the occupancy index/history are updated above. Publishing the React
+    // snapshot as a transition keeps the pointer-up event responsive when the
+    // inspector, tree and other derived panels need to re-render for a very
+    // large entity. A normal synchronous update here made release latency grow
+    // with the selected model even though no voxel geometry was rebuilt.
+    startTransition(() => {
+      setProject(nextProject)
+      setHistoryRevision((value) => value + 1)
+    })
   }
 
   const commitGeometryProject = (next: ProjectState, removedPartIds: string[], resultGroups: Array<{ entityId: string; voxels: Voxel[] }>) => {
