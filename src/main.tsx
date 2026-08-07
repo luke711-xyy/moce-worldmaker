@@ -1158,7 +1158,7 @@ function App() {
     }
     sceneOccupancyRef.current?.syncParts(sceneParts)
   }, [sceneParts])
-  const sceneTreePartsKey = useMemo(() => sceneParts.map((part) => `${part.id}:${part.memberKey}:${part.assemblyIds?.join(',') ?? ''}`).join('|'), [sceneParts])
+  const sceneTreePartsKey = useMemo(() => sceneParts.map((part) => `${part.id}:${part.memberKey}:${part.instanceId ?? ''}:${part.partId}:${part.label ?? ''}:${part.assemblyIds?.join(',') ?? ''}`).join('|'), [sceneParts])
   const lockedPartIds = useMemo(() => new Set(sceneParts.filter((part) => scenePartIsLocked(project, part)).map((part) => part.id)), [sceneTreePartsKey, project.lockedMemberKeys, project.assemblies])
   const selectedAssemblyId = selectedId.startsWith('assembly:') ? selectedId.slice('assembly:'.length) : undefined
   const selectedScenePart = sceneParts.find((part) => part.id === selectedId) ?? sceneParts.find((part) => part.instanceId === selectedId)
@@ -1296,7 +1296,7 @@ function App() {
     const nestedPartIds = new Set(sceneParts.filter((part) => (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).length > 0).map((part) => part.id))
     sceneParts.filter((part) => !nestedPartIds.has(part.id)).forEach((part) => items.push(partItem(part)))
     return items
-  }, [project.assets, project.instances, project.entityNames, project.assemblies, sceneTreePartsKey])
+  }, [project.assets, project.entityNames, project.assemblies, sceneTreePartsKey])
   const canUndo = historyRevision >= 0 && historyRef.current.past.length > 0
   const canRedo = historyRevision >= 0 && historyRef.current.future.length > 0
   const recentMaterials = useMemo(() => {
