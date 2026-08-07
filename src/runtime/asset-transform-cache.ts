@@ -5,6 +5,7 @@ import {
   snapAssetOrigin,
   Voxel,
   VoxelAsset,
+  voxelBounds,
   worldToVoxel,
 } from '../voxel'
 
@@ -27,19 +28,8 @@ function transformKey(instance: SceneInstance): string {
 }
 
 function boundsForVoxels(voxels: ReadonlyArray<Voxel>): CachedAssetTransform['min'][] {
-  if (!voxels.length) return [{ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }]
-  return [
-    {
-      x: Math.min(...voxels.map((voxel) => voxel.x)),
-      y: Math.min(...voxels.map((voxel) => voxel.y)),
-      z: Math.min(...voxels.map((voxel) => voxel.z)),
-    },
-    {
-      x: Math.max(...voxels.map((voxel) => voxel.x)),
-      y: Math.max(...voxels.map((voxel) => voxel.y)),
-      z: Math.max(...voxels.map((voxel) => voxel.z)),
-    },
-  ]
+  const bounds = voxelBounds(voxels)
+  return bounds ? [bounds.min, bounds.max] : [{ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }]
 }
 
 export class AssetTransformCache {

@@ -53,7 +53,12 @@ export class SceneOccupancyIndex {
   private readonly ownerIdToHandle = new Map<string, number>()
   private readonly handleToOwnerId: string[] = ['']
   private readonly ownerVoxels = new Map<number, RuntimeVoxelCoord[]>()
+  // The scene-part builder reuses voxel arrays for unchanged owners. Keep the
+  // source reference so syncParts can skip the old O(n log n) sorted-key
+  // comparison entirely on steady brush frames.
+  private readonly ownerVoxelRefs = new Map<string, ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>>()
   private readonly ownerVoxelKeys = new Map<string, string[]>()
+  private readonly projectVoxelKeyCache = new WeakMap<object, Set<string>>()
   private readonly materialIdToIndex = new Map<string, number>()
   private nextMaterialIndex = 1
 
@@ -68,6 +73,7 @@ export class SceneOccupancyIndex {
     this.ownerIdToHandle.clear()
     this.handleToOwnerId.splice(1)
     this.ownerVoxels.clear()
+    this.ownerVoxelRefs.clear()
     this.ownerVoxelKeys.clear()
     this.materialIdToIndex.clear()
     this.nextMaterialIndex = 1
@@ -82,6 +88,7 @@ export class SceneOccupancyIndex {
     const ownerHandle = this.registerOwner(ownerId)
     const runtimeVoxels = voxels.map(projectVoxelToRuntime)
     this.ownerVoxels.set(ownerHandle, runtimeVoxels)
+    this.ownerVoxelRefs.set(ownerId, voxels)
     this.ownerVoxelKeys.set(ownerId, this.sortedVoxelKeys(voxels))
     voxels.forEach((voxel, index) => {
       const runtimeVoxel = runtimeVoxels[index]
@@ -131,6 +138,7 @@ export class SceneOccupancyIndex {
       if (!chunk.ownerIds.some(Boolean) && !chunk.overflowOwners.size) this.chunks.delete(chunkKey)
     }
     this.ownerVoxels.delete(ownerHandle)
+    this.ownerVoxelRefs.delete(ownerId)
     this.ownerVoxelKeys.delete(ownerId)
     this.ownerIdToHandle.delete(ownerId)
     this.handleToOwnerId[ownerHandle] = ''
@@ -154,6 +162,10 @@ export class SceneOccupancyIndex {
       if (!existingKeys) {
         this.insertOwner(ownerId, voxels)
         result.inserted += 1
+        return
+      }
+      if (this.ownerVoxelRefs.get(ownerId) === voxels) {
+        result.unchanged += 1
         return
       }
       const nextKeys = this.sortedVoxelKeys(voxels)
@@ -206,6 +218,33 @@ export class SceneOccupancyIndex {
   ): boolean {
     const runtimeDelta = projectVoxelToRuntime(delta)
     const excluded = new Set(excludedOwnerIds)
+
+    // Dragging a dense imported model used to scan every moving voxel on
+    // every pointer event. For large selections, inspect the usually much
+    // smaller set of stationary voxels instead: a collision exists exactly
+    // when a stationary voxel, shifted backwards by the requested delta,
+    // belongs to the moving voxel set. This preserves exact voxel collision
+    // semantics while avoiding an O(large-model) scan during a drag.
+    if (excluded.size && voxels.length >= 4096) {
+      let stationaryVoxelCount = 0
+      for (const [ownerId, ownerVoxels] of this.ownerVoxelRefs) {
+        if (!excluded.has(ownerId)) stationaryVoxelCount += ownerVoxels.length
+      }
+      if (stationaryVoxelCount < voxels.length) {
+        if (!stationaryVoxelCount) return false
+        const cacheKey = voxels as object
+        const movingKeys = this.projectVoxelKeyCache.get(cacheKey) ?? new Set(voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
+        this.projectVoxelKeyCache.set(cacheKey, movingKeys)
+        for (const [ownerId, ownerVoxels] of this.ownerVoxelRefs) {
+          if (excluded.has(ownerId)) continue
+          for (const voxel of ownerVoxels) {
+            if (movingKeys.has(`${voxel.x - delta.x},${voxel.y - delta.y},${voxel.z - delta.z}`)) return true
+          }
+        }
+        return false
+      }
+    }
+
     return voxels.some((voxel) => {
       const translated = translateRuntimeVoxel(projectVoxelToRuntime(voxel), runtimeDelta)
       const hit = this.queryRuntimeVoxel(translated)

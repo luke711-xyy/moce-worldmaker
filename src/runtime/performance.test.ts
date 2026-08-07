@@ -47,4 +47,15 @@ describe('runtime performance budgets', () => {
     expect(mesh.indices.length).toBe(36)
     expect(performance.now() - started).toBeLessThan(1500)
   })
+
+  it('greedy-meshes a 100k solid volume without spreading into the call stack', () => {
+    const voxels = []
+    for (let gz = 0; gz < 100; gz += 1) {
+      for (let gy = 0; gy < 10; gy += 1) {
+        for (let gx = 0; gx < 100; gx += 1) voxels.push({ gx, gy, gz, materialId: 1 })
+      }
+    }
+    const mesh = buildGreedyMesh(voxels)
+    expect(mesh.quadCount).toBe(6)
+  })
 })

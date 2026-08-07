@@ -1,13 +1,13 @@
 import { Voxel } from './voxel'
-import { MAX_TARGET_SIZE_MM } from './model-import'
+import { MAX_TARGET_SIZE_VOXELS } from './model-import'
 
 /**
- * At 1 mm resolution, a solid model at the maximum import dimension has at
+ * At one-cell resolution, a solid model at the maximum import dimension has at
  * most this many cells on its six outer faces. The preview renders visible
  * surface cells, so this is a useful upper bound without tying the preview to
  * the full 256^3 internal volume.
  */
-export const MAX_PREVIEW_VOXELS = 6 * MAX_TARGET_SIZE_MM * MAX_TARGET_SIZE_MM
+export const MAX_PREVIEW_VOXELS = 6 * MAX_TARGET_SIZE_VOXELS * MAX_TARGET_SIZE_VOXELS
 
 export type PreviewVoxelSelection = {
   voxels: Voxel[]
@@ -16,7 +16,12 @@ export type PreviewVoxelSelection = {
   occupancyKeys: Set<string>
 }
 
-export type PreviewFaceOrientation = 'top' | 'x' | 'z'
+// The fixed thumbnail camera used to draw only the three outward-facing
+// planes. That was sufficient for solid blocks, but an emptied model exposes
+// the opposite-facing walls of its cavities, which then disappeared from the
+// thumbnail. Keep all six voxel face directions so hollow geometry uses the
+// same surface definition as the main viewport.
+export type PreviewFaceOrientation = 'top' | 'bottom' | 'x' | 'x-negative' | 'z' | 'z-negative'
 
 export type PreviewFaceCell = {
   orientation: PreviewFaceOrientation

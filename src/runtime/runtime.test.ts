@@ -48,6 +48,17 @@ describe('SceneOccupancyIndex', () => {
     expect(index.collidesTranslatedProjectVoxels([voxel(1, 0, 0)], { x: 2, y: 0, z: 0 }, ['left'])).toBe(true)
   })
 
+  it('uses stationary voxels for exact collision checks on dense moving models', () => {
+    const dense = Array.from({ length: 5000 }, (_, x) => voxel(x, 0, 0))
+    const index = SceneOccupancyIndex.fromParts([
+      part('dense', dense),
+      part('stationary', [voxel(5001, 0, 0)]),
+    ])
+    expect(index.collidesTranslatedProjectVoxels(dense, { x: 1, y: 0, z: 0 }, ['dense'])).toBe(false)
+    index.replaceOwner('stationary', [voxel(5000, 0, 0)])
+    expect(index.collidesTranslatedProjectVoxels(dense, { x: 1, y: 0, z: 0 }, ['dense'])).toBe(true)
+  })
+
   it('removes and replaces owners incrementally', () => {
     const index = SceneOccupancyIndex.fromParts([part('entity', [voxel(-1, 0, -1)])])
     index.replaceOwner('entity', [voxel(33, 2, 0)])

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { importModelAsVoxelAsset, importModelAsVoxelAssetWithDiagnostics } from './model-import'
+import * as THREE from 'three'
+import { importModelAsVoxelAsset, importModelAsVoxelAssetWithDiagnostics, vertexColorAt } from './model-import'
 
 const cubeObj = `
 v 0 0 0
@@ -32,7 +33,7 @@ const zUpStl = ((): string => {
 
 describe('模型转体素', () => {
   it('turns a small OBJ mesh into editable voxels', async () => {
-    const asset = await importModelAsVoxelAsset(new File([cubeObj], 'sample.obj'), 'terracotta', { targetSizeMm: 8 })
+    const asset = await importModelAsVoxelAsset(new File([cubeObj], 'sample.obj'), 'terracotta', { targetSizeVoxels: 8 })
     expect(asset.source).toBe('sample.obj')
     expect(asset.voxels.length).toBeGreaterThan(0)
     expect(asset.width).toBeGreaterThan(0)
@@ -40,15 +41,15 @@ describe('模型转体素', () => {
   })
 
   it('uses the requested millimetre size instead of a fixed prototype size', async () => {
-    const result = await importModelAsVoxelAssetWithDiagnostics(new File([cubeObj], 'cube.obj'), { targetSizeMm: 8, mode: 'solid' })
+    const result = await importModelAsVoxelAssetWithDiagnostics(new File([cubeObj], 'cube.obj'), { targetSizeVoxels: 8, mode: 'solid' })
     expect(Math.max(result.asset.width, result.asset.height, result.asset.depth)).toBe(8)
     expect(result.diagnostics.closedMesh).toBe(true)
   })
 
   it('supports surface-only and solid voxelization modes', async () => {
     const file = new File([cubeObj], 'cube.obj')
-    const surface = await importModelAsVoxelAssetWithDiagnostics(file, { targetSizeMm: 8, mode: 'surface' })
-    const solid = await importModelAsVoxelAssetWithDiagnostics(file, { targetSizeMm: 8, mode: 'solid' })
+    const surface = await importModelAsVoxelAssetWithDiagnostics(file, { targetSizeVoxels: 8, mode: 'surface' })
+    const solid = await importModelAsVoxelAssetWithDiagnostics(file, { targetSizeVoxels: 8, mode: 'solid' })
     expect(solid.asset.voxels.length).toBeGreaterThan(surface.asset.voxels.length)
   })
 
@@ -60,9 +61,15 @@ describe('模型转体素', () => {
   })
 
   it('maps the conventional STL Z-up axis to the editor vertical Y axis', async () => {
-    const result = await importModelAsVoxelAssetWithDiagnostics(new File([zUpStl], 'standing-robot.stl'), { targetSizeMm: 8, mode: 'surface' })
+    const result = await importModelAsVoxelAssetWithDiagnostics(new File([zUpStl], 'standing-robot.stl'), { targetSizeVoxels: 8, mode: 'surface' })
     expect(result.asset.height).toBe(8)
     expect(result.asset.width).toBe(4)
     expect(result.asset.depth).toBe(4)
+  })
+
+  it('reads normalized GLTF vertex colors as RGB values', () => {
+    const attribute = new THREE.BufferAttribute(new Uint8Array([255, 128, 0, 0, 64, 255]), 3, true)
+    expect(vertexColorAt(attribute, 0)?.getHexString()).toBe('ff8000')
+    expect(vertexColorAt(attribute, 1)?.getHexString()).toBe('0040ff')
   })
 })

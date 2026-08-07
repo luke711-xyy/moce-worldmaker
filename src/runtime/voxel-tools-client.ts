@@ -1,0 +1,155 @@
+import type { DrawingPlane, DrawOperation, PlanePoint, VoxelAxis } from '../voxel-tools'
+import type { Voxel } from '../voxel'
+import { computeScale, computeShell, GeometryScaleMode, GeometryVoxel, VoxelGeometryMesh, VoxelGeometryPreview } from '../voxel-geometry'
+
+export type VoxelToolsShapeRequest = {
+  kind: 'line' | 'cuboid' | 'sphere' | 'extrude'
+  plane: DrawingPlane
+  start: PlanePoint
+  current: PlanePoint
+  footprintEnd?: PlanePoint
+  baseHeight: number
+  brushSize: number
+  materialId: string
+  operation?: DrawOperation
+  source?: Voxel[]
+  extrudeAxis?: VoxelAxis
+  extrudeStartLayer?: number
+  extrudeDelta?: number
+}
+
+export type VoxelToolsGeometryRequest =
+  | { kind: 'shell'; voxels: GeometryVoxel[]; thickness: number }
+  | { kind: 'scale'; voxels: GeometryVoxel[]; mode: GeometryScaleMode; factor: number }
+
+type WorkerResponse = {
+  id: number
+  voxels?: Voxel[]
+  geometry?: VoxelGeometryPreview
+  mesh?: VoxelGeometryMesh | null
+  error?: string
+}
+
+export type VoxelToolsGeometryResult = {
+  geometry: VoxelGeometryPreview
+  mesh: VoxelGeometryMesh | null
+}
+
+type PendingRequest = {
+  resolve: (value: unknown) => void
+  reject: (error: Error) => void
+}
+
+export class VoxelToolsWorkerClient {
+  private readonly worker: Worker
+  private nextId = 1
+  private readonly pending = new Map<number, PendingRequest>()
+  private latestInFlightId: number | null = null
+  private latestQueued: { request: VoxelToolsShapeRequest; resolve: (voxels: Voxel[]) => void; reject: (error: Error) => void } | null = null
+  private latestGeometryInFlightId: number | null = null
+  private latestGeometryQueued: { request: VoxelToolsGeometryRequest; resolve: (result: VoxelToolsGeometryResult | null) => void; reject: (error: Error) => void } | null = null
+
+  constructor() {
+    this.worker = new Worker(new URL('../workers/voxel-tools.worker.ts', import.meta.url), { type: 'module' })
+    this.worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+      const response = event.data
+      const request = this.pending.get(response.id)
+      if (!request) return
+      this.pending.delete(response.id)
+      if (this.latestInFlightId === response.id) this.latestInFlightId = null
+      if (this.latestGeometryInFlightId === response.id) this.latestGeometryInFlightId = null
+      if (response.error) request.reject(new Error(response.error))
+      else if (response.geometry) request.resolve(response.geometry ? { geometry: response.geometry, mesh: response.mesh ?? null } : [])
+      else request.resolve(response.voxels ?? [])
+      this.flushLatest()
+      this.flushLatestGeometry()
+    }
+    this.worker.onerror = (event) => {
+      const error = new Error(event.message || '体素工具 Worker 执行失败')
+      this.pending.forEach(({ reject }) => reject(error))
+      this.pending.clear()
+      this.latestInFlightId = null
+      this.latestQueued?.reject(error)
+      this.latestQueued = null
+      this.latestGeometryInFlightId = null
+      this.latestGeometryQueued?.reject(error)
+      this.latestGeometryQueued = null
+    }
+  }
+
+  compute(request: VoxelToolsShapeRequest): Promise<Voxel[]> {
+    const id = this.nextId++
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve: (value) => resolve(value as Voxel[]), reject })
+      this.worker.postMessage({ id, request })
+    })
+  }
+
+  computeGeometry(request: VoxelToolsGeometryRequest): Promise<VoxelGeometryPreview> {
+    const id = this.nextId++
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve: (value) => resolve((value as VoxelToolsGeometryResult).geometry), reject })
+      this.worker.postMessage({ id, request })
+    })
+  }
+
+  /**
+   * Geometry previews are also ephemeral. Keep only one queued request and
+   * discard obsolete parameter changes instead of making the worker calculate
+   * every intermediate enlargement factor selected by the user.
+   */
+  computeGeometryLatest(request: VoxelToolsGeometryRequest): Promise<VoxelToolsGeometryResult | null> {
+    return new Promise((resolve, reject) => {
+      this.latestGeometryQueued?.resolve(null)
+      this.latestGeometryQueued = { request, resolve, reject }
+      this.flushLatestGeometry()
+    })
+  }
+
+  /**
+   * Shape previews are ephemeral. Keep at most one request waiting behind the
+   * currently running calculation and replace that waiting request whenever a
+   * newer pointer sample arrives. This prevents a long cuboid/sphere preview
+   * from rendering a queue of obsolete intermediate shapes.
+   */
+  computeLatest(request: VoxelToolsShapeRequest): Promise<Voxel[]> {
+    return new Promise((resolve, reject) => {
+      this.latestQueued?.resolve([])
+      this.latestQueued = { request, resolve, reject }
+      this.flushLatest()
+    })
+  }
+
+  private flushLatest() {
+    if (this.latestInFlightId !== null || !this.latestQueued) return
+    const queued = this.latestQueued
+    this.latestQueued = null
+    const id = this.nextId++
+    this.latestInFlightId = id
+    this.pending.set(id, { resolve: (value) => queued.resolve(value as Voxel[]), reject: queued.reject })
+    this.worker.postMessage({ id, request: queued.request })
+  }
+
+  private flushLatestGeometry() {
+    if (this.latestGeometryInFlightId !== null || !this.latestGeometryQueued) return
+    const queued = this.latestGeometryQueued
+    this.latestGeometryQueued = null
+    const id = this.nextId++
+    this.latestGeometryInFlightId = id
+    this.pending.set(id, { resolve: (value) => queued.resolve(value as VoxelToolsGeometryResult), reject: queued.reject })
+    this.worker.postMessage({ id, request: queued.request })
+  }
+
+  dispose() {
+    this.worker.terminate()
+    const error = new Error('体素工具 Worker 已关闭')
+    this.pending.forEach(({ reject }) => reject(error))
+    this.pending.clear()
+    this.latestInFlightId = null
+    this.latestQueued?.reject(error)
+    this.latestQueued = null
+    this.latestGeometryInFlightId = null
+    this.latestGeometryQueued?.reject(error)
+    this.latestGeometryQueued = null
+  }
+}

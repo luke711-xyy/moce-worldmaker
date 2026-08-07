@@ -9,6 +9,7 @@ export type Voxel = {
   y: number
   z: number
   materialId: string
+  paintMaterialId?: string
   entityId?: string
 }
 
@@ -16,7 +17,7 @@ export type VoxelNormal = Pick<Voxel, 'x' | 'y' | 'z'>
 
 export type VoxelOverride = Voxel & {
   // Missing mode is treated as an additive override for older project files.
-  mode?: 'add' | 'remove'
+  mode?: 'add' | 'remove' | 'paint'
 }
 
 export type VoxelAsset = {
@@ -136,6 +137,8 @@ export type SceneEntityPart = {
   label?: string
   displayLabel?: string
   colorOverride?: string
+  /** Original voxel count when a read-only preview keeps only a sampled LOD. */
+  sourceVoxelCount?: number
   voxels: Voxel[]
 }
 
@@ -181,6 +184,7 @@ export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEn
     y: voxel.y - minY,
     z: voxel.z - minZ,
     materialId: voxel.materialId,
+    ...(voxel.paintMaterialId ? { paintMaterialId: voxel.paintMaterialId } : {}),
   })))
   return {
     id,
@@ -293,6 +297,29 @@ function voxelKey(voxel: Pick<Voxel, 'x' | 'y' | 'z'>): string {
   return `${voxel.x},${voxel.y},${voxel.z}`
 }
 
+export type VoxelBounds = {
+  min: { x: number; y: number; z: number }
+  max: { x: number; y: number; z: number }
+}
+
+/** Calculate voxel bounds without spreading a large voxel array on the stack. */
+export function voxelBounds(voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>): VoxelBounds | null {
+  if (!voxels.length) return null
+  const first = voxels[0]
+  const min = { x: first.x, y: first.y, z: first.z }
+  const max = { x: first.x, y: first.y, z: first.z }
+  for (let index = 1; index < voxels.length; index += 1) {
+    const voxel = voxels[index]
+    if (voxel.x < min.x) min.x = voxel.x
+    if (voxel.y < min.y) min.y = voxel.y
+    if (voxel.z < min.z) min.z = voxel.z
+    if (voxel.x > max.x) max.x = voxel.x
+    if (voxel.y > max.y) max.y = voxel.y
+    if (voxel.z > max.z) max.z = voxel.z
+  }
+  return { min, max }
+}
+
 export function voxelEntityId(voxel: Voxel): string {
   return voxel.entityId ?? `legacy:${voxelKey(voxel)}`
 }
@@ -353,8 +380,11 @@ export function resolveInstanceVoxels(asset: VoxelAsset, overrides: VoxelOverrid
     const key = voxelKey(override)
     if (override.mode === 'remove') {
       resolved.delete(key)
+    } else if (override.mode === 'paint') {
+      const existing = resolved.get(key)
+      if (existing) resolved.set(key, { ...existing, paintMaterialId: override.materialId })
     } else {
-      resolved.set(key, { x: override.x, y: override.y, z: override.z, materialId: override.materialId })
+      resolved.set(key, { x: override.x, y: override.y, z: override.z, materialId: override.materialId, ...(override.paintMaterialId ? { paintMaterialId: override.paintMaterialId } : {}) })
     }
   }
   return [...resolved.values()]
@@ -362,6 +392,14 @@ export function resolveInstanceVoxels(asset: VoxelAsset, overrides: VoxelOverrid
 
 export function resolveInstanceComponents(asset: VoxelAsset, overrides: VoxelOverride[] = []): Array<{ partId: string; voxels: Voxel[] }> {
   const resolved = resolveInstanceVoxels(asset, overrides)
+  // Mesh imports are one editable scene entity even when the source GLB/OBJ
+  // contains several disconnected meshes or voxel islands. Explicitly saved
+  // assembly templates keep their authored parts; ordinary model imports do
+  // not expose source-mesh parts in the scene tree.
+  const isImportedModel = asset.kind === 'imported' && /\.(?:glb|gltf|obj|stl)$/i.test(asset.source ?? '') && !asset.assembly
+  if (isImportedModel || (asset.kind === 'imported' && !asset.partVoxels && !asset.assembly)) {
+    return [{ partId: asset.parts[0] ?? '导入模型', voxels: resolved }]
+  }
   if (!asset.partVoxels || !Object.keys(asset.partVoxels).length) return voxelComponents(resolved).map((voxels) => ({ partId: voxelComponentId(voxels), voxels }))
   const resolvedByKey = new Map(resolved.map((voxel) => [voxelKey(voxel), voxel]))
   const claimed = new Set<string>()
@@ -379,20 +417,22 @@ export type VoxelTransformAxis = 'x' | 'y' | 'z'
 
 export function mirrorVoxels(voxels: Voxel[], axis: VoxelTransformAxis): Voxel[] {
   if (!voxels.length) return []
-  const values = voxels.map((voxel) => voxel[axis])
-  const min = Math.min(...values)
-  const max = Math.max(...values)
+  const bounds = voxelBounds(voxels)!
+  const min = bounds.min[axis]
+  const max = bounds.max[axis]
   return voxels.map((voxel) => ({ ...voxel, [axis]: min + max - voxel[axis] }))
 }
 
 export function rotateVoxels(voxels: Voxel[], axis: VoxelTransformAxis, degrees: 90 | 180 | 270): Voxel[] {
   if (!voxels.length) return []
-  const minX = Math.min(...voxels.map((voxel) => voxel.x))
-  const maxX = Math.max(...voxels.map((voxel) => voxel.x))
-  const minY = Math.min(...voxels.map((voxel) => voxel.y))
-  const maxY = Math.max(...voxels.map((voxel) => voxel.y))
-  const minZ = Math.min(...voxels.map((voxel) => voxel.z))
-  const maxZ = Math.max(...voxels.map((voxel) => voxel.z))
+  const bounds = voxelBounds(voxels)!
+  const { min: minBounds, max: maxBounds } = bounds
+  const minX = minBounds.x
+  const maxX = maxBounds.x
+  const minY = minBounds.y
+  const maxY = maxBounds.y
+  const minZ = minBounds.z
+  const maxZ = maxBounds.z
   return voxels.map((voxel) => {
     if (degrees === 180) {
       if (axis === 'x') return { ...voxel, y: minY + maxY - voxel.y, z: minZ + maxZ - voxel.z }
@@ -423,6 +463,21 @@ export function findInstanceVoxelAtSceneVoxel(instance: SceneInstance, asset: Vo
       return voxel.x === sceneVoxel.x && voxel.y === sceneVoxel.y && voxel.z === sceneVoxel.z
     })
   })[0]
+}
+
+/**
+ * Resolve an instance once and retain the local/scene coordinate relationship.
+ *
+ * Color editing used to call findInstanceVoxelAtSceneVoxel for every selected
+ * voxel. That helper intentionally favors a simple one-shot lookup, but it
+ * rebuilds all resolved components on each call. Bulk operations should use
+ * this pair list to build a local spatial map once instead.
+ */
+export function instanceVoxelPairs(instance: SceneInstance, asset: VoxelAsset): Array<{ partId: string; local: Voxel; scene: Voxel }> {
+  return resolveInstanceComponents(asset, instance.overrides ?? []).flatMap(({ partId, voxels }) => {
+    const resolvedSceneVoxels = resolveInstanceComponentSceneVoxels(instance, asset, voxels, partId)
+    return voxels.map((local, index) => ({ partId, local, scene: resolvedSceneVoxels[index] }))
+  })
 }
 
 function rotateSceneVector(vector: { x: number; y: number; z: number }, rotationX: number, rotationY: number, rotationZ: number): { x: number; y: number; z: number } {
@@ -475,9 +530,74 @@ export function instanceLocalVoxelToSceneVoxel(instance: SceneInstance, asset: V
   return undefined
 }
 
+type CachedAssetSceneParts = {
+  asset: VoxelAsset
+  signature: string
+  parts: SceneEntityPart[]
+}
+
+type SceneEntityPartsCache = {
+  assetsRef: VoxelAsset[] | null
+  assembliesRef: SceneAssembly[] | null
+  assemblySignature: string
+  assetParts: Map<string, CachedAssetSceneParts>
+  customVoxelsRef: Voxel[] | null
+  customVoxelLength: number
+  customGroups: Map<string, Voxel[]>
+}
+
+// sceneEntityParts() is used by rendering, hit testing, selection and the
+// occupancy index. During a brush stroke the project root changes every
+// published frame, while its instance/assets arrays remain stable. Keying the
+// cache by the instances array lets us reuse resolved asset topology and only
+// rebuild the entity whose voxel array actually changed.
+const sceneEntityPartsCaches = new WeakMap<SceneInstance[], SceneEntityPartsCache>()
+
+function sceneAssemblySignature(assemblies: SceneAssembly[]): string {
+  return assemblies.map((assembly) => `${assembly.id}:${assembly.memberKeys.join(',')}`).join('|')
+}
+
+function sceneInstanceSignature(instance: SceneInstance): string {
+  const overrides = (instance.overrides ?? []).map((voxel) => `${voxel.x},${voxel.y},${voxel.z},${voxel.materialId},${voxel.paintMaterialId ?? ''},${voxel.mode ?? 'add'}`).join(';')
+  const offsets = Object.entries(instance.partOffsets ?? {}).sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => `${key}:${value.x},${value.y},${value.z}`).join(';')
+  const mirror = instance.mirror ? `${instance.mirror.x ? 1 : 0}${instance.mirror.y ? 1 : 0}${instance.mirror.z ? 1 : 0}` : ''
+  return [
+    instance.assetId,
+    instance.visible ? '1' : '0',
+    instance.x,
+    instance.y ?? 0,
+    instance.z,
+    instance.rotation,
+    instance.rotationX ?? 0,
+    instance.rotationY ?? 0,
+    instance.rotationZ ?? 0,
+    instance.style,
+    instance.colorOverride ?? '',
+    mirror,
+    offsets,
+    overrides,
+  ].join('|')
+}
+
 export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
+  const instances = project.instances
+  let cache = sceneEntityPartsCaches.get(instances)
+  if (!cache) {
+    cache = {
+      assetsRef: null,
+      assembliesRef: null,
+      assemblySignature: '',
+      assetParts: new Map(),
+      customVoxelsRef: null,
+      customVoxelLength: 0,
+      customGroups: new Map(),
+    }
+    sceneEntityPartsCaches.set(instances, cache)
+  }
+
   const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
   const assemblies = project.assemblies ?? []
+  const nextAssemblySignature = sceneAssemblySignature(assemblies)
   const memberKeyMatches = (storedKey: string, candidateKey: string) => storedKey === candidateKey || (storedKey.startsWith('asset:') && (candidateKey.startsWith(`${storedKey}:`) || candidateKey.startsWith(`${storedKey}#`)))
   const assemblyPathForMemberKey = (memberKey: string): string[] => {
     let bestPath: string[] = []
@@ -492,29 +612,69 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
     visit(memberKey, [], new Set())
     return bestPath
   }
+
+  if (cache.assetsRef !== project.assets) {
+    cache.assetsRef = project.assets
+    cache.assetParts.clear()
+  }
+  if (cache.assembliesRef !== project.assemblies || cache.assemblySignature !== nextAssemblySignature) {
+    cache.assembliesRef = project.assemblies ?? null
+    cache.assemblySignature = nextAssemblySignature
+    // Assembly membership affects metadata only; keep the expensive resolved
+    // voxel arrays and refresh their tree paths below.
+    cache.assetParts.forEach((entry) => {
+      entry.parts = entry.parts.map((part) => {
+        const assemblyIds = assemblyPathForMemberKey(part.memberKey)
+        return { ...part, assemblyId: assemblyIds[0], assemblyIds }
+      })
+    })
+  }
+
   const parts: SceneEntityPart[] = []
-  for (const instance of project.instances) {
+  const retainedInstanceIds = new Set<string>()
+  for (const instance of instances) {
     if (!instance.visible) continue
     const asset = assetMap.get(instance.assetId)
     if (!asset) continue
-    for (const { partId, voxels: component } of resolveInstanceComponents(asset, instance.overrides ?? [])) {
-      const sceneVoxels = resolveInstanceComponentSceneVoxels(instance, asset, component, partId)
-      const label = partId.split('#')[0]
-      const memberKey = `asset:${instance.id}:${partId}`
-      const assemblyIds = assemblyPathForMemberKey(memberKey)
-      parts.push({ id: `asset:${instance.id}:${partId}`, kind: 'asset', instanceId: instance.id, partId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label, colorOverride: instance.colorOverride, voxels: sceneVoxels })
+    retainedInstanceIds.add(instance.id)
+    const signature = sceneInstanceSignature(instance)
+    const cached = cache.assetParts.get(instance.id)
+    if (!cached || cached.asset !== asset || cached.signature !== signature) {
+      const nextParts: SceneEntityPart[] = []
+      for (const { partId, voxels: component } of resolveInstanceComponents(asset, instance.overrides ?? [])) {
+        const sceneVoxels = resolveInstanceComponentSceneVoxels(instance, asset, component, partId)
+        const label = partId.split('#')[0]
+        const memberKey = `asset:${instance.id}:${partId}`
+        const assemblyIds = assemblyPathForMemberKey(memberKey)
+        nextParts.push({ id: `asset:${instance.id}:${partId}`, kind: 'asset', instanceId: instance.id, partId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label, colorOverride: instance.colorOverride, voxels: sceneVoxels })
+      }
+      cache.assetParts.set(instance.id, { asset, signature, parts: nextParts })
     }
+    parts.push(...(cache.assetParts.get(instance.id)?.parts ?? []))
   }
-  const customGroups = new Map<string, Voxel[]>()
-  for (const voxel of project.customVoxels) {
+  cache.assetParts.forEach((_, instanceId) => {
+    if (!retainedInstanceIds.has(instanceId)) cache.assetParts.delete(instanceId)
+  })
+
+  if (cache.customVoxelsRef !== project.customVoxels || project.customVoxels.length < cache.customVoxelLength) {
+    cache.customVoxelsRef = project.customVoxels
+    cache.customVoxelLength = 0
+    cache.customGroups.clear()
+  }
+  // Add-only strokes append to the same array. Copy only the new tail and
+  // replace the affected group array so the occupancy index can detect it by
+  // reference without sorting all scene voxels again.
+  for (let index = cache.customVoxelLength; index < project.customVoxels.length; index += 1) {
+    const voxel = project.customVoxels[index]
     const entityId = voxelEntityId(voxel)
-    customGroups.set(entityId, [...(customGroups.get(entityId) ?? []), { ...voxel, entityId }])
+    cache.customGroups.set(entityId, [...(cache.customGroups.get(entityId) ?? []), { ...voxel, entityId }])
   }
-  for (const [entityId, voxels] of customGroups) {
+  cache.customVoxelLength = project.customVoxels.length
+  cache.customGroups.forEach((voxels, entityId) => {
     const memberKey = `voxel:${entityId}`
     const assemblyIds = assemblyPathForMemberKey(memberKey)
     parts.push({ id: `custom:${entityId}`, kind: 'custom', partId: entityId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label: '手动体素实体', colorOverride: project.customColors?.[entityId], voxels })
-  }
+  })
   return parts
 }
 

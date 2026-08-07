@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
@@ -16,6 +16,24 @@ describe('莫测造境体素核心数据', () => {
     expect(project.assets.filter((asset) => asset.isTemplate === false)).toHaveLength(7)
     expect(project.instances[0].assetId).toBe('scene-sample-house-greek')
     expect(sceneEntityParts(project)).toHaveLength(19)
+  })
+
+  it('preserves a local paint override without changing the asset base material', () => {
+    const asset = { ...makeDefaultProject().assets[0], voxels: [{ x: 0, y: 0, z: 0, materialId: 'primary' }] }
+    const resolved = resolveInstanceVoxels(asset, [{ x: 0, y: 0, z: 0, materialId: 'teal', mode: 'paint' }])
+    expect(resolved[0]).toEqual({ x: 0, y: 0, z: 0, materialId: 'primary', paintMaterialId: 'teal' })
+    expect(asset.voxels[0]).toEqual({ x: 0, y: 0, z: 0, materialId: 'primary' })
+  })
+
+  it('reuses unchanged scene-part voxel arrays while appending custom voxels', () => {
+    const project = makeDefaultProject()
+    const firstParts = sceneEntityParts(project)
+    const firstAssetPart = firstParts.find((part) => part.kind === 'asset')!
+    project.customVoxels.push({ x: 12, y: 0, z: 12, materialId: 'terracotta', entityId: 'cache-test' })
+    const secondParts = sceneEntityParts(project)
+    const secondAssetPart = secondParts.find((part) => part.id === firstAssetPart.id)!
+    expect(secondAssetPart.voxels).toBe(firstAssetPart.voxels)
+    expect(secondParts.find((part) => part.id === 'custom:cache-test')?.voxels).toHaveLength(1)
   })
 
   it('uses one shared viewport conversion for every 1mm voxel', () => {
@@ -113,6 +131,43 @@ describe('莫测造境体素核心数据', () => {
     const components = resolveInstanceComponents(asset)
     expect(components.map((component) => component.partId)).toEqual(asset.parts)
     expect(components.every((component) => component.voxels.length > 0)).toBe(true)
+  })
+
+  it('builds the instance local/scene voxel index in one resolution pass', () => {
+    const project = makeDefaultProject()
+    const instance = project.instances[0]
+    const asset = project.assets.find((item) => item.id === instance.assetId)!
+    const pairs = instanceVoxelPairs(instance, asset)
+    expect(pairs).toHaveLength(resolveInstanceVoxels(asset, instance.overrides).length)
+    const first = pairs[0]
+    expect(first.scene).toEqual(instanceLocalVoxelToSceneVoxel(instance, asset, first.local))
+  })
+
+  it('keeps an imported mesh as one scene entity even when its voxels are disconnected', () => {
+    const asset = {
+      id: 'imported-robot',
+      name: 'robot',
+      style: '导入模型',
+      kind: 'imported' as const,
+      color: '#d2a354',
+      accent: '#6c827d',
+      width: 5,
+      depth: 5,
+      height: 5,
+      parts: ['mesh-a', 'mesh-b'],
+      partVoxels: {
+        'mesh-a': [{ x: 0, y: 0, z: 0, materialId: 'gold' }],
+        'mesh-b': [{ x: 4, y: 4, z: 4, materialId: 'jade' }],
+      },
+      voxels: [
+        { x: 0, y: 0, z: 0, materialId: 'gold' },
+        { x: 4, y: 4, z: 4, materialId: 'jade' },
+      ],
+      source: 'robot.glb',
+    }
+    const components = resolveInstanceComponents(asset)
+    expect(components).toHaveLength(1)
+    expect(components[0].voxels).toHaveLength(2)
   })
 
   it('mirrors and rotates voxel coordinates around their own bounds', () => {

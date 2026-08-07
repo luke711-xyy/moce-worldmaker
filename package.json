@@ -17,7 +17,7 @@
     "migrate:production": "node scripts/migrate-json-to-cloudflare.mjs --database moce-worldmaker --bucket moce-worldmaker --env production",
     "deploy:staging": "npm run build && wrangler deploy",
     "build:production": "CLOUDFLARE_ENV=production npm run build",
-    "deploy": "npm run build:production && wrangler deploy"
+    "deploy": "npm run build:production && wrangler deploy dist/moce_worldmaker_staging/index.js --config wrangler.jsonc --env production --assets dist/client --no-bundle"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",

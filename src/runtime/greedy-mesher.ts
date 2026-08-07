@@ -25,16 +25,23 @@ export function buildGreedyMesh(voxels: ReadonlyArray<MesherVoxel>): GreedyMeshP
     indices: new Uint32Array(),
     quadCount: 0,
   }
-  const min = [
-    Math.min(...voxels.map((voxel) => voxel.gx)),
-    Math.min(...voxels.map((voxel) => voxel.gy)),
-    Math.min(...voxels.map((voxel) => voxel.gz)),
-  ]
-  const max = [
-    Math.max(...voxels.map((voxel) => voxel.gx)),
-    Math.max(...voxels.map((voxel) => voxel.gy)),
-    Math.max(...voxels.map((voxel) => voxel.gz)),
-  ]
+  // Do not use Math.min/max(...array) here. A large imported or procedurally
+  // drawn shape can contain tens of thousands of voxels, and spreading that
+  // array into a function call overflows the JavaScript call stack before the
+  // mesher even starts. One pass is also cheaper than creating three mapped
+  // temporary arrays.
+  const first = voxels[0]
+  const min = [first.gx, first.gy, first.gz]
+  const max = [first.gx, first.gy, first.gz]
+  for (let index = 1; index < voxels.length; index += 1) {
+    const voxel = voxels[index]
+    if (voxel.gx < min[0]) min[0] = voxel.gx
+    if (voxel.gy < min[1]) min[1] = voxel.gy
+    if (voxel.gz < min[2]) min[2] = voxel.gz
+    if (voxel.gx > max[0]) max[0] = voxel.gx
+    if (voxel.gy > max[1]) max[1] = voxel.gy
+    if (voxel.gz > max[2]) max[2] = voxel.gz
+  }
   const dimensions = max.map((value, axis) => value - min[axis] + 1)
   const occupied = new Map<string, number>()
   voxels.forEach((voxel) => occupied.set(key(voxel.gx - min[0], voxel.gy - min[1], voxel.gz - min[2]), voxel.materialId))

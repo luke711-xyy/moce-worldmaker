@@ -7,23 +7,23 @@ import { MATERIALS, Material, Voxel, VoxelAsset } from './voxel'
 export type VoxelizeMode = 'surface' | 'solid'
 
 export type ModelImportOptions = {
-  /** Maximum output dimension in 1 mm voxels. */
-  targetSizeMm?: number
+  /** Maximum output dimension measured in voxel cells. */
+  targetSizeVoxels?: number
   mode?: VoxelizeMode
   /** Fallback material for STL or models without a usable material color. */
   materialId?: string
   palette?: Material[]
-  preserveParts?: boolean
   onProgress?: (progress: number, label: string) => void
 }
 
 export type ModelImportDiagnostics = {
-  sourceFormat: 'glb' | 'gltf' | 'obj' | 'stl'
+  sourceFormat: 'glb' | 'gltf' | 'obj' | 'stl' | 'vox'
   mode: VoxelizeMode
-  targetSizeMm: number
+  targetSizeVoxels: number
   triangleCount: number
   partCount: number
   closedMesh: boolean
+  voxelCount?: number
   warnings: string[]
 }
 
@@ -38,6 +38,22 @@ type ModelTriangle = {
   c: THREE.Vector3
   partId: string
   materialId: string
+  baseColor?: string
+  vertexColorA?: THREE.Color
+  vertexColorB?: THREE.Color
+  vertexColorC?: THREE.Color
+  uvA?: THREE.Vector2
+  uvB?: THREE.Vector2
+  uvC?: THREE.Vector2
+  textureSampler?: TextureSampler
+}
+
+type TextureSampler = (uv: THREE.Vector2) => string | undefined
+
+type MaterialInfo = {
+  materialId: string
+  baseColor?: string
+  textureSampler?: TextureSampler
 }
 
 type NormalizedTriangle = Omit<ModelTriangle, 'a' | 'b' | 'c'> & {
@@ -46,9 +62,9 @@ type NormalizedTriangle = Omit<ModelTriangle, 'a' | 'b' | 'c'> & {
   c: THREE.Vector3
 }
 
-const DEFAULT_TARGET_SIZE_MM = 32
-export const MAX_TARGET_SIZE_MM = 256
-const SURFACE_DISTANCE_SQ = 0.75 // half the diagonal of a 1 mm voxel, squared
+const DEFAULT_TARGET_SIZE_VOXELS = 32
+export const MAX_TARGET_SIZE_VOXELS = 256
+const SURFACE_DISTANCE_SQ = 0.75 // half the diagonal of one voxel cell, squared
 const EPSILON = 1e-7
 
 function parseGltf(buffer: ArrayBuffer): Promise<THREE.Object3D> {
@@ -83,6 +99,68 @@ function materialColor(material: THREE.Material | THREE.Material[] | undefined):
   return color instanceof THREE.Color ? `#${color.getHexString()}` : undefined
 }
 
+function normalizedAttributeChannel(attribute: THREE.BufferAttribute | THREE.InterleavedBufferAttribute, index: number, channel: 0 | 1 | 2): number {
+  const value = channel === 0 ? attribute.getX(index) : channel === 1 ? attribute.getY(index) : attribute.getZ(index)
+  // Three.js BufferAttribute#getX/Y/Z already normalizes integer attributes
+  // when `normalized` is true. Keep this helper independent of the backing
+  // typed-array width so it also works for InterleavedBufferAttributes.
+  return Math.max(0, Math.min(1, value))
+}
+
+function srgbColorFromChannels(r: number, g: number, b: number): THREE.Color {
+  const toHex = (value: number) => Math.round(Math.max(0, Math.min(1, value)) * 255).toString(16).padStart(2, '0')
+  return new THREE.Color(`#${toHex(r)}${toHex(g)}${toHex(b)}`)
+}
+
+/** Read a GLTF COLOR_0 value, including normalized integer vertex colors. */
+export function vertexColorAt(attribute: THREE.BufferAttribute | THREE.InterleavedBufferAttribute | undefined, index: number): THREE.Color | undefined {
+  if (!attribute || attribute.itemSize < 3) return undefined
+  return srgbColorFromChannels(
+    normalizedAttributeChannel(attribute, index, 0),
+    normalizedAttributeChannel(attribute, index, 1),
+    normalizedAttributeChannel(attribute, index, 2),
+  )
+}
+
+function quantizedTextureHex(r: number, g: number, b: number): string {
+  // Keep imported texture detail while bounding the number of per-voxel
+  // materials. Sixteen levels per channel are enough for voxel art and
+  // prevent a textured model from creating one Three.js material per pixel.
+  const quantize = (channel: number) => Math.max(0, Math.min(255, Math.round(channel / 17) * 17))
+  return `#${[r, g, b].map((channel) => quantize(channel).toString(16).padStart(2, '0')).join('')}`
+}
+
+function textureSamplerForMaterial(material: THREE.Material | undefined): TextureSampler | undefined {
+  const candidate = material as (THREE.Material & { map?: THREE.Texture; color?: THREE.Color }) | undefined
+  const map = candidate?.map
+  const image = map?.image as ({ width?: number; height?: number; naturalWidth?: number; naturalHeight?: number } & CanvasImageSource) | undefined
+  const width = image?.width || image?.naturalWidth || 0
+  const height = image?.height || image?.naturalHeight || 0
+  if (!map || !image || !width || !height || typeof OffscreenCanvas === 'undefined') return undefined
+  try {
+    const canvas = new OffscreenCanvas(width, height)
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    if (!context) return undefined
+    context.drawImage(image, 0, 0, width, height)
+    const pixels = context.getImageData(0, 0, width, height).data
+    const baseColor = candidate.color ?? new THREE.Color('#ffffff')
+    return (uv: THREE.Vector2) => {
+      const transformed = uv.clone()
+      map.transformUv(transformed)
+      const x = Math.max(0, Math.min(width - 1, Math.floor(transformed.x * width)))
+      const y = Math.max(0, Math.min(height - 1, Math.floor((1 - transformed.y) * height)))
+      const offset = (y * width + x) * 4
+      const alpha = pixels[offset + 3] / 255
+      if (alpha <= 0) return undefined
+      return quantizedTextureHex(pixels[offset] * baseColor.r, pixels[offset + 1] * baseColor.g, pixels[offset + 2] * baseColor.b)
+    }
+  } catch {
+    // Some external GLTF textures are not readable by canvas because of
+    // CORS or an unsupported image decoder. Fall back to material color.
+    return undefined
+  }
+}
+
 function colorDistance(left: string, right: string): number {
   const toRgb = (value: string) => [0, 2, 4].map((offset) => parseInt(value.slice(offset + 1, offset + 3), 16))
   const a = toRgb(left)
@@ -100,9 +178,39 @@ function nearestPaletteMaterial(color: string | undefined, palette: Material[], 
   return best?.id ?? fallback
 }
 
-function materialIdForMesh(mesh: THREE.Mesh, palette: Material[], fallback: string): string {
-  const directMaterial = materialColor(mesh.material)
-  return nearestPaletteMaterial(directMaterial, palette, fallback)
+function materialInfoForMaterial(material: THREE.Material | undefined, palette: Material[], fallback: string): MaterialInfo {
+  const baseColor = materialColor(material)
+  return {
+    materialId: nearestPaletteMaterial(baseColor, palette, fallback),
+    baseColor,
+    textureSampler: textureSamplerForMaterial(material),
+  }
+}
+
+function materialAtTriangle(mesh: THREE.Mesh, offset: number): THREE.Material | undefined {
+  const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+  const geometry = mesh.geometry as THREE.BufferGeometry
+  const group = geometry.groups.find((candidate) => offset >= candidate.start && offset < candidate.start + candidate.count)
+  return materials[group?.materialIndex ?? 0]
+}
+
+function barycentricWeights(point: THREE.Vector3, triangle: NormalizedTriangle): [number, number, number] {
+  const v0 = triangle.b.clone().sub(triangle.a)
+  const v1 = triangle.c.clone().sub(triangle.a)
+  const v2 = point.clone().sub(triangle.a)
+  const d00 = v0.dot(v0)
+  const d01 = v0.dot(v1)
+  const d11 = v1.dot(v1)
+  const d20 = v2.dot(v0)
+  const d21 = v2.dot(v1)
+  const denominator = d00 * d11 - d01 * d01
+  if (Math.abs(denominator) < EPSILON) return [1 / 3, 1 / 3, 1 / 3]
+  const v = (d11 * d20 - d01 * d21) / denominator
+  const w = (d00 * d21 - d01 * d20) / denominator
+  const u = 1 - v - w
+  const positive = [u, v, w].map((weight) => Math.max(0, weight))
+  const total = positive[0] + positive[1] + positive[2]
+  return total > EPSILON ? [positive[0] / total, positive[1] / total, positive[2] / total] : [1 / 3, 1 / 3, 1 / 3]
 }
 
 function uniquePartId(requested: string, used: Set<string>): string {
@@ -122,6 +230,7 @@ function extractTriangles(object: THREE.Object3D, palette: Material[], fallbackM
   object.updateMatrixWorld(true)
   const triangles: ModelTriangle[] = []
   const usedParts = new Set<string>()
+  const materialCache = new Map<THREE.Material, MaterialInfo>()
   object.traverse((child) => {
     const mesh = child as THREE.Mesh
     if (!mesh.isMesh) return
@@ -129,26 +238,48 @@ function extractTriangles(object: THREE.Object3D, palette: Material[], fallbackM
     const position = geometry.getAttribute('position')
     if (!position) return
     const partId = uniquePartId(mesh.name || child.parent?.name || '模型主体', usedParts)
-    const meshMaterial = materialIdForMesh(mesh, palette, fallbackMaterial)
     const index = geometry.index
+    const uv = geometry.getAttribute('uv')
+    const vertexColors = geometry.getAttribute('color')
     const getIndex = (offset: number) => index ? index.getX(offset) : offset
     for (let offset = 0; offset + 2 < (index ? index.count : position.count); offset += 3) {
       const a = new THREE.Vector3().fromBufferAttribute(position, getIndex(offset)).applyMatrix4(mesh.matrixWorld)
       const b = new THREE.Vector3().fromBufferAttribute(position, getIndex(offset + 1)).applyMatrix4(mesh.matrixWorld)
       const c = new THREE.Vector3().fromBufferAttribute(position, getIndex(offset + 2)).applyMatrix4(mesh.matrixWorld)
       if (a.distanceToSquared(b) < EPSILON || b.distanceToSquared(c) < EPSILON || c.distanceToSquared(a) < EPSILON) continue
-      triangles.push({ a, b, c, partId, materialId: meshMaterial })
+      const sourceMaterial = materialAtTriangle(mesh, offset)
+      const info: MaterialInfo = sourceMaterial
+        ? (materialCache.get(sourceMaterial) ?? (() => { const next = materialInfoForMaterial(sourceMaterial, palette, fallbackMaterial); materialCache.set(sourceMaterial, next); return next })())
+        : { materialId: fallbackMaterial }
+      const ia = getIndex(offset)
+      const ib = getIndex(offset + 1)
+      const ic = getIndex(offset + 2)
+      triangles.push({
+        a,
+        b,
+        c,
+        partId,
+        materialId: info.materialId,
+        baseColor: info.baseColor,
+        vertexColorA: vertexColorAt(vertexColors, ia),
+        vertexColorB: vertexColorAt(vertexColors, ib),
+        vertexColorC: vertexColorAt(vertexColors, ic),
+        textureSampler: info.textureSampler,
+        uvA: uv ? new THREE.Vector2(uv.getX(ia), uv.getY(ia)) : undefined,
+        uvB: uv ? new THREE.Vector2(uv.getX(ib), uv.getY(ib)) : undefined,
+        uvC: uv ? new THREE.Vector2(uv.getX(ic), uv.getY(ic)) : undefined,
+      })
     }
   })
   return triangles
 }
 
-function normalizeTriangles(triangles: ModelTriangle[], targetSizeMm: number): { triangles: NormalizedTriangle[]; width: number; height: number; depth: number } {
+function normalizeTriangles(triangles: ModelTriangle[], targetSizeVoxels: number): { triangles: NormalizedTriangle[]; width: number; height: number; depth: number } {
   const bounds = new THREE.Box3()
   triangles.forEach(({ a, b, c }) => bounds.expandByPoint(a).expandByPoint(b).expandByPoint(c))
   const size = bounds.getSize(new THREE.Vector3())
   const largest = Math.max(size.x, size.y, size.z, EPSILON)
-  const scale = targetSizeMm / largest
+  const scale = targetSizeVoxels / largest
   const min = bounds.min.clone()
   const clean = (value: number) => Math.round(value * 1e9) / 1e9
   const normalize = (point: THREE.Vector3) => {
@@ -203,6 +334,19 @@ function voxelKey(x: number, y: number, z: number): string {
   return `${x},${y},${z}`
 }
 
+function interpolatedVertexColor(triangle: NormalizedTriangle, weights: [number, number, number]): THREE.Color | undefined {
+  if (!triangle.vertexColorA || !triangle.vertexColorB || !triangle.vertexColorC) return undefined
+  return new THREE.Color(
+    triangle.vertexColorA.r * weights[0] + triangle.vertexColorB.r * weights[1] + triangle.vertexColorC.r * weights[2],
+    triangle.vertexColorA.g * weights[0] + triangle.vertexColorB.g * weights[1] + triangle.vertexColorC.g * weights[2],
+    triangle.vertexColorA.b * weights[0] + triangle.vertexColorB.b * weights[1] + triangle.vertexColorC.b * weights[2],
+  )
+}
+
+function multipliedColorHex(baseColor: string, vertexColor: THREE.Color): string {
+  return `#${new THREE.Color(baseColor).multiply(vertexColor).getHexString()}`
+}
+
 function markSurfaceVoxels(triangles: NormalizedTriangle[], dimensions: { width: number; height: number; depth: number }, onProgress?: (progress: number) => void): { keys: Set<string>; materialByKey: Map<string, string>; partByKey: Map<string, string> } {
   const keys = new Set<string>()
   const materialByKey = new Map<string, string>()
@@ -219,7 +363,18 @@ function markSurfaceVoxels(triangles: NormalizedTriangle[], dimensions: { width:
       const center = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5)
       if (pointTriangleDistanceSquared(center, triangle) <= SURFACE_DISTANCE_SQ) {
         keys.add(key)
-        materialByKey.set(key, triangle.materialId)
+        const weights = barycentricWeights(center, triangle)
+        const sampledColor = triangle.textureSampler && triangle.uvA && triangle.uvB && triangle.uvC
+          ? triangle.textureSampler(new THREE.Vector2(
+            triangle.uvA.x * weights[0] + triangle.uvB.x * weights[1] + triangle.uvC.x * weights[2],
+            triangle.uvA.y * weights[0] + triangle.uvB.y * weights[1] + triangle.uvC.y * weights[2],
+          ))
+          : undefined
+        const vertexColor = interpolatedVertexColor(triangle, weights)
+        const resolvedColor = vertexColor
+          ? multipliedColorHex(sampledColor ?? triangle.baseColor ?? '#ffffff', vertexColor)
+          : sampledColor
+        materialByKey.set(key, resolvedColor ?? triangle.materialId)
         partByKey.set(key, triangle.partId)
       }
     }
@@ -280,21 +435,11 @@ function meshIsClosed(triangles: NormalizedTriangle[]): boolean {
   return edges.size > 0 && [...edges.values()].every((count) => count === 2)
 }
 
-function createAssetFromVoxelKeys(fileName: string, keys: Set<string>, materialByKey: Map<string, string>, partByKey: Map<string, string>, dimensions: { width: number; height: number; depth: number }, palette: Material[], fallbackMaterial: string, preserveParts: boolean, color: string): VoxelAsset {
+function createAssetFromVoxelKeys(fileName: string, keys: Set<string>, materialByKey: Map<string, string>, dimensions: { width: number; height: number; depth: number }, palette: Material[], fallbackMaterial: string, color: string): VoxelAsset {
   const voxels: Voxel[] = [...keys].map((key) => {
     const [x, y, z] = key.split(',').map(Number)
     return { x, y, z, materialId: materialByKey.get(key) ?? fallbackMaterial }
   })
-  const grouped = new Map<string, Voxel[]>()
-  if (preserveParts) {
-    voxels.forEach((voxel) => {
-      const key = voxelKey(voxel.x, voxel.y, voxel.z)
-      const part = partByKey.get(key) ?? '模型主体'
-      grouped.set(part, [...(grouped.get(part) ?? []), voxel])
-    })
-  }
-  const parts = preserveParts && grouped.size ? [...grouped.keys()] : ['导入模型']
-  const partVoxels = preserveParts && grouped.size ? Object.fromEntries(grouped.entries()) : undefined
   const primaryMaterial = palette.find((material) => material.id === fallbackMaterial)
   return {
     id: `import-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -306,8 +451,7 @@ function createAssetFromVoxelKeys(fileName: string, keys: Set<string>, materialB
     width: dimensions.width,
     depth: dimensions.depth,
     height: dimensions.height,
-    parts,
-    partVoxels,
+    parts: ['导入模型'],
     source: fileName,
     isTemplate: false,
     voxels,
@@ -317,7 +461,7 @@ function createAssetFromVoxelKeys(fileName: string, keys: Set<string>, materialB
 export async function importModelBufferAsVoxelAssetWithDiagnostics(fileName: string, buffer: ArrayBuffer, options: ModelImportOptions = {}): Promise<ModelImportResult> {
   const extension = fileName.split('.').pop()?.toLowerCase() as ModelImportDiagnostics['sourceFormat'] | undefined
   if (extension !== 'glb' && extension !== 'gltf' && extension !== 'obj' && extension !== 'stl') throw new Error('仅支持 GLB、GLTF、OBJ、STL')
-  const targetSizeMm = Math.max(1, Math.min(MAX_TARGET_SIZE_MM, Math.round(options.targetSizeMm ?? DEFAULT_TARGET_SIZE_MM)))
+  const targetSizeVoxels = Math.max(1, Math.min(MAX_TARGET_SIZE_VOXELS, Math.round(options.targetSizeVoxels ?? DEFAULT_TARGET_SIZE_VOXELS)))
   const mode = options.mode ?? 'solid'
   const fallbackMaterial = options.materialId ?? 'terracotta'
   const palette = options.palette?.length ? options.palette : MATERIALS
@@ -329,7 +473,7 @@ export async function importModelBufferAsVoxelAssetWithDiagnostics(fileName: str
   const triangles = extractTriangles(object, palette, fallbackMaterial)
   if (!triangles.length) throw new Error('模型中没有可读取的三角面')
   options.onProgress?.(0.12, `已读取 ${triangles.length} 个三角面`)
-  const normalized = normalizeTriangles(triangles, targetSizeMm)
+  const normalized = normalizeTriangles(triangles, targetSizeVoxels)
   const dimensions = { width: normalized.width, height: normalized.height, depth: normalized.depth }
   const closedMesh = meshIsClosed(normalized.triangles)
   const surface = markSurfaceVoxels(normalized.triangles, dimensions, (progress) => options.onProgress?.(0.12 + progress * 0.38, '正在生成表面体素'))
@@ -341,11 +485,11 @@ export async function importModelBufferAsVoxelAssetWithDiagnostics(fileName: str
   const warnings: string[] = []
   if (mode === 'solid' && !closedMesh) warnings.push('模型不是封闭网格，实体填充结果可能需要手动修补')
   if (extension === 'stl') warnings.push('STL 不包含材质和部件信息，已使用默认颜色和材质')
-  const asset = createAssetFromVoxelKeys(fileName, keys, surface.materialByKey, surface.partByKey, dimensions, palette, fallbackMaterial, options.preserveParts !== false, palette.find((material) => material.id === fallbackMaterial)?.color ?? '#a5a6a2')
+  const asset = createAssetFromVoxelKeys(fileName, keys, surface.materialByKey, dimensions, palette, fallbackMaterial, palette.find((material) => material.id === fallbackMaterial)?.color ?? '#a5a6a2')
   options.onProgress?.(1, '体素化完成')
   return {
     asset,
-    diagnostics: { sourceFormat: extension, mode, targetSizeMm, triangleCount: triangles.length, partCount: new Set(triangles.map((triangle) => triangle.partId)).size, closedMesh, warnings },
+    diagnostics: { sourceFormat: extension, mode, targetSizeVoxels, triangleCount: triangles.length, partCount: 1, closedMesh, warnings },
   }
 }
 
