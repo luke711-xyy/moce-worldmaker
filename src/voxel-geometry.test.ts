@@ -28,6 +28,8 @@ describe('voxel geometry', () => {
     expect(result.bounds?.height).toBe(2)
     expect(result.bounds?.depth).toBe(2)
     expect(result.bounds?.minY).toBe(0)
+    expect(result.voxels.every((cell) => cell.preserveVoxelCells)).toBe(true)
+    expect(new Set(result.voxels.map((cell) => `${cell.x},${cell.y},${cell.z}`)).size).toBe(8)
   })
 
   it('only exposes divisible shrink factors and uses over-half sampling', () => {

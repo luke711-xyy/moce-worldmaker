@@ -11,6 +11,13 @@ export type Voxel = {
   materialId: string
   paintMaterialId?: string
   entityId?: string
+  /**
+   * Keep this voxel entity rendered as individual cells instead of allowing
+   * the large-entity greedy surface path to merge adjacent cells into a
+   * visually larger block. The flag is used by discrete geometry operations
+   * such as enlargement; it does not change the voxel's physical size.
+   */
+  preserveVoxelCells?: boolean
 }
 
 export type VoxelNormal = Pick<Voxel, 'x' | 'y' | 'z'>

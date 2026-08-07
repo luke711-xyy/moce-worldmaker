@@ -6348,7 +6348,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
       const voxels = object.userData.greedyVoxels as Array<{ gx: number; gy: number; gz: number; materialId: number }> | undefined
       const colors = object.userData.greedyColors as string[] | undefined
       const scenePartId = object.userData.scenePartId as string | undefined
-      if (!voxels || voxels.length < 64 || !colors || !scenePartId) return
+      if (object.userData.greedyDisabled || !voxels || voxels.length < 64 || !colors || !scenePartId) return
       const renderSignature = object.userData.renderSignature as string | undefined
       if (renderSignature && object.userData.greedyMeshBuiltSignature === renderSignature) return
       void client.build(scenePartId, revision, voxels).then((payload) => {
@@ -7805,6 +7805,7 @@ function voxelRenderSignature(component: Voxel[], componentColor?: string): stri
     addNumber(voxel.z - origin.z)
     addText(voxel.materialId)
     addText(voxel.paintMaterialId ?? '')
+    addNumber(voxel.preserveVoxelCells ? 1 : 0)
   })
   const signature = `${component.length}|${hash >>> 0}`
   const variants = cachedVariants ?? new Map<string, string>()
@@ -7832,12 +7833,14 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
   const componentGroup = new THREE.Group()
   const componentScenePartId = `custom:${entityId}`
   const origin = customComponentRenderOrigin(component)
+  const preserveVoxelCells = component.some((voxel) => voxel.preserveVoxelCells)
   // Greedy mesh vertices are cell boundaries, so the component origin is the
   // lower corner of the minimum voxel. Instanced voxel centers add their own
   // half-cell offset below.
   componentGroup.position.set(voxelToWorld(origin.x), voxelToWorld(origin.z), voxelToWorld(origin.y))
   componentGroup.userData.renderOrigin = origin
   componentGroup.userData.scenePartId = componentScenePartId
+  componentGroup.userData.greedyDisabled = preserveVoxelCells
   const greedyColorIds = new Map<string, number>()
   const greedyColors: string[] = ['#ffffff']
   const greedyVoxels = component.map((voxel) => {
@@ -7862,7 +7865,11 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
   // Large results go straight to the worker-backed greedy mesh. Building one
   // Matrix4 and one InstancedMesh entry per voxel here would block the main
   // thread again immediately after the fast geometry commit.
-  if (component.length > CUSTOM_INSTANCE_RENDER_LIMIT) return componentGroup
+  // Geometry enlargement deliberately produces more unit cells, not larger
+  // cells. Keep those results on the exact InstancedMesh path even when they
+  // cross the normal greedy-mesh threshold; otherwise the worker replaces the
+  // small cubes with merged coplanar faces and the model appears block-scaled.
+  if (component.length > CUSTOM_INSTANCE_RENDER_LIMIT && !preserveVoxelCells) return componentGroup
 
   const occupied = new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
   const batches = new Map<string, { color: THREE.Color; voxels: Voxel[] }>()

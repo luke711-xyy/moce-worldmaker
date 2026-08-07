@@ -191,7 +191,13 @@ export function computeScale(input: GeometryVoxel[], mode: GeometryScaleMode, fa
     const minZ = Math.floor((bounds.minZ + bounds.maxZ + 1 - newDepth) / 2)
     const output: GeometryVoxel[] = []
     input.forEach((voxel) => {
-      for (let dx = 0; dx < k; dx += 1) for (let dy = 0; dy < k; dy += 1) for (let dz = 0; dz < k; dz += 1) output.push({ ...voxel, x: minX + (voxel.x - bounds.minX) * k + dx, y: bounds.minY + (voxel.y - bounds.minY) * k + dy, z: minZ + (voxel.z - bounds.minZ) * k + dz })
+      for (let dx = 0; dx < k; dx += 1) for (let dy = 0; dy < k; dy += 1) for (let dz = 0; dz < k; dz += 1) output.push({
+        ...voxel,
+        x: minX + (voxel.x - bounds.minX) * k + dx,
+        y: bounds.minY + (voxel.y - bounds.minY) * k + dy,
+        z: minZ + (voxel.z - bounds.minZ) * k + dz,
+        preserveVoxelCells: true,
+      })
     })
     // Enlargement maps each unique source cell to a disjoint k³ block. Avoid
     // the defensive Map+lexicographic sort here; both are quadratic-ish in
