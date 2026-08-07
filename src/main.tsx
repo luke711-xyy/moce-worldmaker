@@ -891,6 +891,7 @@ function App() {
   const voxelStrokePartsRef = useRef<SceneEntityPart[] | null>(null)
   const voxelStrokeNoticeRef = useRef<string | null>(null)
   const sceneMoveBoundsRef = useRef<{ parts: SceneEntityPart[]; voxels: Voxel[]; movingIds: string[]; bounds: GridVoxelBounds | null } | null>(null)
+  const sceneMoveValidationRef = useRef<{ parts: SceneEntityPart[]; deltaX: number; deltaY: number; deltaZ: number; result: GridMoveResult } | null>(null)
   const sceneLibraryLoadRequestRef = useRef(0)
   const sceneLibraryAbortRef = useRef<AbortController | null>(null)
   const sceneLibraryProjectCacheRef = useRef(new Map<string, ProjectState>())
@@ -2209,10 +2210,16 @@ function App() {
   }
 
   const previewScenePartsMove = (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number): GridMoveResult => {
-    if (!deltaX && !deltaY && !deltaZ) return { moved: false, blocked: false, deltaX: 0, deltaY: 0, deltaZ: 0 }
+    if (!deltaX && !deltaY && !deltaZ) {
+      const result = { moved: false, blocked: false, deltaX: 0, deltaY: 0, deltaZ: 0 }
+      sceneMoveValidationRef.current = { parts, deltaX, deltaY, deltaZ, result }
+      return result
+    }
     const movableParts = parts.filter((part) => !scenePartIsLocked(projectRef.current, part))
     if (!movableParts.length) {
-      return { moved: false, blocked: true, deltaX: 0, deltaY: 0, deltaZ: 0 }
+      const result = { moved: false, blocked: true, deltaX: 0, deltaY: 0, deltaZ: 0 }
+      sceneMoveValidationRef.current = { parts, deltaX, deltaY, deltaZ, result }
+      return result
     }
     const cachedMove = sceneMoveBoundsRef.current?.parts === parts ? sceneMoveBoundsRef.current : null
     const movingVoxels = cachedMove?.voxels ?? movableParts.flatMap((part) => scenePartVoxels(part))
@@ -2220,15 +2227,29 @@ function App() {
     const cachedBounds = cachedMove?.bounds ?? gridVoxelBounds(movingVoxels)
     const movingIds = cachedMove?.movingIds ?? movableParts.map((part) => part.id)
     sceneMoveBoundsRef.current = { parts, voxels: movingVoxels, movingIds, bounds: cachedBounds }
-    if (!cachedBounds) return { moved: false, blocked: true, deltaX: 0, deltaY: 0, deltaZ: 0 }
-    return resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => {
+    if (!cachedBounds) {
+      const result = { moved: false, blocked: true, deltaX: 0, deltaY: 0, deltaZ: 0 }
+      sceneMoveValidationRef.current = { parts, deltaX, deltaY, deltaZ, result }
+      return result
+    }
+    const result = resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => {
       return translatedVoxelBoundsWithinScene(cachedBounds, bounds, stepX, stepY, stepZ)
         && !sceneOccupancyRef.current!.collidesTranslatedProjectVoxels(movingVoxels, { x: stepX, y: stepY, z: stepZ }, movingIds)
     })
+    sceneMoveValidationRef.current = { parts, deltaX, deltaY, deltaZ, result }
+    return result
   }
 
   const commitScenePartsMove = (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number): GridMoveResult => {
-    const result = previewScenePartsMove(parts, deltaX, deltaY, deltaZ)
+    const cachedValidation = sceneMoveValidationRef.current
+    const result = cachedValidation
+      && cachedValidation.parts === parts
+      && cachedValidation.deltaX === deltaX
+      && cachedValidation.deltaY === deltaY
+      && cachedValidation.deltaZ === deltaZ
+      ? cachedValidation.result
+      : previewScenePartsMove(parts, deltaX, deltaY, deltaZ)
+    sceneMoveValidationRef.current = null
     if (!result.moved) {
       // This snapshot can contain every voxel of a large moved entity. It is
       // valid only for the current pointer gesture, so release it immediately
