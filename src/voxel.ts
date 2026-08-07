@@ -163,6 +163,9 @@ export type SceneEntityPart = {
   sceneOffset?: { x: number; y: number; z: number }
   /** Scene-grid translation for a moved asset sub-part, kept out of voxels. */
   partSceneOffset?: { x: number; y: number; z: number }
+  /** Rendering policy for generated voxel entities. Enlargement must keep the
+   * unit-cell path even when the entity is large enough for greedy meshing. */
+  renderMode?: 'cells' | 'greedy'
   voxels: Voxel[]
 }
 
@@ -650,6 +653,35 @@ const sceneEntityPartsCache: SceneEntityPartsCache = {
   customGroups: new Map(),
 }
 
+// Geometry signatures are requested by every render/selection pass. Large
+// edited entities can carry thousands of overrides, so rebuilding the same
+// delimiter string on every transform-only update becomes an avoidable O(n)
+// pause. Project updates replace the overrides array when its contents change;
+// unchanged instances keep the same array reference and can reuse this value.
+const instanceOverridesSignatureCache = new WeakMap<ReadonlyArray<VoxelOverride>, string>()
+const instancePartOffsetsSignatureCache = new WeakMap<NonNullable<SceneInstance['partOffsets']>, string>()
+
+function instanceOverridesSignature(overrides: ReadonlyArray<VoxelOverride> | undefined): string {
+  if (!overrides?.length) return ''
+  const cached = instanceOverridesSignatureCache.get(overrides)
+  if (cached !== undefined) return cached
+  const signature = overrides.map((voxel) => `${voxel.x},${voxel.y},${voxel.z},${voxel.materialId},${voxel.paintMaterialId ?? ''},${voxel.mode ?? 'add'}`).join(';')
+  instanceOverridesSignatureCache.set(overrides, signature)
+  return signature
+}
+
+function instancePartOffsetsSignature(partOffsets: SceneInstance['partOffsets']): string {
+  if (!partOffsets) return ''
+  const cached = instancePartOffsetsSignatureCache.get(partOffsets)
+  if (cached !== undefined) return cached
+  const signature = Object.entries(partOffsets)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}:${value.x},${value.y},${value.z}`)
+    .join(';')
+  instancePartOffsetsSignatureCache.set(partOffsets, signature)
+  return signature
+}
+
 function sceneAssemblySignature(assemblies: SceneAssembly[]): string {
   return assemblies.map((assembly) => `${assembly.id}:${assembly.memberKeys.join(',')}`).join('|')
 }
@@ -659,7 +691,7 @@ function sceneAssemblySignature(assemblies: SceneAssembly[]): string {
  * Three.js group and must not invalidate the voxel mesh cache.
  */
 export function sceneInstanceRenderSignature(instance: SceneInstance): string {
-  return `${sceneInstanceGeometrySignature(instance)}|${Object.entries(instance.partOffsets ?? {}).sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => `${key}:${value.x},${value.y},${value.z}`).join(';')}`
+  return `${sceneInstanceGeometrySignature(instance)}|${instancePartOffsetsSignature(instance.partOffsets)}`
 }
 
 /**
@@ -668,7 +700,7 @@ export function sceneInstanceRenderSignature(instance: SceneInstance): string {
  * applied to the existing Three.js part groups without rebuilding every voxel.
  */
 export function sceneInstanceGeometrySignature(instance: SceneInstance): string {
-  const overrides = (instance.overrides ?? []).map((voxel) => `${voxel.x},${voxel.y},${voxel.z},${voxel.materialId},${voxel.paintMaterialId ?? ''},${voxel.mode ?? 'add'}`).join(';')
+  const overrides = instanceOverridesSignature(instance.overrides)
   const mirror = instance.mirror ? `${instance.mirror.x ? 1 : 0}${instance.mirror.y ? 1 : 0}${instance.mirror.z ? 1 : 0}` : ''
   return [
     instance.assetId,
@@ -748,7 +780,11 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
 
   if (cache.assetsRef !== project.assets) {
     cache.assetsRef = project.assets
-    cache.assetParts.clear()
+    // Do not clear every resolved instance when the asset catalog changes.
+    // Adding an unrelated asset is common during placement and should not
+    // force large imported models already in the scene through another full
+    // component resolution. Each instance below already checks both its
+    // asset object and geometry signature, so only affected entries rebuild.
   }
   if (cache.assembliesRef !== project.assemblies || cache.assemblySignature !== nextAssemblySignature) {
     cache.assembliesRef = project.assemblies ?? null
@@ -828,7 +864,7 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
     const memberKey = `voxel:${entityId}`
     const assemblyIds = assemblyPathForMemberKey(memberKey)
     const sceneOffset = project.customEntityOffsets?.[entityId]
-    parts.push({ id: `custom:${entityId}`, kind: 'custom', partId: entityId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label: '手动体素实体', colorOverride: project.customColors?.[entityId], sceneOffset, voxels })
+    parts.push({ id: `custom:${entityId}`, kind: 'custom', partId: entityId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label: '手动体素实体', colorOverride: project.customColors?.[entityId], renderMode: project.customVoxelRenderModes?.[entityId] ?? 'greedy', sceneOffset, voxels })
   })
   return parts
 }

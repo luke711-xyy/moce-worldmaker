@@ -50,6 +50,33 @@ describe('莫测造境体素核心数据', () => {
     expect(secondParts.find((part) => part.id === stablePart.id)?.voxels).toBe(stablePart.voxels)
   })
 
+  it('keeps resolved scene parts cached when an unrelated asset is added', () => {
+    const project = makeDefaultProject()
+    const firstParts = sceneEntityParts(project)
+    const stablePart = firstParts.find((part) => part.kind === 'asset')!
+    const addedAsset = { ...project.assets[0], id: 'unrelated-cache-asset', name: '缓存测试资产' }
+    const nextProject = { ...project, assets: [...project.assets, addedAsset] }
+    const secondParts = sceneEntityParts(nextProject)
+    expect(secondParts.find((part) => part.id === stablePart.id)?.voxels).toBe(stablePart.voxels)
+  })
+
+  it('carries the enlarged entity cell-render policy with its resolved scene part', () => {
+    const project = makeDefaultProject()
+    const voxels = [
+      { x: 0, y: 0, z: 0, materialId: 'stone', entityId: 'enlarged-1', preserveVoxelCells: true },
+      { x: 1, y: 0, z: 0, materialId: 'stone', entityId: 'enlarged-1', preserveVoxelCells: true },
+    ]
+    const nextProject = {
+      ...project,
+      instances: [],
+      customVoxels: voxels,
+      customVoxelRenderModes: { 'enlarged-1': 'cells' as const },
+    }
+    const part = sceneEntityParts(nextProject).find((candidate) => candidate.partId === 'enlarged-1')
+    expect(part?.renderMode).toBe('cells')
+    expect(part?.voxels.every((cell) => cell.preserveVoxelCells)).toBe(true)
+  })
+
   it('keeps asset topology canonical while resolving moved scene coordinates lazily', () => {
     const project = makeDefaultProject()
     const instance = project.instances[0]

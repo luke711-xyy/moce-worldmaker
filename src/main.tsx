@@ -6471,7 +6471,12 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
         // rebuild or remap every voxel on pointer release.
         const component = part.voxels
         const scenePartId = `custom:${entityId}`
-        const forceCellRender = project.customVoxelRenderModes?.[entityId] === 'cells'
+        // Read the policy from the resolved scene part first. This keeps the
+        // render choice coupled to the entity that was actually produced by
+        // the geometry operation, even while naming/cache normalization is
+        // rebuilding the project maps. Enlarged entities must never fall back
+        // to greedy meshing, or adjacent unit voxels look like one large block.
+        const forceCellRender = part.renderMode === 'cells' || project.customVoxelRenderModes?.[entityId] === 'cells'
         const renderSignature = voxelRenderSignature(component, project.customColors?.[entityId], forceCellRender)
         const existingComponent = existingComponents.get(scenePartId)
         const componentGroup = existingComponent && existingComponent.userData.renderSignature === renderSignature
