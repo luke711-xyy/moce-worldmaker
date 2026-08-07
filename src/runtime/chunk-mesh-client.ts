@@ -31,6 +31,7 @@ export class ChunkMeshWorkerClient {
         normals: response.normals,
         materialIds: response.materialIds,
         indices: response.indices,
+        outlinePositions: response.outlinePositions,
         quadCount: response.quadCount,
       })
     }

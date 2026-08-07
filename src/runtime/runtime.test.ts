@@ -274,6 +274,14 @@ describe('greedy mesher', () => {
     ])
     expect(mesh.quadCount).toBe(10)
   })
+
+  it('can build reusable feature-edge positions without main-thread geometry work', () => {
+    const mesh = buildGreedyMesh([{ gx: 0, gy: 0, gz: 0, materialId: 1 }], { includeOutline: true })
+    expect(mesh.outlinePositions).toBeDefined()
+    // A cube has 12 outline segments, each with two 3D endpoints.
+    expect(mesh.outlinePositions?.length).toBe(12 * 2 * 3)
+    expect(buildGreedyMesh([{ gx: 0, gy: 0, gz: 0, materialId: 1 }]).outlinePositions).toBeUndefined()
+  })
 })
 
 describe('voxel DDA', () => {

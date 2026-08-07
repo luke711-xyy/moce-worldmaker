@@ -629,9 +629,13 @@ sharedVoxelBoxGeometry.userData.sharedRuntimeGeometry = true
 function disposeThreeObject(object: THREE.Object3D) {
   const cancelCellBuild = object.userData.cancelCellBuild as (() => void) | undefined
   cancelCellBuild?.()
+  const disposedGeometries = new Set<THREE.BufferGeometry>()
   object.traverse((child) => {
     if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
-      if (!child.geometry.userData.sharedRuntimeGeometry) child.geometry.dispose()
+      if (!child.geometry.userData.sharedRuntimeGeometry && !disposedGeometries.has(child.geometry)) {
+        disposedGeometries.add(child.geometry)
+        child.geometry.dispose()
+      }
       const material = child.material
       if (Array.isArray(material)) material.forEach((item) => item.dispose())
       else material.dispose()
@@ -5998,14 +6002,19 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
     // boundaries.
     edgeGeometry = createInstancedVoxelOutlineGeometry(mesh)
   } else if (mesh.userData.greedyMesh) {
+    const workerOutlinePositions = mesh.userData.greedyOutlinePositions as Float32Array | undefined
     const greedyVoxels = mesh.userData.greedyVoxels as Array<{ gx: number; gy: number; gz: number }> | undefined
     // A per-voxel outline is useful for small editable entities, but becomes
     // the dominant main-thread cost after enlargement: one 500k-voxel model
     // can otherwise allocate millions of line vertices just to highlight it.
     // The merged greedy surface already contains the visible silhouette, so
     // use its feature edges for large selections.
-    edgeGeometry = greedyVoxels && greedyVoxels.length > CUSTOM_INSTANCE_RENDER_LIMIT
-      ? new THREE.EdgesGeometry(mesh.geometry, 30)
+    edgeGeometry = workerOutlinePositions
+      ? (() => {
+          const geometry = new THREE.BufferGeometry()
+          geometry.setAttribute('position', new THREE.BufferAttribute(workerOutlinePositions, 3))
+          return geometry
+        })()
       : createGreedyVoxelOutlineGeometry(greedyVoxels)
   } else {
     edgeGeometry = createVoxelOutlineGeometry()
@@ -6015,7 +6024,11 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
   glow.renderOrder = 20
   glow.userData.selectionGlow = true
   glow.raycast = () => {}
-  const edge = new THREE.LineSegments(edgeGeometry.clone(), new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.9, depthTest: true, depthWrite: false }))
+  // Both passes use the same immutable edge positions. Cloning a large
+  // EdgesGeometry doubled the allocation/copy cost exactly when a high
+  // resolution model first became selected; the materials still provide the
+  // soft underlay and crisp line as separate render passes.
+  const edge = new THREE.LineSegments(edgeGeometry, new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.9, depthTest: true, depthWrite: false }))
   if (!(mesh instanceof THREE.InstancedMesh) && !mesh.userData.greedyMesh) edge.scale.setScalar(1.012)
   edge.renderOrder = 21
   edge.userData.selectionGlow = true
@@ -6314,6 +6327,11 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   const selectGestureRef = useRef<SelectGesture | null>(null)
   const boxSelectGestureRef = useRef<BoxSelectGesture | null>(null)
   const cameraGestureRef = useRef<{ pointerId: number; button: 'right'; lastX: number; lastY: number; moved: boolean; contextPartIds?: string[] } | null>(null)
+  // The drag gesture already places the Three.js roots at their final
+  // position before React receives the committed project snapshot. The
+  // transform effect still reconciles state, but its extra render is
+  // redundant for this path and can make a large model pause after mouse-up.
+  const skipNextTransformRenderRef = useRef(false)
   const previewTouchPointersRef = useRef(new Set<number>())
   const previewTouchGestureRef = useRef<{ pointerId: number; startX: number; startY: number; moved: boolean } | null>(null)
   const previewMultiTouchRef = useRef(false)
@@ -7162,7 +7180,8 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         componentGroup.userData.renderOrigin = origin
       })
     }
-    invalidateRenderRef.current()
+    if (skipNextTransformRenderRef.current) skipNextTransformRenderRef.current = false
+    else invalidateRenderRef.current()
   }, [project.instances, project.customEntityOffsets, sceneParts])
 
   useEffect(() => {
@@ -7181,10 +7200,13 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       if (renderSignature && object.userData.greedyMeshBuiltSignature === renderSignature) return
       void client.build(scenePartId, revision, voxels, object.userData.greedyMeshCacheKey as string | undefined).then((payload) => {
         if (cancelled || !payload || !object.parent) return
-        const positions = payload.positions.slice()
-        for (let index = 0; index < positions.length; index += 1) positions[index] *= VOXEL_WORLD_SIZE
         const geometry = new THREE.BufferGeometry()
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+        // The worker emits coordinates in voxel units. Keep that transferable
+        // buffer intact so cache hits can reuse it without a full copy and a
+        // per-vertex scale loop on the main thread. The mesh transform carries
+        // the mm/world-unit conversion, and also scales attached selection
+        // outlines consistently.
+        geometry.setAttribute('position', new THREE.BufferAttribute(payload.positions, 3))
         geometry.setAttribute('normal', new THREE.BufferAttribute(payload.normals, 3, true))
         const hasMultipleColors = colors.length > 2
         if (hasMultipleColors) {
@@ -7212,8 +7234,10 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         })
         configureGreedyPreviewMaterial(material)
         const greedyMesh = new THREE.Mesh(geometry, material)
+        greedyMesh.scale.setScalar(VOXEL_WORLD_SIZE)
         greedyMesh.userData.scenePartId = scenePartId
         greedyMesh.userData.greedyVoxels = voxels
+        greedyMesh.userData.greedyOutlinePositions = payload.outlinePositions
         greedyMesh.userData.baseRenderColor = 0xffffff
         greedyMesh.userData.greedyMesh = true
         object.children.forEach((child) => {
@@ -7227,7 +7251,9 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         // current selection/edit state here as well; otherwise the first
         // selection of a large hand-drawn entity would remain unhighlighted
         // until some unrelated React update happened.
-        if (selectedPartIdsRef.current.includes(scenePartId) || editRenderStateRef.current.partIds.has(scenePartId)) addVoxelHighlight(greedyMesh)
+        if (selectedPartIdsRef.current.includes(scenePartId) || editRenderStateRef.current.partIds.has(scenePartId)) {
+          addVoxelHighlight(greedyMesh)
+        }
         if (renderSignature) object.userData.greedyMeshBuiltSignature = renderSignature
         invalidateRenderRef.current()
       })
@@ -7893,6 +7919,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     }
     const result = onCommitScenePartsMove(gesture.parts, gesture.lastDeltaX, gesture.lastDeltaY, gesture.lastDeltaZ)
     if (!result.moved) resetDragVisuals(gesture)
+    else skipNextTransformRenderRef.current = true
   }
 
   const partBelongsToEditEntity = (part: SceneEntityPart | undefined) => {

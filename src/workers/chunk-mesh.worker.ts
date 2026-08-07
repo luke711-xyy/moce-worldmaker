@@ -18,6 +18,7 @@ export type ChunkMeshWorkerResponse = {
   normals: Int8Array
   materialIds: Uint8Array
   indices: Uint32Array
+  outlinePositions?: Float32Array
   quadCount: number
 }
 
@@ -33,7 +34,7 @@ self.onmessage = (event: MessageEvent<ChunkMeshWorkerRequest>) => {
       materialId: request.voxels[index + 3],
     })
   }
-  const mesh = buildGreedyMesh(voxels)
+  const mesh = buildGreedyMesh(voxels, { includeOutline: true })
   const response: ChunkMeshWorkerResponse = {
     type: 'chunk-built',
     requestId: request.requestId,
@@ -47,6 +48,7 @@ self.onmessage = (event: MessageEvent<ChunkMeshWorkerRequest>) => {
       response.normals.buffer,
       response.materialIds.buffer,
       response.indices.buffer,
+      ...(response.outlinePositions ? [response.outlinePositions.buffer] : []),
     ],
   })
 }

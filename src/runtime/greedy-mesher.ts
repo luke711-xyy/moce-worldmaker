@@ -10,19 +10,65 @@ export type GreedyMeshPayload = {
   normals: Int8Array
   materialIds: Uint8Array
   indices: Uint32Array
+  outlinePositions?: Float32Array
   quadCount: number
+}
+
+export type GreedyMeshOptions = {
+  includeOutline?: boolean
 }
 
 type MaskCell = { materialId: number; sign: -1 | 1 } | null
 
 const key = (x: number, y: number, z: number) => `${x},${y},${z}`
 
-export function buildGreedyMesh(voxels: ReadonlyArray<MesherVoxel>): GreedyMeshPayload {
+function buildOutlinePositions(positions: Float32Array, normals: Int8Array, quadCount: number): Float32Array {
+  type Edge = {
+    start: [number, number, number]
+    end: [number, number, number]
+    normal: [number, number, number]
+  }
+  // Each greedy quad is emitted as four consecutive vertices. Cancel the
+  // shared edge of coplanar quads and retain boundary/feature edges. This
+  // replaces main-thread EdgesGeometry work for large selected models.
+  const edges = new Map<string, Edge | null>()
+  const edgePairs: Array<[number, number]> = [[0, 1], [1, 2], [2, 3], [3, 0]]
+  const point = (vertex: number): [number, number, number] => [
+    positions[vertex * 3], positions[vertex * 3 + 1], positions[vertex * 3 + 2],
+  ]
+  const pointKey = (value: [number, number, number]) => `${value[0]},${value[1]},${value[2]}`
+  const normal = (vertex: number): [number, number, number] => [
+    normals[vertex * 3], normals[vertex * 3 + 1], normals[vertex * 3 + 2],
+  ]
+  for (let quad = 0; quad < quadCount; quad += 1) {
+    const base = quad * 4
+    const faceNormal = normal(base)
+    edgePairs.forEach(([startIndex, endIndex]) => {
+      const start = point(base + startIndex)
+      const end = point(base + endIndex)
+      const startKey = pointKey(start)
+      const endKey = pointKey(end)
+      const key = startKey < endKey ? `${startKey}|${endKey}` : `${endKey}|${startKey}`
+      const previous = edges.get(key)
+      if (previous === undefined) {
+        edges.set(key, { start, end, normal: faceNormal })
+      } else if (previous && previous.normal[0] === faceNormal[0] && previous.normal[1] === faceNormal[1] && previous.normal[2] === faceNormal[2]) {
+        edges.set(key, null)
+      }
+    })
+  }
+  const output: number[] = []
+  edges.forEach((edge) => { if (edge) output.push(...edge.start, ...edge.end) })
+  return new Float32Array(output)
+}
+
+export function buildGreedyMesh(voxels: ReadonlyArray<MesherVoxel>, options: GreedyMeshOptions = {}): GreedyMeshPayload {
   if (!voxels.length) return {
     positions: new Float32Array(),
     normals: new Int8Array(),
     materialIds: new Uint8Array(),
     indices: new Uint32Array(),
+    outlinePositions: options.includeOutline ? new Float32Array() : undefined,
     quadCount: 0,
   }
   // Do not use Math.min/max(...array) here. A large imported or procedurally
@@ -128,11 +174,14 @@ export function buildGreedyMesh(voxels: ReadonlyArray<MesherVoxel>): GreedyMeshP
       }
     }
   }
+  const positionBuffer = new Float32Array(positions)
+  const normalBuffer = new Int8Array(normals)
   return {
-    positions: new Float32Array(positions),
-    normals: new Int8Array(normals),
+    positions: positionBuffer,
+    normals: normalBuffer,
     materialIds: new Uint8Array(materialIds),
     indices: new Uint32Array(indices),
+    outlinePositions: options.includeOutline ? buildOutlinePositions(positionBuffer, normalBuffer, quadCount) : undefined,
     quadCount,
   }
 }
