@@ -1388,7 +1388,7 @@ function App() {
     }].slice(-50)
     historyRef.current.future = []
     removedPartIds.forEach((partId) => sceneOccupancyRef.current?.removeOwner(partId))
-    resultGroups.forEach(({ entityId, voxels }) => sceneOccupancyRef.current?.insertOwner(`custom:${entityId}`, voxels))
+    resultGroups.forEach(({ entityId, voxels }) => sceneOccupancyRef.current?.replaceOwnerFromValidatedBatch(`custom:${entityId}`, voxels))
     // The occupancy index was updated incrementally above. The following
     // sceneParts effect must not sort and rescan the same large result again.
     skipSceneOccupancySyncRef.current = true

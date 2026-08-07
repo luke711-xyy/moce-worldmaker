@@ -171,6 +171,7 @@ export class SceneOccupancyIndex {
     voxels: Voxel[],
     sourceVoxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>> = voxels,
     baseOffset: Pick<Voxel, 'x' | 'y' | 'z'> = { x: 0, y: 0, z: 0 },
+    assumeEmpty = false,
   ): void {
     if (this.ownerIdToHandle.has(ownerId)) this.removeOwner(ownerId)
     const ownerHandle = this.registerOwner(ownerId)
@@ -200,18 +201,30 @@ export class SceneOccupancyIndex {
       if (!this.chunks.has(chunkKey)) this.chunks.set(chunkKey, chunk)
       const { wordIndex, bitMask } = bitAddress(localIndex)
       const wasOccupied = (chunk.occupancyBits[wordIndex] & bitMask) !== 0
-      const primaryOwner = chunk.ownerIds[localIndex]
-      if (primaryOwner && primaryOwner !== ownerHandle) {
-        const owners = chunk.overflowOwners.get(localIndex) ?? new Set<number>()
-        owners.add(ownerHandle)
-        chunk.overflowOwners.set(localIndex, owners)
-      } else {
+      if (assumeEmpty && !wasOccupied) {
+        // Geometry confirmation has already validated the result against all
+        // non-selected owners and removed the old selected owners. In this
+        // common replacement path there is no need to allocate overflow sets
+        // or resolve a primary owner for every newly generated cell.
         chunk.ownerIds[localIndex] = ownerHandle
+        chunk.occupancyBits[wordIndex] |= bitMask
+        chunk.occupiedCount += 1
+        chunk.materialIds[localIndex] = this.materialIndex(voxel.materialId)
+        chunk.dataRevision += 1
+      } else {
+        const primaryOwner = chunk.ownerIds[localIndex]
+        if (primaryOwner && primaryOwner !== ownerHandle) {
+          const owners = chunk.overflowOwners.get(localIndex) ?? new Set<number>()
+          owners.add(ownerHandle)
+          chunk.overflowOwners.set(localIndex, owners)
+        } else {
+          chunk.ownerIds[localIndex] = ownerHandle
+        }
+        chunk.occupancyBits[wordIndex] |= bitMask
+        if (!wasOccupied) chunk.occupiedCount += 1
+        chunk.materialIds[localIndex] = this.materialIndex(voxel.materialId)
+        chunk.dataRevision += 1
       }
-      chunk.occupancyBits[wordIndex] |= bitMask
-      if (!wasOccupied) chunk.occupiedCount += 1
-      chunk.materialIds[localIndex] = this.materialIndex(voxel.materialId)
-      chunk.dataRevision += 1
     })
     if (bounds) this.ownerBounds.set(ownerHandle, bounds)
   }
@@ -265,6 +278,22 @@ export class SceneOccupancyIndex {
   ): void {
     this.removeOwner(ownerId)
     this.insertOwner(ownerId, voxels, sourceVoxels, baseOffset)
+  }
+
+  /**
+   * Replace an owner with a unique, already collision-validated batch. This
+   * is intentionally narrower than replaceOwner(): normal editing must keep
+   * the full overlap/overflow behavior, while geometry confirmation can skip
+   * that per-cell bookkeeping after it has removed the selected owners.
+   */
+  replaceOwnerFromValidatedBatch(
+    ownerId: string,
+    voxels: Voxel[],
+    sourceVoxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>> = voxels,
+    baseOffset: Pick<Voxel, 'x' | 'y' | 'z'> = { x: 0, y: 0, z: 0 },
+  ): void {
+    this.removeOwner(ownerId)
+    this.insertOwner(ownerId, voxels, sourceVoxels, baseOffset, true)
   }
 
   private insertPart(part: SceneEntityPart): void {

@@ -75,6 +75,18 @@ describe('SceneOccupancyIndex', () => {
     expect(index.queryProjectVoxel(voxel(33, 2, 0)).occupied).toBe(false)
   })
 
+  it('replaces a validated batch without creating false overlap owners', () => {
+    const index = SceneOccupancyIndex.fromParts([
+      part('old', [voxel(0, 0, 0), voxel(1, 0, 0)]),
+      part('stable', [voxel(8, 0, 0)]),
+    ])
+    index.replaceOwnerFromValidatedBatch('old', [voxel(2, 0, 0), voxel(3, 0, 0), voxel(4, 0, 0)])
+    expect(index.queryProjectVoxel(voxel(0, 0, 0)).occupied).toBe(false)
+    expect(index.queryProjectVoxel(voxel(3, 0, 0)).ownerIds).toEqual(['old'])
+    expect(index.queryProjectVoxel(voxel(8, 0, 0)).ownerIds).toEqual(['stable'])
+    expect(index.chunks.get('0,0,0')?.occupiedCount).toBe(4)
+  })
+
   it('tracks chunk occupancy without scanning the full chunk on removal', () => {
     const index = SceneOccupancyIndex.fromParts([part('entity', [voxel(0, 0, 0), voxel(1, 0, 0)])])
     const chunk = index.chunks.get('0,0,0')
