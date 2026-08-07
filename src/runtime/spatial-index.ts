@@ -517,8 +517,6 @@ export class SceneOccupancyIndex {
         candidateVoxelCount += ownerVoxels.length
       }
       if (!candidates.length) return false
-      const movingKeys = this.projectVoxelKeyCache.get(cacheKey) ?? new Set(voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
-      this.projectVoxelKeyCache.set(cacheKey, movingKeys)
       // Scan the smaller side of the exact intersection. A small selected
       // part beside a huge stationary model should not pay for the huge
       // model's entire voxel array on every pointermove. queryRuntimeVoxel()
@@ -531,6 +529,11 @@ export class SceneOccupancyIndex {
           return hit.ownerIds.some((ownerId) => !excluded.has(ownerId))
         })
       }
+      // Only the stationary-side scan needs a coordinate Set for the moving
+      // model. Building this before the branch made a large preview pay the
+      // full allocation cost even when the moving-side query was cheaper.
+      const movingKeys = this.projectVoxelKeyCache.get(cacheKey) ?? new Set(voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
+      this.projectVoxelKeyCache.set(cacheKey, movingKeys)
       for (const [ownerVoxels, translation] of candidates) {
         for (const voxel of ownerVoxels) {
           const currentX = voxel.x + (translation?.gx ?? 0)
