@@ -220,11 +220,23 @@ type SceneTreeItem = {
 const CURRENT_SCENE_ID = 'scene-main'
 type PersistenceStatus = 'loading' | 'saved' | 'offline'
 const MIN_ZOOM_LEVEL = 50
-const MAX_ZOOM_LEVEL = 2000
+const MAX_ZOOM_LEVEL = 20000
 const WHEEL_ZOOM_INPUT_GAIN = 4
+const BUTTON_ZOOM_STEP_FACTOR = 1.25
 
 function clampZoomLevel(value: number): number {
   return Math.max(MIN_ZOOM_LEVEL, Math.min(MAX_ZOOM_LEVEL, value))
+}
+
+function zoomTrackProgress(value: number): number {
+  const zoom = clampZoomLevel(value)
+  const range = Math.log(MAX_ZOOM_LEVEL / MIN_ZOOM_LEVEL)
+  if (!Number.isFinite(range) || range <= 0) return 0
+  return (Math.log(zoom / MIN_ZOOM_LEVEL) / range) * 100
+}
+
+function stepZoomLevel(value: number, direction: 1 | -1): number {
+  return clampZoomLevel(value * (direction > 0 ? BUTTON_ZOOM_STEP_FACTOR : 1 / BUTTON_ZOOM_STEP_FACTOR))
 }
 
 function formatVoxelSizeMm(value: number): string {
@@ -3963,7 +3975,7 @@ function App() {
             <div className="drag-axis-control" aria-label="拖动方向"><Move3d size={14} /><span>拖动</span><button className={dragAxis === 'horizontal' ? 'active' : ''} onClick={() => { setDragAxis('horizontal'); setNotice('拖动方向 · 水平（X/Y）') }}>水平 X/Y</button><button className={dragAxis === 'vertical' ? 'active' : ''} onClick={() => { setDragAxis('vertical'); setNotice('拖动方向 · 竖直（Z）') }}>竖直 Z</button></div>
             {!(['cuboid', 'sphere', 'extrude'] as Tool[]).includes(tool) && <div className="drawing-plane-control" aria-label="绘制平面"><span>绘制平面</span>{(['xy', 'xz', 'yz'] as const).map((plane) => <button key={plane} className={drawingPlane === plane ? 'active' : ''} onClick={() => setDrawingPlane(plane)}>{plane === 'xy' ? 'XZ' : plane === 'xz' ? 'XY' : 'YZ'}</button>)}</div>}
             {cameraControlApi && <ViewportCameraControls showJoystick={false} onRotate={cameraControlApi.rotate} onView={(view) => { cameraControlApi.view(view); setNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { cameraControlApi.reset(); setNotice('视角已回中 · 缩放已恢复 100%') }} />}
-            <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { if (cameraControlApi) cameraControlApi.zoomOut(); else setZoomLevel((value) => clampZoomLevel(value - (value > 100 ? 50 : 10))); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${((zoomLevel - MIN_ZOOM_LEVEL) / (MAX_ZOOM_LEVEL - MIN_ZOOM_LEVEL)) * 100}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { if (cameraControlApi) cameraControlApi.zoomIn(); else setZoomLevel((value) => clampZoomLevel(value + (value >= 100 ? 50 : 10))); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{Math.round(zoomLevel)}%</span></div>
+            <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { if (cameraControlApi) cameraControlApi.zoomOut(); else setZoomLevel((value) => stepZoomLevel(value, -1)); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${zoomTrackProgress(zoomLevel)}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { if (cameraControlApi) cameraControlApi.zoomIn(); else setZoomLevel((value) => stepZoomLevel(value, 1)); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{Math.round(zoomLevel)}%</span></div>
           </div>
         </section>
         <Inspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} geometryPreview={geometryPreview} shellThicknessOptions={geometryShellThicknessOptions} scaleOptions={geometryScaleOptions} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onPreviewHsl={previewSelectedHsl} onCommitHsl={commitSelectedHsl} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportGlb={exportSelectedPartGlb} onExportVox={exportSelectedPartVox} onExportEntityFile={exportSelectedEntityFile} onOpenSlicer={() => setSliceDialogOpen(true)} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => setCopyPreview(null)} onStartShell={startShellPreview} onStartScale={startScalePreview} onChangeShellThickness={changeGeometryShellThickness} onChangeScale={changeGeometryScale} onConfirmGeometry={confirmGeometryPreview} onCancelGeometry={cancelGeometryPreview} onDelete={deleteSelected} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
@@ -5999,8 +6011,8 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
         // it must not depend on the next animation frame being delivered.
         onZoomChangeRef.current(100)
       },
-      zoomIn: () => setCameraZoomLevel(cameraZoomLevelRef.current + (cameraZoomLevelRef.current >= 100 ? 50 : 10), false, true),
-      zoomOut: () => setCameraZoomLevel(cameraZoomLevelRef.current - (cameraZoomLevelRef.current > 100 ? 50 : 10), false, true),
+      zoomIn: () => setCameraZoomLevel(stepZoomLevel(cameraZoomLevelRef.current, 1), false, true),
+      zoomOut: () => setCameraZoomLevel(stepZoomLevel(cameraZoomLevelRef.current, -1), false, true),
     })
     return () => onCameraApiChange(null)
   }, [onCameraApiChange, project.sceneBounds?.x, project.sceneBounds?.y, project.sceneBounds?.z, project.sceneSizeCm])
