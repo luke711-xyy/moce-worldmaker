@@ -75,6 +75,14 @@ describe('SceneOccupancyIndex', () => {
     expect(index.queryProjectVoxel(voxel(33, 2, 0)).occupied).toBe(false)
   })
 
+  it('tracks chunk occupancy without scanning the full chunk on removal', () => {
+    const index = SceneOccupancyIndex.fromParts([part('entity', [voxel(0, 0, 0), voxel(1, 0, 0)])])
+    const chunk = index.chunks.get('0,0,0')
+    expect(chunk?.occupiedCount).toBe(2)
+    index.removeOwner('entity')
+    expect(index.chunks.has('0,0,0')).toBe(false)
+  })
+
   it('resolves lazy owner translations without rebuilding occupancy chunks', () => {
     const index = SceneOccupancyIndex.fromParts([part('entity', [voxel(1, 2, 3)])])
     const originalChunk = index.chunks.get('0,0,0')

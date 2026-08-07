@@ -11,6 +11,7 @@ import {
 export type RuntimeChunk = {
   key: string
   occupancyBits: Uint32Array
+  occupiedCount: number
   materialIds: Uint8Array
   ownerIds: Uint32Array
   overflowOwners: Map<number, Set<number>>
@@ -104,6 +105,7 @@ function createRuntimeChunk(key: string): RuntimeChunk {
   return {
     key,
     occupancyBits: new Uint32Array(RUNTIME_OCCUPANCY_WORDS),
+    occupiedCount: 0,
     materialIds: new Uint8Array(RUNTIME_CHUNK_VOLUME),
     ownerIds: new Uint32Array(RUNTIME_CHUNK_VOLUME),
     overflowOwners: new Map(),
@@ -187,6 +189,7 @@ export class SceneOccupancyIndex {
       const chunk = this.chunks.get(chunkKey) ?? createRuntimeChunk(chunkKey)
       if (!this.chunks.has(chunkKey)) this.chunks.set(chunkKey, chunk)
       const { wordIndex, bitMask } = bitAddress(localIndex)
+      const wasOccupied = (chunk.occupancyBits[wordIndex] & bitMask) !== 0
       const primaryOwner = chunk.ownerIds[localIndex]
       if (primaryOwner && primaryOwner !== ownerHandle) {
         const owners = chunk.overflowOwners.get(localIndex) ?? new Set<number>()
@@ -196,6 +199,7 @@ export class SceneOccupancyIndex {
         chunk.ownerIds[localIndex] = ownerHandle
       }
       chunk.occupancyBits[wordIndex] |= bitMask
+      if (!wasOccupied) chunk.occupiedCount += 1
       chunk.materialIds[localIndex] = this.materialIndex(voxel.materialId)
       chunk.dataRevision += 1
     })
@@ -220,13 +224,15 @@ export class SceneOccupancyIndex {
           chunk.ownerIds[localIndex] = 0
           chunk.materialIds[localIndex] = 0
           const { wordIndex, bitMask } = bitAddress(localIndex)
+          const wasOccupied = (chunk.occupancyBits[wordIndex] & bitMask) !== 0
           chunk.occupancyBits[wordIndex] &= ~bitMask
+          if (wasOccupied) chunk.occupiedCount -= 1
         }
       } else if (overflowOwners?.delete(ownerHandle) && !overflowOwners.size) {
         chunk.overflowOwners.delete(localIndex)
       }
       chunk.dataRevision += 1
-      if (!chunk.ownerIds.some(Boolean) && !chunk.overflowOwners.size) this.chunks.delete(chunkKey)
+      if (chunk.occupiedCount === 0 && !chunk.overflowOwners.size) this.chunks.delete(chunkKey)
     }
     this.ownerVoxels.delete(ownerHandle)
     this.ownerTranslations.delete(ownerHandle)
