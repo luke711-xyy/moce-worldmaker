@@ -7480,7 +7480,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     if (tool !== 'select' || placementAsset || editEntityId) return
     const context = getPointerContext(event)
     const hit = context?.hits.find((item) => item.object.userData.scenePartId)
-    const hitPart = hit?.object.userData.scenePartId ? sceneEntityParts(project).find((part) => part.id === hit.object.userData.scenePartId) : undefined
+    const hitPart = hit?.object.userData.scenePartId ? sceneParts.find((part) => part.id === hit.object.userData.scenePartId) : undefined
     if (!hitPart) return
     onEnterEditMode(hitPart.id)
   }
@@ -7530,7 +7530,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         maxY: Math.max(result.maxY, point.y),
       }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity })
     }
-    for (const part of sceneEntityParts(project)) {
+    for (const part of sceneParts) {
       const bounds = gridVoxelBounds(part.voxels)
       if (!bounds) continue
       const offset = scenePartGridOffset(part)
@@ -7926,7 +7926,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       const context = getPointerContext(event)
       const hit = context?.hits.find((item) => item.object.userData.scenePartId)
       const hitPartId = context?.voxelHit?.ownerIds[0] ?? hit?.object.userData.scenePartId
-      const hitPart = hitPartId ? sceneEntityParts(project).find((part) => part.id === hitPartId) : undefined
+      const hitPart = hitPartId ? sceneParts.find((part) => part.id === hitPartId) : undefined
       const explicitMultiSelection = selectedPartIds.length > 1 && (checkedPartIds.length > 1 || (checkedPartIds.length === 1 && !checkedPartIds[0].startsWith('assembly:')))
       const targetPartIds = !editEntityId && hitPart
         ? explicitMultiSelection && selectedPartIds.includes(hitPart.id) ? selectedPartIds : hitSelectionPartIds(hitPart)
@@ -7946,7 +7946,6 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       const customHit = context?.hits.find((item) => intersectionVoxel(item, 'customVoxels', 'customVoxel'))
       const hit = customHit ?? context?.hits.find((item) => item.object.userData.scenePartId)
       const floorPoint = context?.floorPoint
-      const sceneParts = sceneEntityParts(project)
       const hitPartId = context?.voxelHit?.ownerIds[0] ?? hit?.object.userData.scenePartId
       const hitPart = hitPartId ? sceneParts.find((part) => part.id === hitPartId) : undefined
       if (hitPart) {
