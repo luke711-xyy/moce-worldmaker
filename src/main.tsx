@@ -742,6 +742,7 @@ type VoxelStrokeTransaction = {
   historyEditEntityId: string | null
   historySelectedId: string
   historyCheckedTreePartIds: string[]
+  occupiedCustomSceneKeys: Set<string>
   dirty: boolean
 }
 
@@ -1198,15 +1199,23 @@ function App() {
       customEntityOffsets: original.customEntityOffsets ? Object.fromEntries(Object.entries(original.customEntityOffsets).map(([entityId, offset]) => [entityId, { ...offset }])) : undefined,
       assemblies: original.assemblies?.map((assembly) => ({ ...assembly, memberKeys: [...assembly.memberKeys] })),
     }
+    const initialParts = sceneEntityParts(projectRef.current)
     voxelStrokeTransactionRef.current = {
       draft,
       original,
       historyEditEntityId: editEntityId,
       historySelectedId: selectedId,
       historyCheckedTreePartIds: [...checkedTreePartIds],
+      // Build this once at pointer-down. The previous batch path rebuilt a
+      // flattened Set of every custom voxel for every animation-frame commit,
+      // which made long strokes increasingly expensive as the entity grew.
+      occupiedCustomSceneKeys: new Set(initialParts
+        .filter((part) => part.kind === 'custom')
+        .flatMap((part) => scenePartVoxels(part))
+        .map(sceneVoxelKey)),
       dirty: false,
     }
-    voxelStrokePartsRef.current = sceneEntityParts(projectRef.current)
+    voxelStrokePartsRef.current = initialParts
     voxelStrokeNoticeRef.current = null
   }
 
@@ -1924,12 +1933,14 @@ function App() {
           const owners = sceneOccupancyRef.current?.queryProjectVoxel(voxel).ownerIds ?? []
           return owners.every((ownerId) => excluded.includes(ownerId))
         })
-        if (insertable.length) updateProject((draft) => {
-          const occupied = new Set(currentParts.filter((part) => part.kind === 'custom').flatMap((part) => scenePartVoxels(part)).map(sceneVoxelKey))
-          insertable.forEach((voxel) => {
-            if (occupied.has(sceneVoxelKey(voxel))) return
+        const transaction = voxelStrokeTransactionRef.current
+        const occupiedCustomSceneKeys = transaction?.occupiedCustomSceneKeys
+          ?? new Set(currentParts.filter((part) => part.kind === 'custom').flatMap((part) => scenePartVoxels(part)).map(sceneVoxelKey))
+        const filteredInsertable = insertable.filter((voxel) => !occupiedCustomSceneKeys.has(sceneVoxelKey(voxel)))
+        if (filteredInsertable.length) updateProject((draft) => {
+          filteredInsertable.forEach((voxel) => {
             draft.customVoxels.push(sceneToStoredCustomVoxel(draft, { ...voxel, materialId: activeMaterial, entityId }, entityId))
-            occupied.add(sceneVoxelKey(voxel))
+            occupiedCustomSceneKeys.add(sceneVoxelKey(voxel))
           })
           if (editAssemblyId) {
             const assembly = (draft.assemblies ?? []).find((item) => item.id === editAssemblyId)
@@ -1941,7 +1952,7 @@ function App() {
           setEditEntityId(`custom:${entityId}`)
           setCheckedTreePartIds([`custom:${entityId}`])
         } else setSelectedId(`custom:${entityId}`)
-        notifyEditor(activeEditEntityId ? `已在当前编辑实体中添加 ${insertable.length} 个体素` : `已新建用户实体并进入编辑模式 · ${insertable.length} 个体素`)
+        notifyEditor(activeEditEntityId ? `已在当前编辑实体中添加 ${filteredInsertable.length} 个体素` : `已新建用户实体并进入编辑模式 · ${filteredInsertable.length} 个体素`)
         return
       }
       addTargets.forEach((voxel) => addVoxel({ ...voxel, materialId: activeMaterial }))
