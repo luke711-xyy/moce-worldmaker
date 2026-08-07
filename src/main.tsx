@@ -6461,7 +6461,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         ? existing
         : existing && existing.userData.renderSignature === renderSignature && existing.userData.assetRef === asset
           ? existing
-          : buildAssetGroup(renderAsset, materialMap, instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ)
+          : buildAssetGroup(renderAsset, materialMap, instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ, true)
       if (instanceGroup !== existing) {
         if (existing) {
           group.remove(existing)
@@ -8143,6 +8143,29 @@ function customComponentRenderOrigin(component: ReadonlyArray<Pick<Voxel, 'x' | 
 }
 
 const CUSTOM_INSTANCE_RENDER_LIMIT = 16_384
+const assetBaseComponentsCache = new WeakMap<VoxelAsset, Array<{ partId: string; voxels: Voxel[] }>>()
+
+function renderAssetVoxelColor(
+  voxel: Voxel,
+  asset: VoxelAsset,
+  materialMap: Map<string, THREE.MeshStandardMaterial>,
+  colorOverride?: string,
+): THREE.Color {
+  const paintedColor = voxel.paintMaterialId
+    ? (materialMap.get(voxel.paintMaterialId)?.color.getStyle() ?? (voxel.paintMaterialId.startsWith('#') ? voxel.paintMaterialId : undefined))
+    : undefined
+  return new THREE.Color(
+    paintedColor
+    ?? colorOverride
+    ?? asset.templateColor
+    ?? (voxel.materialId === 'primary'
+      ? asset.color
+      : voxel.materialId === 'accent'
+        ? asset.accent
+        : materialMap.get(voxel.materialId)?.color.getStyle()
+          ?? (voxel.materialId.startsWith('#') ? voxel.materialId : asset.color)),
+  )
+}
 
 function buildCustomComponentGroup(component: Voxel[], entityId: string, materialMap: Map<string, THREE.MeshStandardMaterial>, componentColor?: string, forceCellRender = false) {
   const componentGroup = new THREE.Group()
@@ -8225,10 +8248,11 @@ function updateAssetPartOffsets(group: THREE.Group, partOffsets: SceneInstance['
   group.children.forEach((child) => {
     if (!(child instanceof THREE.Group) || typeof child.userData.instancePartId !== 'string') return
     const offset = partOffsets?.[child.userData.instancePartId as string] ?? { x: 0, y: 0, z: 0 }
+    const base = child.userData.baseRenderOffset as { x: number; y: number; z: number } | undefined
     child.position.set(
-      mirror?.x ? -offset.x : offset.x,
-      mirror?.y ? -offset.z : offset.z,
-      mirror?.z ? -offset.y : offset.y,
+      (base?.x ?? 0) + (mirror?.x ? -offset.x : offset.x),
+      (base?.y ?? 0) + (mirror?.y ? -offset.z : offset.z),
+      (base?.z ?? 0) + (mirror?.z ? -offset.y : offset.y),
     )
   })
 }
@@ -8243,38 +8267,69 @@ function syncAssetPartOffsets(group: THREE.Group, partOffsets: SceneInstance['pa
   group.userData.mirrorRef = mirror
 }
 
-function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0, colorOverride?: string, mirror: SceneInstance['mirror'] = undefined, rotationX = 0, rotationY = 0, rotationZ = 0) {
+function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0, colorOverride?: string, mirror: SceneInstance['mirror'] = undefined, rotationX = 0, rotationY = 0, rotationZ = 0, allowGreedyMesh = false) {
   const group = new THREE.Group()
   const scale = VOXEL_WORLD_SIZE
-  const voxels = resolveInstanceVoxels(asset, overrides)
+  const resolvedComponents = overrides.length
+    ? resolveInstanceComponents(asset, overrides)
+    : assetBaseComponentsCache.get(asset) ?? (() => {
+      const next = resolveInstanceComponents(asset, [])
+      assetBaseComponentsCache.set(asset, next)
+      return next
+    })()
   group.rotation.set(rotationX * Math.PI / 180, rotationY * Math.PI / 180, -(rotation + rotationZ) * Math.PI / 180)
-  if (!voxels.length) {
+  if (!resolvedComponents.length) {
     const placeholder = new THREE.Mesh(new THREE.BoxGeometry(asset.width * scale, asset.depth * scale, asset.height * scale), new THREE.MeshStandardMaterial({ color: asset.color, roughness: 0.76 }))
     placeholder.position.z = asset.height * scale / 2
     placeholder.userData.instanceId = asset.id
     group.add(placeholder)
     return group
   }
-  for (const { partId, voxels: component } of resolveInstanceComponents(asset, overrides)) {
-    const occupied = new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
+  for (const { partId, voxels: component } of resolvedComponents) {
     const partGroup = new THREE.Group()
     const offset = partOffsets?.[partId] ?? { x: 0, y: 0, z: 0 }
     partGroup.position.set(mirror?.x ? -offset.x : offset.x, mirror?.y ? -offset.z : offset.z, mirror?.z ? -offset.y : offset.y)
     partGroup.userData.instancePartId = partId
+    const preserveVoxelCells = component.some((voxel) => voxel.preserveVoxelCells)
+    if (allowGreedyMesh && component.length > CUSTOM_INSTANCE_RENDER_LIMIT && !preserveVoxelCells) {
+      const greedyColorIds = new Map<string, number>()
+      const greedyColors: string[] = ['#ffffff']
+      const greedyVoxels = component.map((voxel) => {
+        const localXIndex = mirror?.x ? asset.width - 1 - voxel.x : voxel.x
+        const localYIndex = mirror?.z ? asset.height - 1 - voxel.y : voxel.y
+        const localZIndex = mirror?.y ? asset.depth - 1 - voxel.z : voxel.z
+        const colorKey = `#${renderAssetVoxelColor(voxel, asset, materialMap, colorOverride).getHexString()}`
+        let materialId = greedyColorIds.get(colorKey)
+        if (materialId === undefined) {
+          materialId = greedyColors.length
+          greedyColorIds.set(colorKey, materialId)
+          greedyColors.push(colorKey)
+        }
+        return { gx: localXIndex, gy: localZIndex, gz: localYIndex, materialId }
+      })
+      // The worker returns vertices at cell boundaries. Offset the part to the
+      // same local origin used by the old per-cell matrices, so the physical
+      // voxel size and the asset's centered X/Y placement remain unchanged.
+      partGroup.position.set(
+        (mirror?.x ? -offset.x : offset.x) - (asset.width / 2) * scale,
+        (mirror?.y ? -offset.z : offset.z) - (asset.depth / 2) * scale,
+        (mirror?.z ? -offset.y : offset.y),
+      )
+      partGroup.userData.greedyVoxels = greedyVoxels
+      partGroup.userData.greedyColors = greedyColors
+      partGroup.userData.greedyDisabled = false
+      partGroup.userData.baseRenderOffset = {
+        x: -(asset.width / 2) * scale,
+        y: -(asset.depth / 2) * scale,
+        z: 0,
+      }
+      group.add(partGroup)
+      continue
+    }
+    const occupied = new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
     const batches = new Map<string, { color: THREE.Color; voxels: Voxel[] }>()
     component.forEach((voxel) => {
-      const paintedColor = voxel.paintMaterialId ? (materialMap.get(voxel.paintMaterialId)?.color.getStyle() ?? (voxel.paintMaterialId.startsWith('#') ? voxel.paintMaterialId : undefined)) : undefined
-      const color = new THREE.Color(
-        paintedColor
-        ?? colorOverride
-        ?? asset.templateColor
-        ?? (voxel.materialId === 'primary'
-          ? asset.color
-          : voxel.materialId === 'accent'
-            ? asset.accent
-            : materialMap.get(voxel.materialId)?.color.getStyle()
-              ?? (voxel.materialId.startsWith('#') ? voxel.materialId : asset.color)),
-      )
+      const color = renderAssetVoxelColor(voxel, asset, materialMap, colorOverride)
       const key = color.getHexString()
       const batch = batches.get(key) ?? { color, voxels: [] }
       batch.voxels.push(voxel)
