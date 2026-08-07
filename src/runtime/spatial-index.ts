@@ -123,7 +123,6 @@ export class SceneOccupancyIndex {
   // original chunk entries and defer moving those entries until a structural
   // edit or a full synchronization actually requires materialization.
   private readonly ownerTranslations = new Map<number, RuntimeVoxelCoord>()
-  private readonly ownerVoxelSets = new Map<number, Set<string>>()
   private readonly ownerBounds = new Map<number, RuntimeVoxelBounds>()
   // The scene-part builder reuses voxel arrays for unchanged owners. Keep the
   // source reference so syncParts can skip the old O(n log n) sorted-key
@@ -152,7 +151,6 @@ export class SceneOccupancyIndex {
     this.handleToOwnerId.splice(1)
     this.ownerVoxels.clear()
     this.ownerTranslations.clear()
-    this.ownerVoxelSets.clear()
     this.ownerBounds.clear()
     this.ownerVoxelRefs.clear()
     this.ownerVoxelKeys.clear()
@@ -260,7 +258,6 @@ export class SceneOccupancyIndex {
     }
     this.ownerVoxels.delete(ownerHandle)
     this.ownerTranslations.delete(ownerHandle)
-    this.ownerVoxelSets.delete(ownerHandle)
     this.ownerBounds.delete(ownerHandle)
     this.ownerVoxelRefs.delete(ownerId)
     this.ownerVoxelKeys.delete(ownerId)
@@ -309,10 +306,6 @@ export class SceneOccupancyIndex {
   translateOwner(ownerId: string, delta: Pick<Voxel, 'x' | 'y' | 'z'>): void {
     const ownerHandle = this.ownerIdToHandle.get(ownerId)
     if (!ownerHandle || (!delta.x && !delta.y && !delta.z)) return
-    // The lookup Set is only needed once an owner enters the lazy-translation
-    // path. Deferring it keeps initial insertion and bulk geometry commits
-    // linear in chunk writes instead of allocating a second full voxel index.
-    this.ensureOwnerVoxelSet(ownerHandle)
     const runtimeDelta = projectVoxelToRuntime(delta)
     const current = this.ownerTranslations.get(ownerHandle) ?? { gx: 0, gy: 0, gz: 0 }
     this.ownerTranslations.set(ownerHandle, {
@@ -355,7 +348,6 @@ export class SceneOccupancyIndex {
         }
         if (translation.gx || translation.gy || translation.gz) {
           this.ownerTranslations.set(ownerHandle, translation)
-          this.ensureOwnerVoxelSet(ownerHandle)
         } else this.ownerTranslations.delete(ownerHandle)
         result.unchanged += 1
         return
@@ -512,9 +504,9 @@ export class SceneOccupancyIndex {
     }
     // A lazily translated owner still has stale entries in its old chunks.
     // Ignore those entries above and resolve the owner at its translated
-    // coordinate using a bounds check plus a constant-time voxel-set lookup.
-    // The common case has no lazy owners, so keep this branch completely out
-    // of the hot query path.
+    // coordinate by looking up the original chunk entry. This preserves the
+    // O(1) lookup property without allocating a second string Set containing
+    // every voxel when a large owner is moved for the first time.
     if (this.ownerTranslations.size) {
       this.ownerTranslations.forEach((translation, ownerHandle) => {
         const bounds = this.ownerBounds.get(ownerHandle)
@@ -524,7 +516,14 @@ export class SceneOccupancyIndex {
           gz: voxel.gz - translation.gz,
         }
         if (!bounds || local.gx < bounds.minGx || local.gx > bounds.maxGx || local.gy < bounds.minGy || local.gy > bounds.maxGy || local.gz < bounds.minGz || local.gz > bounds.maxGz) return
-        if (this.ownerVoxelSets.get(ownerHandle)?.has(runtimeVoxelKey(local))) handles.add(ownerHandle)
+        const sourceAddress = runtimeVoxelAddress(local)
+        const sourceChunk = this.chunks.get(sourceAddress.chunkKey)
+        if (!sourceChunk) return
+        const { wordIndex: sourceWordIndex, bitMask: sourceBitMask } = bitAddress(sourceAddress.localIndex)
+        if ((sourceChunk.occupancyBits[sourceWordIndex] & sourceBitMask) === 0) return
+        if (sourceChunk.ownerIds[sourceAddress.localIndex] === ownerHandle || sourceChunk.overflowOwners.get(sourceAddress.localIndex)?.has(ownerHandle)) {
+          handles.add(ownerHandle)
+        }
       })
     }
     if (!handles.size) return { occupied: false, ownerIds: [] }
@@ -651,11 +650,6 @@ export class SceneOccupancyIndex {
     return handle
   }
 
-  private ensureOwnerVoxelSet(ownerHandle: number): void {
-    if (this.ownerVoxelSets.has(ownerHandle)) return
-    this.ownerVoxelSets.set(ownerHandle, new Set((this.ownerVoxels.get(ownerHandle) ?? []).map(runtimeVoxelKey)))
-  }
-
   private sortedVoxelKeys(voxels: Array<Pick<Voxel, 'x' | 'y' | 'z'>>): string[] {
     return voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`).sort()
   }
@@ -668,8 +662,4 @@ export class SceneOccupancyIndex {
     this.materialIdToIndex.set(materialId, index)
     return index
   }
-}
-
-function runtimeVoxelKey(voxel: RuntimeVoxelCoord): string {
-  return `${voxel.gx},${voxel.gy},${voxel.gz}`
 }
