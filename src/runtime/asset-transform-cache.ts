@@ -1,5 +1,6 @@
 import {
   assetOriginGridCoordinate,
+  instanceVoxelPairs,
   resolveInstanceSceneVoxels,
   SceneInstance,
   snapAssetOrigin,
@@ -13,7 +14,10 @@ export type CachedAssetTransform = {
   localVoxels: ReadonlyArray<Voxel>
   min: { x: number; y: number; z: number }
   max: { x: number; y: number; z: number }
+  localVoxelBySceneKey?: Map<string, Voxel>
 }
+
+const voxelKey = (x: number, y: number, z: number) => `${x},${y},${z}`
 
 function transformKey(instance: SceneInstance): string {
   return JSON.stringify({
@@ -68,5 +72,31 @@ export class AssetTransformCache {
       y: voxel.y + translation.y,
       z: voxel.z + translation.z,
     }))
+  }
+
+  /**
+   * Resolve one scene-space cell back to the asset-local voxel used by an
+   * instance override. The first call for a transform variant builds a lazy
+   * reverse index; subsequent batch paint/erase targets are constant-time.
+   */
+  localVoxelAtSceneVoxel(instance: SceneInstance, asset: VoxelAsset, sceneVoxel: Pick<Voxel, 'x' | 'y' | 'z'>): Voxel | undefined {
+    const cached = this.get(instance, asset)
+    if (!cached.localVoxelBySceneKey) {
+      const canonicalInstance = {
+        ...instance,
+        x: snapAssetOrigin(0, asset.width),
+        y: 0,
+        z: snapAssetOrigin(0, asset.depth),
+      }
+      cached.localVoxelBySceneKey = new Map(
+        instanceVoxelPairs(canonicalInstance, asset).map(({ local, scene }) => [voxelKey(scene.x, scene.y, scene.z), local]),
+      )
+    }
+    const translation = this.translation(asset, instance.x, instance.y ?? 0, instance.z)
+    return cached.localVoxelBySceneKey.get(voxelKey(
+      sceneVoxel.x - translation.x,
+      sceneVoxel.y - translation.y,
+      sceneVoxel.z - translation.z,
+    ))
   }
 }

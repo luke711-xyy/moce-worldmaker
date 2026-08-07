@@ -160,6 +160,8 @@ describe('AssetTransformCache', () => {
       { x: 19, y: 0, z: 30 },
       { x: 20, y: 0, z: 30 },
     ])
+    expect(cache.localVoxelAtSceneVoxel({ ...instance, x: 2, z: 3 }, asset, { x: 19, y: 0, z: 30 })).toEqual(voxel(0, 0, 0))
+    expect(cache.localVoxelAtSceneVoxel({ ...instance, x: 2, z: 3 }, asset, { x: 99, y: 0, z: 30 })).toBeUndefined()
   })
 
   it('keeps mirror and rotation variants in separate cache entries', () => {
