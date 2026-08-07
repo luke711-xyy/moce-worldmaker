@@ -3671,7 +3671,11 @@ function App() {
     // the preview props. Building a coordinate -> color entry for every voxel
     // here was an avoidable O(n) pass on every selection. Keep this map only
     // for multi-entity previews, where source assets need independent colors.
-    if (selectedEntityParts.length <= 1) return {}
+    // Keep the empty map referentially stable. A transform-only project
+    // update must not make the large single-entity thumbnail render again;
+    // changing this object used to defeat VoxelMiniPreview's React.memo and
+    // rerun the full face/occupancy pass on every move release.
+    if (selectedEntityParts.length <= 1) return EMPTY_PREVIEW_COLORS
     const colors: Record<string, string> = {}
     selectedEntityParts.forEach((part) => {
       const instance = part.instanceId ? project.instances.find((item) => item.id === part.instanceId) : undefined
@@ -4304,6 +4308,7 @@ const VoxelThumbnail = React.memo(function VoxelThumbnail({ asset }: { asset: Vo
 
 const previewVoxelArrayIds = new WeakMap<object, number>()
 let nextPreviewVoxelArrayId = 1
+const EMPTY_PREVIEW_COLORS: Record<string, string> = {}
 function previewVoxelArrayId(voxels: Voxel[]): number {
   const existing = previewVoxelArrayIds.get(voxels)
   if (existing) return existing
@@ -6478,16 +6483,34 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
     invalidateRenderRef.current(80)
   }
 
-  const getPointerContext = (event: { clientX: number; clientY: number }) => {
+  const setPointerRay = (event: { clientX: number; clientY: number }) => {
     const renderer = rendererRef.current
-    const scene = sceneRef.current
     const camera = cameraRef.current
-    const mount = mountRef.current
-    if (!renderer || !scene || !camera || !mount) return null
+    if (!renderer || !camera) return false
     const rect = renderer.domElement.getBoundingClientRect()
     pointerRef.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
     pointerRef.current.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
     raycasterRef.current.setFromCamera(pointerRef.current, camera)
+    return true
+  }
+
+  const pointerFloorPoint = (event: { clientX: number; clientY: number }) => {
+    if (!setPointerRay(event)) return null
+    // The editing floor is the z=0 plane in Three.js world coordinates. A
+    // selection drag only needs this projection; raycasting the voxel meshes
+    // again on every pointermove makes a large InstancedMesh stall the main
+    // thread even though the selected object was already known on pointerdown.
+    return raycasterRef.current.ray.intersectPlane(
+      new THREE.Plane(new THREE.Vector3(0, 0, 1), 0),
+      new THREE.Vector3(),
+    )
+  }
+
+  const getPointerContext = (event: { clientX: number; clientY: number }) => {
+    const scene = sceneRef.current
+    const camera = cameraRef.current
+    const mount = mountRef.current
+    if (!scene || !camera || !mount || !setPointerRay(event)) return null
     const rawHits = !placementAsset && groupRef.current ? raycasterRef.current.intersectObject(groupRef.current, true) : []
     const hits = editEntityId ? rawHits.filter((item) => belongsToEditEntity(item.object)) : rawHits
     const voxelHit = onRaycastVoxel(raycasterRef.current.ray.origin, raycasterRef.current.ray.direction)
@@ -7391,10 +7414,10 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
     const selectGesture = selectGestureRef.current
     if (selectGesture?.pointerId === event.pointerId) {
       if (Math.hypot(event.clientX - selectGesture.startX, event.clientY - selectGesture.startY) > 5) selectGesture.moved = true
-      const context = getPointerContext(event)
-      if (!selectGesture.moved || !context || (dragAxis === 'horizontal' && !context.floorPoint)) return
+      if (!selectGesture.moved) return
       const parts = selectGesture.parts
       if (dragAxis === 'vertical') {
+        if (!setPointerRay(event)) return
         const verticalPoint = getVerticalPoint(selectGesture.verticalPlane)
         if (!verticalPoint) return
         const deltaZ = worldToVoxel(verticalPoint.z - selectGesture.startVerticalZ)
@@ -7406,8 +7429,10 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
         setDragVisualOffset(selectGesture, moveResult.deltaX, moveResult.deltaY, moveResult.deltaZ)
         return
       }
-      const deltaX = worldToVoxel(context.floorPoint!.x - selectGesture.startGroundX)
-      const deltaZ = worldToVoxel(context.floorPoint!.y - selectGesture.startGroundY)
+      const floorPoint = pointerFloorPoint(event)
+      if (!floorPoint) return
+      const deltaX = worldToVoxel(floorPoint.x - selectGesture.startGroundX)
+      const deltaZ = worldToVoxel(floorPoint.y - selectGesture.startGroundY)
       if (deltaX === selectGesture.lastDeltaX && deltaZ === selectGesture.lastDeltaZ) return
       const moveResult = onPreviewScenePartsMove(parts, deltaX, 0, deltaZ)
       selectGesture.lastDeltaX = moveResult.deltaX

@@ -38,6 +38,38 @@ type RuntimeVoxelBounds = {
   maxGz: number
 }
 
+function projectVoxelBounds(voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>): RuntimeVoxelBounds | undefined {
+  if (!voxels.length) return undefined
+  const first = voxels[0]
+  const bounds: RuntimeVoxelBounds = {
+    minGx: first.x,
+    minGy: first.z,
+    minGz: first.y,
+    maxGx: first.x,
+    maxGy: first.z,
+    maxGz: first.y,
+  }
+  for (let index = 1; index < voxels.length; index += 1) {
+    const voxel = voxels[index]
+    bounds.minGx = Math.min(bounds.minGx, voxel.x)
+    bounds.minGy = Math.min(bounds.minGy, voxel.z)
+    bounds.minGz = Math.min(bounds.minGz, voxel.y)
+    bounds.maxGx = Math.max(bounds.maxGx, voxel.x)
+    bounds.maxGy = Math.max(bounds.maxGy, voxel.z)
+    bounds.maxGz = Math.max(bounds.maxGz, voxel.y)
+  }
+  return bounds
+}
+
+function boundsOverlap(owner: RuntimeVoxelBounds, target: RuntimeVoxelBounds, translation?: RuntimeVoxelCoord): boolean {
+  const offsetX = translation?.gx ?? 0
+  const offsetY = translation?.gy ?? 0
+  const offsetZ = translation?.gz ?? 0
+  return owner.minGx + offsetX <= target.maxGx && owner.maxGx + offsetX >= target.minGx
+    && owner.minGy + offsetY <= target.maxGy && owner.maxGy + offsetY >= target.minGy
+    && owner.minGz + offsetZ <= target.maxGz && owner.maxGz + offsetZ >= target.minGz
+}
+
 function bitAddress(localIndex: number): { wordIndex: number; bitMask: number } {
   return {
     wordIndex: localIndex >>> 5,
@@ -74,6 +106,7 @@ export class SceneOccupancyIndex {
   private readonly ownerVoxelRefs = new Map<string, ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>>()
   private readonly ownerVoxelKeys = new Map<string, string[]>()
   private readonly projectVoxelKeyCache = new WeakMap<object, Set<string>>()
+  private readonly projectVoxelBoundsCache = new WeakMap<object, RuntimeVoxelBounds>()
   private readonly materialIdToIndex = new Map<string, number>()
   private nextMaterialIndex = 1
 
@@ -313,35 +346,47 @@ export class SceneOccupancyIndex {
     const runtimeDelta = projectVoxelToRuntime(delta)
     const excluded = new Set(excludedOwnerIds)
 
-    // Dragging a dense imported model used to scan every moving voxel on
-    // every pointer event. For large selections, inspect the usually much
-    // smaller set of stationary voxels instead: a collision exists exactly
-    // when a stationary voxel, shifted backwards by the requested delta,
-    // belongs to the moving voxel set. This preserves exact voxel collision
-    // semantics while avoiding an O(large-model) scan during a drag.
-    if (excluded.size && voxels.length >= 4096) {
-      let stationaryVoxelCount = 0
+    // First use owner AABBs as a broad phase. A large imported model often
+    // has only a handful of nearby stationary owners; scanning all of its
+    // voxels for every pointermove is unnecessary when their bounds do not
+    // overlap. The narrow phase below remains exact at voxel resolution.
+    if (excluded.size) {
+      const cacheKey = voxels as object
+      let movingBounds = this.projectVoxelBoundsCache.get(cacheKey)
+      if (!movingBounds) {
+        movingBounds = projectVoxelBounds(voxels)
+        if (movingBounds) this.projectVoxelBoundsCache.set(cacheKey, movingBounds)
+      }
+      if (!movingBounds) return false
+      const translatedMovingBounds: RuntimeVoxelBounds = {
+        minGx: movingBounds.minGx + runtimeDelta.gx,
+        minGy: movingBounds.minGy + runtimeDelta.gy,
+        minGz: movingBounds.minGz + runtimeDelta.gz,
+        maxGx: movingBounds.maxGx + runtimeDelta.gx,
+        maxGy: movingBounds.maxGy + runtimeDelta.gy,
+        maxGz: movingBounds.maxGz + runtimeDelta.gz,
+      }
+      const candidates: Array<[ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>, RuntimeVoxelCoord | undefined]> = []
       for (const [ownerId, ownerVoxels] of this.ownerVoxelRefs) {
-        if (!excluded.has(ownerId)) stationaryVoxelCount += ownerVoxels.length
+        if (excluded.has(ownerId)) continue
+        const ownerHandle = this.ownerIdToHandle.get(ownerId)
+        const translation = ownerHandle ? this.ownerTranslations.get(ownerHandle) : undefined
+        const bounds = ownerHandle ? this.ownerBounds.get(ownerHandle) : undefined
+        if (!bounds || !boundsOverlap(bounds, translatedMovingBounds, translation)) continue
+        candidates.push([ownerVoxels, translation])
       }
-      if (stationaryVoxelCount < voxels.length) {
-        if (!stationaryVoxelCount) return false
-        const cacheKey = voxels as object
-        const movingKeys = this.projectVoxelKeyCache.get(cacheKey) ?? new Set(voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
-        this.projectVoxelKeyCache.set(cacheKey, movingKeys)
-        for (const [ownerId, ownerVoxels] of this.ownerVoxelRefs) {
-          if (excluded.has(ownerId)) continue
-          const ownerHandle = this.ownerIdToHandle.get(ownerId)
-          const translation = ownerHandle ? this.ownerTranslations.get(ownerHandle) : undefined
-          for (const voxel of ownerVoxels) {
-            const currentX = voxel.x + (translation?.gx ?? 0)
-            const currentY = voxel.y + (translation?.gz ?? 0)
-            const currentZ = voxel.z + (translation?.gy ?? 0)
-            if (movingKeys.has(`${currentX - delta.x},${currentY - delta.y},${currentZ - delta.z}`)) return true
-          }
+      if (!candidates.length) return false
+      const movingKeys = this.projectVoxelKeyCache.get(cacheKey) ?? new Set(voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
+      this.projectVoxelKeyCache.set(cacheKey, movingKeys)
+      for (const [ownerVoxels, translation] of candidates) {
+        for (const voxel of ownerVoxels) {
+          const currentX = voxel.x + (translation?.gx ?? 0)
+          const currentY = voxel.y + (translation?.gz ?? 0)
+          const currentZ = voxel.z + (translation?.gy ?? 0)
+          if (movingKeys.has(`${currentX - delta.x},${currentY - delta.y},${currentZ - delta.z}`)) return true
         }
-        return false
       }
+      return false
     }
 
     return voxels.some((voxel) => {

@@ -195,5 +195,41 @@ export function parseSceneFileText(text: string): MoceSceneFile {
 }
 
 export function sceneContentSignature(project: ProjectState): string {
-  return JSON.stringify(createSceneFile(project))
+  // Dirty-state checks run after every scene commit, including a transform
+  // only move. Serializing a portable scene here used to structured-clone all
+  // imported voxel arrays on every release, which made large entities pause
+  // the UI for seconds. The portable file path still uses createSceneFile;
+  // this signature only needs deterministic content equality.
+  const arraySignatureCache = sceneSignatureArrayCache
+  const signatureForArray = (values: unknown[]): string => {
+    const cached = arraySignatureCache.get(values)
+    if (cached) return cached
+    const signature = JSON.stringify(values)
+    arraySignatureCache.set(values, signature)
+    return signature
+  }
+  const assetSignatures = project.assets
+    .filter((asset) => project.instances.some((instance) => instance.assetId === asset.id))
+    .map((asset) => [asset.id, signatureForAsset(asset)] as const)
+  const { assets: _assets, materials, customVoxels, ...scene } = project
+  return JSON.stringify({
+    scene: {
+      ...scene,
+      instances: project.instances.map((instance) => ({ ...instance, y: instance.y ?? 0, overrides: instance.overrides ?? [], partOffsets: instance.partOffsets ?? {} })),
+      materials: signatureForArray(materials),
+      customVoxels: signatureForArray(customVoxels),
+    },
+    sceneAssets: assetSignatures,
+  })
+}
+
+const sceneSignatureArrayCache = new WeakMap<object, string>()
+const sceneSignatureAssetCache = new WeakMap<object, string>()
+
+function signatureForAsset(asset: VoxelAsset): string {
+  const cached = sceneSignatureAssetCache.get(asset)
+  if (cached) return cached
+  const signature = JSON.stringify(asset)
+  sceneSignatureAssetCache.set(asset, signature)
+  return signature
 }
