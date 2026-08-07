@@ -169,6 +169,22 @@ describe('SceneOccupancyIndex', () => {
     expect(index.queryProjectVoxel(voxel(-1, 0, 0)).ownerIds).toEqual(['added'])
     expect(index.chunks.get('0,0,0')).toBe(stableChunk)
   })
+
+  it('synchronizes a touched owner without enumerating or replacing the rest of the scene', () => {
+    const stable = part('stable', [voxel(0, 0, 0)])
+    const moving = part('moving', [voxel(2, 0, 0)])
+    const index = SceneOccupancyIndex.fromParts([stable, moving])
+    const stableChunk = index.chunks.get('0,0,0')
+
+    index.syncOwnerParts([
+      { ...moving, voxels: [voxel(3, 0, 0)] },
+    ], ['moving'])
+
+    expect(index.queryProjectVoxel(voxel(2, 0, 0)).occupied).toBe(false)
+    expect(index.queryProjectVoxel(voxel(3, 0, 0)).ownerIds).toEqual(['moving'])
+    expect(index.queryProjectVoxel(voxel(0, 0, 0)).ownerIds).toEqual(['stable'])
+    expect(index.chunks.get('0,0,0')).toBe(stableChunk)
+  })
 })
 
 describe('AssetTransformCache', () => {

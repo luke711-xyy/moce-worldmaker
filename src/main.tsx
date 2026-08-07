@@ -745,6 +745,9 @@ type VoxelStrokeTransaction = {
   historySelectedId: string
   historyCheckedTreePartIds: string[]
   occupiedCustomSceneKeys: Set<string>
+  dirtyOwnerIds: Set<string>
+  dirtyOwnerRoots: Set<string>
+  publishedOwnerIds: Map<string, Set<string>>
   dirty: boolean
 }
 
@@ -1149,6 +1152,18 @@ function App() {
     return [...new Set(ids)].map((id) => materialsById.get(id)).filter((material): material is Material => Boolean(material)).slice(0, 8)
   }, [project.materials, recentMaterialIds])
 
+  const markVoxelStrokeOwners = (ownerIds: Iterable<string>) => {
+    const transaction = voxelStrokeTransactionRef.current
+    if (!transaction) return
+    for (const ownerId of ownerIds) transaction.dirtyOwnerIds.add(ownerId)
+  }
+
+  const markVoxelStrokeOwnerRoot = (instanceId: string) => {
+    const transaction = voxelStrokeTransactionRef.current
+    if (!transaction) return
+    transaction.dirtyOwnerRoots.add(instanceId)
+  }
+
   const useMaterial = (materialId: string) => {
     setActiveMaterial(materialId)
     setRecentMaterialIds((ids) => {
@@ -1169,7 +1184,19 @@ function App() {
     // trackpad/brush stutter. The draft is never exposed as the durable state
     // until the pointer is released and commitVoxelStroke finalizes it.
     const visibleProject: ProjectState = { ...transaction.draft }
-    sceneOccupancyRef.current?.syncParts(sceneEntityParts(visibleProject))
+    const visibleParts = sceneEntityParts(visibleProject)
+    const dirtyOwnerIds = new Set(transaction.dirtyOwnerIds)
+    const initialParts = voxelStrokePartsRef.current ?? []
+    transaction.dirtyOwnerRoots.forEach((root) => {
+      const previousIds = transaction.publishedOwnerIds.get(root)
+        ?? new Set(initialParts.filter((part) => part.instanceId === root).map((part) => part.id))
+      const nextIds = new Set(visibleParts.filter((part) => part.instanceId === root).map((part) => part.id))
+      previousIds.forEach((ownerId) => dirtyOwnerIds.add(ownerId))
+      nextIds.forEach((ownerId) => dirtyOwnerIds.add(ownerId))
+      transaction.publishedOwnerIds.set(root, nextIds)
+    })
+    sceneOccupancyRef.current?.syncOwnerParts(visibleParts, dirtyOwnerIds)
+    transaction.dirtyOwnerIds.clear()
     setProject(visibleProject)
     // Mutations continue against the transaction draft, not the rendered copy.
     projectRef.current = transaction.draft
@@ -1215,6 +1242,9 @@ function App() {
         .filter((part) => part.kind === 'custom')
         .flatMap((part) => scenePartVoxels(part))
         .map(sceneVoxelKey)),
+      dirtyOwnerIds: new Set(),
+      dirtyOwnerRoots: new Set(),
+      publishedOwnerIds: new Map(),
       dirty: false,
     }
     voxelStrokePartsRef.current = initialParts
@@ -1730,6 +1760,7 @@ function App() {
     if (editAssemblyId) {
       const entityId = voxelStrokeEntityRef.current ?? `voxel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       voxelStrokeEntityRef.current = entityId
+      markVoxelStrokeOwners([`custom:${entityId}`])
       updateProject((draft) => {
         if (draft.customVoxels.some((item) => item.x === voxel.x && item.y === voxel.y && item.z === voxel.z)) return
         draft.customVoxels.push({ ...voxel, entityId })
@@ -1757,6 +1788,7 @@ function App() {
           z: localNeighbor.z + Math.round(Math.sin(angle) * sceneDeltaX + Math.cos(angle) * sceneDeltaZ),
           materialId: voxel.materialId,
         }
+        markVoxelStrokeOwnerRoot(instance.id)
         editInstanceVoxel(instance.id, localTarget, 'add')
         if (assetNeighbor.assemblyId) notifyEditor(`已在装配体上修改 · ${voxel.x}, ${voxel.y}, ${voxel.z}`)
         return
@@ -1766,6 +1798,7 @@ function App() {
       const editingAssetPart = currentParts.find((part) => part.kind === 'asset' && (part.id === activeEditEntityId || part.instanceId === activeEditEntityId))
       if (editingAssetPart) {
         const entityId = `voxel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        markVoxelStrokeOwners([`custom:${entityId}`])
         let targetAssemblyId = editingAssetPart.assemblyIds?.[0]
         updateProject((draft) => {
           if (draft.customVoxels.some((item) => item.x === voxel.x && item.y === voxel.y && item.z === voxel.z)) return
@@ -1801,6 +1834,7 @@ function App() {
     // target is allowed to reuse an existing entity id.
     const entityId = editingCustomId ?? voxelStrokeEntityRef.current ?? `voxel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     if (!editingCustomId) voxelStrokeEntityRef.current = entityId
+    markVoxelStrokeOwners([`custom:${entityId}`])
     const alreadyOccupied = currentParts.some((part) => part.kind === 'custom' && scenePartVoxels(part).some((candidate) => sceneVoxelKey(candidate) === sceneVoxelKey(voxel)))
     updateProject((draft) => {
       if (alreadyOccupied) return
@@ -1831,13 +1865,17 @@ function App() {
         unresolvedTargets.add(sceneVoxelKey(voxel))
         return
       }
+      markVoxelStrokeOwners([part.id])
       const offset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
       storedTargetKeys.add(`${entityId}:${sceneVoxelKey({ x: voxel.x - offset.x, y: voxel.y - offset.y, z: voxel.z - offset.z })}`)
     })
     if (unresolvedTargets.size) customParts.forEach((part) => {
       const sceneVoxels = scenePartVoxels(part)
       sceneVoxels.forEach((sceneVoxel, index) => {
-        if (unresolvedTargets.has(sceneVoxelKey(sceneVoxel))) storedTargetKeys.add(`${part.partId}:${sceneVoxelKey(part.voxels[index])}`)
+        if (unresolvedTargets.has(sceneVoxelKey(sceneVoxel))) {
+          markVoxelStrokeOwners([part.id])
+          storedTargetKeys.add(`${part.partId}:${sceneVoxelKey(part.voxels[index])}`)
+        }
       })
     })
     updateProject((draft) => {
@@ -1951,6 +1989,7 @@ function App() {
           ? activeEditEntityId.slice('custom:'.length)
           : voxelStrokeEntityRef.current ?? `voxel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
         voxelStrokeEntityRef.current = entityId
+        markVoxelStrokeOwners([`custom:${entityId}`])
         const excluded = currentParts.filter((part) => activeEditEntityId && partBelongsToEditTarget(part, activeEditEntityId)).map((part) => part.id)
         const insertable = addTargets.filter((voxel) => {
           const owners = sceneOccupancyRef.current?.queryProjectVoxel(voxel).ownerIds ?? []
@@ -1996,10 +2035,12 @@ function App() {
           const part = partsById.get(ownerId)
           if (!part || (editEntityId && !partBelongsToEditTarget(part, editEntityId))) return
           if (part.kind === 'custom') {
+            markVoxelStrokeOwners([part.id])
             customTargets.push({ ...target, entityId: part.partId })
             return
           }
           if (!part.instanceId) return
+          markVoxelStrokeOwnerRoot(part.instanceId)
           const instance = projectRef.current.instances.find((item) => item.id === part.instanceId)
           const asset = instance ? projectRef.current.assets.find((item) => item.id === instance.assetId) : undefined
           const local = instance && asset
@@ -2035,6 +2076,7 @@ function App() {
         ownerIds.forEach((ownerId) => {
           const part = partsById.get(ownerId)
           if (part?.kind !== 'asset' || !part.instanceId || !partBelongsToEditTarget(part, editEntityId)) return
+          markVoxelStrokeOwnerRoot(part.instanceId)
           const instance = draft.instances.find((item) => item.id === part.instanceId)
           const asset = instance ? draft.assets.find((item) => item.id === instance.assetId) : undefined
           const local = instance && asset
@@ -2057,6 +2099,7 @@ function App() {
   const editInstanceVoxels = (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => {
     if (!voxels.length) return
     if (mode === 'add') voxels.forEach((voxel) => useMaterial(voxel.materialId))
+    if (mode !== 'paint') markVoxelStrokeOwnerRoot(instanceId)
     updateProject((draft) => {
       const instance = draft.instances.find((item) => item.id === instanceId)
       if (!instance) return

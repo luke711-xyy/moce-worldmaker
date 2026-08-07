@@ -374,6 +374,28 @@ export class SceneOccupancyIndex {
     return result
   }
 
+  /**
+   * Update only owners touched by a batched edit transaction.
+   *
+   * Unlike syncParts(), this intentionally does not enumerate or remove the
+   * rest of the scene. It is used while a pointer stroke is being published
+   * at animation-frame cadence; the caller supplies the old owner ids too so
+   * a component that disappeared after an erase is removed correctly.
+   */
+  syncOwnerParts(parts: ReadonlyArray<SceneEntityPart>, ownerIds: Iterable<string>): void {
+    const ids = new Set(ownerIds)
+    if (!ids.size) return
+    const changedParts = new Map(parts.filter((part) => ids.has(part.id)).map((part) => [part.id, part]))
+    ids.forEach((ownerId) => {
+      const part = changedParts.get(ownerId)
+      if (!part) {
+        this.removeOwner(ownerId)
+        return
+      }
+      this.replaceOwner(ownerId, scenePartVoxels(part), part.voxels, scenePartOffset(part))
+    })
+  }
+
   queryProjectVoxel(voxel: Pick<Voxel, 'x' | 'y' | 'z'>): OccupancyHit {
     return this.queryRuntimeVoxel(projectVoxelToRuntime(voxel))
   }
