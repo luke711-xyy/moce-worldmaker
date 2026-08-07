@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceRenderSignature, scenePartVoxels, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, loadScenePreview, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
@@ -309,7 +309,7 @@ function materialColorForVoxel(project: ProjectState, voxel: Voxel, asset?: Voxe
 
 function scenePartsDisplayColor(project: ProjectState, parts: SceneEntityPart[], asset?: VoxelAsset): string {
   const firstPart = parts[0]
-  const firstVoxel = firstPart ? scenePartVoxels(firstPart)[0] : undefined
+  const firstVoxel = firstPart ? scenePartVoxelAt(firstPart, 0) : undefined
   return firstPart && firstVoxel
     ? scenePartVoxelDisplayColor(project, firstPart, firstVoxel)
     : asset?.templateColor ?? asset?.color ?? '#6c827d'
@@ -384,6 +384,11 @@ function normalizeStoredProject(loaded: ProjectState, options: NormalizeStoredPr
     })),
     customVoxels: (migrated.customVoxels ?? []).map((voxel, index) => ({ ...voxel, entityId: voxel.entityId ?? `legacy-${voxel.x}-${voxel.y}-${voxel.z}-${index}` })),
     customColors: { ...(migrated.customColors ?? {}) },
+    customEntityOffsets: Object.fromEntries(Object.entries(migrated.customEntityOffsets ?? {}).map(([entityId, offset]) => [entityId, {
+      x: Math.round(offset.x),
+      y: Math.round(offset.y),
+      z: Math.round(offset.z),
+    }])),
     entityNames: { ...(migrated.entityNames ?? {}) },
     entityNameModes: { ...(migrated.entityNameModes ?? {}) },
     entityNameSequences: { ...(migrated.entityNameSequences ?? {}) },
@@ -909,7 +914,8 @@ function App() {
   const sceneDirty = savedSceneSignature !== null && currentSceneSignature !== savedSceneSignature
 
   const sceneFitsBounds = (candidate: SceneBounds, source = projectRef.current) => {
-    if (!sceneVoxelsWithinBounds(source.customVoxels, candidate)) return false
+    const customSceneVoxels = sceneEntityParts(source).filter((part) => part.kind === 'custom').flatMap((part) => scenePartVoxels(part))
+    if (!sceneVoxelsWithinBounds(customSceneVoxels, candidate)) return false
     const assetMap = new Map(source.assets.map((asset) => [asset.id, asset]))
     return source.instances.every((instance) => {
       const asset = assetMap.get(instance.assetId)
@@ -1128,6 +1134,7 @@ function App() {
       })),
       customVoxels: [...original.customVoxels],
       customColors: original.customColors ? { ...original.customColors } : undefined,
+      customEntityOffsets: original.customEntityOffsets ? Object.fromEntries(Object.entries(original.customEntityOffsets).map(([entityId, offset]) => [entityId, { ...offset }])) : undefined,
       assemblies: original.assemblies?.map((assembly) => ({ ...assembly, memberKeys: [...assembly.memberKeys] })),
     }
     voxelStrokeTransactionRef.current = {
@@ -1691,10 +1698,10 @@ function App() {
     // target is allowed to reuse an existing entity id.
     const entityId = editingCustomId ?? voxelStrokeEntityRef.current ?? `voxel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     if (!editingCustomId) voxelStrokeEntityRef.current = entityId
+    const alreadyOccupied = currentParts.some((part) => part.kind === 'custom' && scenePartVoxels(part).some((candidate) => sceneVoxelKey(candidate) === sceneVoxelKey(voxel)))
     updateProject((draft) => {
-      const exists = draft.customVoxels.some((item) => item.x === voxel.x && item.y === voxel.y && item.z === voxel.z)
-      if (exists) return
-      draft.customVoxels.push({ ...voxel, entityId })
+      if (alreadyOccupied) return
+      draft.customVoxels.push(sceneToStoredCustomVoxel(draft, { ...voxel, materialId: voxel.materialId }, entityId))
     })
     const customEntitySelectionId = `custom:${entityId}`
     setSelectedId(customEntitySelectionId)
@@ -1705,11 +1712,19 @@ function App() {
   const removeVoxels = (voxels: Voxel[]) => {
     const targets = new Set(voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
     if (!targets.size) return
+    const parts = voxelStrokePartsRef.current ?? sceneEntityParts(projectRef.current)
+    const storedTargetKeys = new Set<string>()
+    parts.filter((part) => part.kind === 'custom').forEach((part) => {
+      const sceneVoxels = scenePartVoxels(part)
+      sceneVoxels.forEach((sceneVoxel, index) => {
+        if (targets.has(sceneVoxelKey(sceneVoxel))) storedTargetKeys.add(`${part.partId}:${sceneVoxelKey(part.voxels[index])}`)
+      })
+    })
     updateProject((draft) => {
       const removedEntityIds = new Set(draft.customVoxels
-        .filter((item) => targets.has(`${item.x},${item.y},${item.z}`))
+        .filter((item) => storedTargetKeys.has(`${voxelEntityId(item)}:${sceneVoxelKey(item)}`))
         .map((item) => voxelEntityId(item)))
-      const remaining = draft.customVoxels.filter((item) => !targets.has(`${item.x},${item.y},${item.z}`))
+      const remaining = draft.customVoxels.filter((item) => !storedTargetKeys.has(`${voxelEntityId(item)}:${sceneVoxelKey(item)}`))
       // A manually drawn entity keeps its identity after an erasure, even if
       // removing a junction leaves disconnected voxel islands. Splitting the
       // entity here makes only the first island match editEntityId, so the
@@ -1718,6 +1733,10 @@ function App() {
       // are edited and therefore remain the only path that splits identities.
       draft.customVoxels = remaining
       if (removedEntityIds.size) {
+        const remainingEntityIds = new Set(remaining.map((item) => voxelEntityId(item)))
+        if (draft.customEntityOffsets) {
+          draft.customEntityOffsets = Object.fromEntries(Object.entries(draft.customEntityOffsets).filter(([entityId]) => remainingEntityIds.has(entityId)))
+        }
         // Removing one child must not remove the whole assembly. The previous
         // implementation filtered an assembly out whenever the erased child
         // no longer had voxels, even when the assembly still contained its
@@ -1818,8 +1837,12 @@ function App() {
           return owners.every((ownerId) => excluded.includes(ownerId))
         })
         if (insertable.length) updateProject((draft) => {
-          const occupied = new Set(draft.customVoxels.map((item) => sceneVoxelKey(item)))
-          insertable.forEach((voxel) => { if (!occupied.has(sceneVoxelKey(voxel))) draft.customVoxels.push({ ...voxel, materialId: activeMaterial, entityId }) })
+          const occupied = new Set(currentParts.filter((part) => part.kind === 'custom').flatMap((part) => scenePartVoxels(part)).map(sceneVoxelKey))
+          insertable.forEach((voxel) => {
+            if (occupied.has(sceneVoxelKey(voxel))) return
+            draft.customVoxels.push(sceneToStoredCustomVoxel(draft, { ...voxel, materialId: activeMaterial, entityId }, entityId))
+            occupied.add(sceneVoxelKey(voxel))
+          })
           if (editAssemblyId) {
             const assembly = (draft.assemblies ?? []).find((item) => item.id === editAssemblyId)
             if (assembly && !assembly.memberKeys.includes(`voxel:${entityId}`)) assembly.memberKeys.push(`voxel:${entityId}`)
@@ -1862,9 +1885,14 @@ function App() {
     const parts = voxelStrokePartsRef.current ?? sceneEntityParts(projectRef.current)
     updateProject((draft) => {
       const currentCustomIds = new Set(parts.filter((part) => part.kind === 'custom' && partBelongsToEditTarget(part, editEntityId)).map((part) => part.partId))
-      draft.customVoxels = draft.customVoxels.map((voxel) => currentCustomIds.has(voxelEntityId(voxel)) && targets.some((target) => sceneVoxelKey(target) === sceneVoxelKey(voxel))
-        ? { ...voxel, paintMaterialId: activeMaterial }
-        : voxel)
+      draft.customVoxels = draft.customVoxels.map((voxel) => {
+        if (!currentCustomIds.has(voxelEntityId(voxel))) return voxel
+        const offset = customEntityOffset(draft, voxelEntityId(voxel))
+        const sceneKey = sceneVoxelKey({ x: voxel.x + offset.x, y: voxel.y + offset.y, z: voxel.z + offset.z })
+        return targets.some((target) => sceneVoxelKey(target) === sceneKey)
+          ? { ...voxel, paintMaterialId: activeMaterial }
+          : voxel
+      })
       const assetTargets = new Map<string, Voxel[]>()
       targets.forEach((target) => {
         const part = parts.find((candidate) => candidate.kind === 'asset' && scenePartVoxels(candidate).some((voxel) => sceneVoxelKey(voxel) === sceneVoxelKey(target)) && partBelongsToEditTarget(candidate, editEntityId))
@@ -2179,7 +2207,7 @@ function App() {
     const movableParts = parts.filter((part) => !scenePartIsLocked(projectRef.current, part))
     const currentParts = sceneParts
     const movingIds = new Set(movableParts.map((part) => part.id))
-    const movingCustomIds = new Set(movableParts.filter((part) => part.kind === 'custom').flatMap((part) => scenePartVoxels(part).map(voxelEntityId)))
+    const movingCustomIds = new Set(movableParts.filter((part) => part.kind === 'custom').map((part) => part.partId))
     const assetPartsByInstance = new Map<string, SceneEntityPart[]>()
     movableParts.filter((part) => part.kind === 'asset' && part.instanceId).forEach((part) => {
       const list = assetPartsByInstance.get(part.instanceId!) ?? []
@@ -2203,9 +2231,16 @@ function App() {
       })),
     }
     if (movingCustomIds.size) {
-      nextProject.customVoxels = nextProject.customVoxels.map((voxel) => movingCustomIds.has(voxelEntityId(voxel))
-          ? { ...voxel, x: voxel.x + result.deltaX, y: voxel.y + result.deltaY, z: voxel.z + result.deltaZ }
-          : voxel)
+      const nextOffsets = { ...(nextProject.customEntityOffsets ?? {}) }
+      movingCustomIds.forEach((entityId) => {
+        const current = nextOffsets[entityId] ?? { x: 0, y: 0, z: 0 }
+        nextOffsets[entityId] = {
+          x: current.x + result.deltaX,
+          y: current.y + result.deltaY,
+          z: current.z + result.deltaZ,
+        }
+      })
+      nextProject.customEntityOffsets = nextOffsets
     }
     assetPartsByInstance.forEach((selectedParts, instanceId) => {
       const instance = nextProject.instances.find((item) => item.id === instanceId)
@@ -2844,6 +2879,7 @@ function App() {
         ...source,
         instances: source.instances.filter((instance) => !removedInstanceIds.has(instance.id)),
         customVoxels: source.customVoxels.filter((voxel) => !removedVoxelEntityIds.has(voxelEntityId(voxel))),
+        customEntityOffsets: Object.fromEntries(Object.entries(source.customEntityOffsets ?? {}).filter(([entityId]) => !removedVoxelEntityIds.has(entityId))),
         assemblies: (source.assemblies ?? [])
           .filter((assembly) => !removedAssemblyIds.has(assembly.id))
           .map((assembly) => ({
@@ -3362,7 +3398,9 @@ function App() {
         currentPreview.sourceCustomIds.forEach((oldId) => {
           const newId = `${oldId}-copy-${copyBatchId}-${copyIndex + 1}`
           customMap.set(oldId, newId)
-          draft.customVoxels.filter((voxel) => voxelEntityId(voxel) === oldId).forEach((voxel) => draft.customVoxels.push({ ...structuredClone(voxel), x: voxel.x + offset.x, y: voxel.y + offset.y, z: voxel.z + offset.z, entityId: newId }))
+          const sourcePart = sourceParts.find((part) => part.kind === 'custom' && part.partId === oldId)
+          scenePartVoxels(sourcePart ?? { id: `custom:${oldId}`, kind: 'custom', partId: oldId, memberKey: `voxel:${oldId}`, voxels: draft.customVoxels.filter((voxel) => voxelEntityId(voxel) === oldId) })
+            .forEach((voxel) => draft.customVoxels.push({ ...structuredClone(voxel), x: voxel.x + offset.x, y: voxel.y + offset.y, z: voxel.z + offset.z, entityId: newId }))
           if (draft.customColors?.[oldId]) draft.customColors = { ...(draft.customColors ?? {}), [newId]: draft.customColors[oldId] }
         })
         const assemblyMapForCopy = new Map<string, string>(); [...assemblyTreeIds].forEach((oldId) => assemblyMapForCopy.set(oldId, `assembly-${copyBatchId}-${copyIndex + 1}-${oldId}`))
@@ -3394,6 +3432,9 @@ function App() {
     const removedMemberKeys = new Set(targetParts.map((part) => part.memberKey))
     updateProject((draft) => {
       draft.customVoxels = draft.customVoxels.filter((voxel) => !removedCustomIds.has(voxelEntityId(voxel)))
+      if (draft.customEntityOffsets) {
+        draft.customEntityOffsets = Object.fromEntries(Object.entries(draft.customEntityOffsets).filter(([entityId]) => !removedCustomIds.has(entityId)))
+      }
       draft.instances = draft.instances.filter((instance) => !removedInstanceIds.has(instance.id))
       draft.assemblies = (draft.assemblies ?? []).filter((assembly) => !assembly.memberKeys.some((memberKey) => removedMemberKeys.has(memberKey) || (memberKey.startsWith('asset:') && removedInstanceIds.has(memberKey.split(':')[1])) || (memberKey.startsWith('voxel:') && removedCustomIds.has(memberKey.slice('voxel:'.length)))))
       draft.lockedMemberKeys = (draft.lockedMemberKeys ?? []).filter((memberKey) => !removedMemberKeys.has(memberKey))
@@ -3544,6 +3585,7 @@ function App() {
       instances: sourceProject.instances.filter((instance) => !selectedInstanceIds.has(instance.id)),
       customVoxels: [...remainingCustomVoxels, ...transformed],
       customColors: nextCustomColors,
+      customEntityOffsets: Object.fromEntries(Object.entries(sourceProject.customEntityOffsets ?? {}).filter(([entityId]) => !selectedCustomIds.has(entityId))),
       assemblies: (sourceProject.assemblies ?? []).map((assembly) => {
         const memberKeys = assembly.memberKeys.flatMap((memberKey) => selectedReplacementKeys.get(memberKey) ?? [memberKey])
         return { ...assembly, memberKeys: [...new Set(memberKeys)] }
@@ -3596,19 +3638,21 @@ function App() {
       return
     }
     const entityId = selectedScenePart.partId
-    const firstVoxel = scenePartVoxels(selectedScenePart)[0]
+    const firstVoxel = scenePartVoxelAt(selectedScenePart, 0)
     if (!firstVoxel) return
     const targetVoxel = axis === 2 ? Math.round(value / VOXEL_WORLD_SIZE - 0.5) : worldToVoxelCenter(value)
     const currentVoxel = axis === 0 ? firstVoxel.x : axis === 1 ? firstVoxel.z : firstVoxel.y
     const delta = targetVoxel - currentVoxel
     if (!delta) return
     updateProject((draft) => {
-      draft.customVoxels = draft.customVoxels.map((voxel) => {
-        if (voxelEntityId(voxel) !== entityId) return voxel
-        if (axis === 0) return { ...voxel, x: voxel.x + delta }
-        if (axis === 1) return { ...voxel, z: voxel.z + delta }
-        return { ...voxel, y: voxel.y + delta }
-      })
+      const offsets = { ...(draft.customEntityOffsets ?? {}) }
+      const current = offsets[entityId] ?? { x: 0, y: 0, z: 0 }
+      offsets[entityId] = axis === 0
+        ? { ...current, x: current.x + delta }
+        : axis === 1
+          ? { ...current, z: current.z + delta }
+          : { ...current, y: current.y + delta }
+      draft.customEntityOffsets = offsets
     })
     setNotice(`已更新手动实体位置 ${['X', 'Y', 'Z'][axis]} · 已限制在场景边界内`)
   }
@@ -3749,7 +3793,10 @@ function App() {
         selectedCustomVoxelByKey.set(`${part.partId}:${sceneVoxelKey(voxel)}`, { part, voxel })
       }))
       draft.customVoxels = draft.customVoxels.map((voxel) => {
-        const match = selectedCustomVoxelByKey.get(`${voxelEntityId(voxel)}:${sceneVoxelKey(voxel)}`)
+        const entityId = voxelEntityId(voxel)
+        const offset = customEntityOffset(draft, entityId)
+        const sceneKey = sceneVoxelKey({ x: voxel.x + offset.x, y: voxel.y + offset.y, z: voxel.z + offset.z })
+        const match = selectedCustomVoxelByKey.get(`${entityId}:${sceneKey}`)
         if (!match) return voxel
         return { ...voxel, paintMaterialId: adjustHexHsl(scenePartVoxelDisplayColor(sourceProject, match.part, match.voxel), hueDelta, saturationTarget) }
       })
@@ -3773,7 +3820,7 @@ function App() {
     for (const part of selectedEntityParts) {
       if (part.kind !== 'custom' || customIds.has(part.partId)) continue
       customIds.add(part.partId)
-      const source = projectRef.current.customVoxels.filter((voxel) => voxelEntityId(voxel) === part.partId)
+      const source = scenePartVoxels(part)
       const transformed = mode === 'mirror' ? mirrorVoxels(source, voxelAxis) : rotateVoxels(source, voxelAxis, degrees)
       if (!withinBoundary(transformed)) return false
     }
@@ -3802,11 +3849,16 @@ function App() {
     updateProject((draft) => {
       const transformedByKey = new Map<string, Voxel>()
       for (const entityId of selectedCustomIds) {
-        const source = draft.customVoxels.filter((voxel) => voxelEntityId(voxel) === entityId)
+        const part = parts.find((candidate) => candidate.kind === 'custom' && candidate.partId === entityId)
+        const source = part ? scenePartVoxels(part) : []
         const transformed = transform(source)
-        source.forEach((voxel, index) => transformedByKey.set(`${entityId}:${voxel.x},${voxel.y},${voxel.z}`, { ...transformed[index], entityId }))
+        source.forEach((voxel, index) => {
+          const storedSource = sceneToStoredCustomVoxel(draft, voxel, entityId)
+          const storedResult = sceneToStoredCustomVoxel(draft, { ...transformed[index], entityId }, entityId)
+          transformedByKey.set(`${entityId}:${sceneVoxelKey(storedSource)}`, storedResult)
+        })
       }
-      draft.customVoxels = draft.customVoxels.map((voxel) => transformedByKey.get(`${voxelEntityId(voxel)}:${voxel.x},${voxel.y},${voxel.z}`) ?? voxel)
+      draft.customVoxels = draft.customVoxels.map((voxel) => transformedByKey.get(`${voxelEntityId(voxel)}:${sceneVoxelKey(voxel)}`) ?? voxel)
     })
     return true
   }
@@ -4242,6 +4294,33 @@ const VoxelThumbnail = React.memo(function VoxelThumbnail({ asset }: { asset: Vo
   return <div className="thumbnail-scene" aria-label={`${asset.name} 3D 预览`}><VoxelMiniPreview voxels={asset.voxels} asset={asset} /></div>
 })
 
+const previewVoxelArrayIds = new WeakMap<object, number>()
+let nextPreviewVoxelArrayId = 1
+function previewVoxelArrayId(voxels: Voxel[]): number {
+  const existing = previewVoxelArrayIds.get(voxels)
+  if (existing) return existing
+  const id = nextPreviewVoxelArrayId++
+  previewVoxelArrayIds.set(voxels, id)
+  return id
+}
+
+function previewPartsSignature(parts: SceneEntityPart[]): string {
+  return parts.map((part) => {
+    const offset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
+    return `${part.id}:${previewVoxelArrayId(part.voxels)}:${offset.x},${offset.y},${offset.z}`
+  }).join('|')
+}
+
+function previewVoxelsForParts(parts: SceneEntityPart[]): Voxel[] {
+  if (parts.length === 1) {
+    // A uniform scene translation does not change the shape shown in the
+    // inspector. Keep the canonical array so a large moved entity does not
+    // allocate a second full voxel array just for its thumbnail.
+    return parts[0].voxels
+  }
+  return parts.flatMap((part) => scenePartVoxels(part))
+}
+
 function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSceneProject, onClose, onImportScene, onLoadScene, onSelectScene, onSaveSceneEntity, onAddSceneEntityToCurrentScene, onDeleteSceneEntity, contextMenu, onContextMenu, onCloseContextMenu, onDuplicateScene, onDeleteScene }: { library: LibraryResponse; busy: boolean; error: string | null; selectedSceneId: string | null; selectedSceneProject: ProjectState | null; onClose: () => void; onImportScene: () => void; onLoadScene: (id: string, name: string) => void; onSelectScene: (id: string, name: string, x: number, y: number) => void; onSaveSceneEntity: (asset: VoxelAsset) => void; onAddSceneEntityToCurrentScene: (asset: VoxelAsset) => void; onDeleteSceneEntity: (sceneId: string, entity: SceneLibraryEntity) => void | Promise<void>; contextMenu: SceneLibraryContextMenuState; onContextMenu: (sceneId: string, x: number, y: number) => void; onCloseContextMenu: () => void; onDuplicateScene: (sceneId: string, name: string) => void; onDeleteScene: (sceneId: string, name: string) => void }) {
   const [entityContextMenu, setEntityContextMenu] = useState<SceneEntityContextMenuState>(null)
   const menuCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -4505,7 +4584,8 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
     setRotateAxis('z')
     setRotateDegrees(90)
   }, [selectedPartsKey])
-  const previewVoxels = useMemo(() => selectedParts.flatMap((part) => scenePartVoxels(part)), [selectedParts])
+  const previewKey = previewPartsSignature(selectedParts)
+  const previewVoxels = useMemo(() => previewVoxelsForParts(selectedParts), [previewKey])
   return <aside className="inspector">
     <div className="inspector-section entity-summary-section">
       <div className="inspector-inline-field"><span className="inspector-inline-label">选中实体</span><div className="select-field entity-name-field">{entityName}</div></div>
@@ -6131,7 +6211,10 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
       const retainedComponents = new Set<string>()
       for (const part of customParts) {
         const entityId = part.partId
-        const component = scenePartVoxels(part)
+        // Keep the mesh in canonical entity coordinates. A pure move is
+        // represented by the group transform below, so this path does not
+        // rebuild or remap every voxel on pointer release.
+        const component = part.voxels
         const scenePartId = `custom:${entityId}`
         const renderSignature = voxelRenderSignature(component, project.customColors?.[entityId])
         const existingComponent = existingComponents.get(scenePartId)
@@ -6146,7 +6229,12 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
           custom.add(componentGroup)
         }
         const renderOrigin = customComponentRenderOrigin(component)
-        componentGroup.position.set(voxelToWorld(renderOrigin.x), voxelToWorld(renderOrigin.z), voxelToWorld(renderOrigin.y))
+        const sceneOffset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
+        componentGroup.position.set(
+          voxelToWorld(renderOrigin.x + sceneOffset.x),
+          voxelToWorld(renderOrigin.z + sceneOffset.z),
+          voxelToWorld(renderOrigin.y + sceneOffset.y),
+        )
         componentGroup.userData.renderOrigin = renderOrigin
         componentGroup.userData.renderSignature = renderSignature
         retainedComponents.add(scenePartId)
@@ -6822,7 +6910,16 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
   const sceneVoxelFromHit = (hit: THREE.Intersection<THREE.Object3D>): Voxel | undefined => {
     const localVoxel = intersectionVoxel(hit, 'instanceVoxels', 'instanceVoxel')
     const instanceId = hit.object.userData.instanceId as string | undefined
-    if (!localVoxel || !instanceId) return intersectionVoxel(hit, 'customVoxels', 'customVoxel')
+    if (!localVoxel || !instanceId) {
+      const customVoxel = intersectionVoxel(hit, 'customVoxels', 'customVoxel')
+      if (!customVoxel) return undefined
+      const scenePartId = hit.object.userData.scenePartId as string | undefined
+      const part = scenePartId ? scenePartsRef.current.find((candidate) => candidate.id === scenePartId) : undefined
+      const offset = part?.sceneOffset
+      return offset && (offset.x || offset.y || offset.z)
+        ? { ...customVoxel, x: customVoxel.x + offset.x, y: customVoxel.y + offset.y, z: customVoxel.z + offset.z }
+        : customVoxel
+    }
     const instance = project.instances.find((candidate) => candidate.id === instanceId)
     const asset = instance ? project.assets.find((candidate) => candidate.id === instance.assetId) : undefined
     return instance && asset ? instanceLocalVoxelToSceneVoxel(instance, asset, localVoxel) : undefined
@@ -6905,10 +7002,9 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
     }
     const ddaCustomOwner = context.voxelHit?.ownerIds.find((ownerId) => ownerId.startsWith('custom:'))
     if (ddaCustomOwner && (!editEntityId || ddaCustomOwner === editEntityId)) {
-      const hitVoxel = project.customVoxels.find((voxel) => voxelEntityId(voxel) === ddaCustomOwner.slice('custom:'.length)
-        && voxel.x === context.voxelHit!.voxel.x
-        && voxel.y === context.voxelHit!.voxel.y
-        && voxel.z === context.voxelHit!.voxel.z)
+      const ownerId = ddaCustomOwner.slice('custom:'.length)
+      const part = scenePartsRef.current.find((candidate) => candidate.kind === 'custom' && candidate.partId === ownerId)
+      const hitVoxel = part ? scenePartVoxels(part).find((voxel) => voxel.x === context.voxelHit!.voxel.x && voxel.y === context.voxelHit!.voxel.y && voxel.z === context.voxelHit!.voxel.z) : undefined
       if (hitVoxel) {
         if (tool === 'brush') applyStrokeAdd(adjacentVoxel(hitVoxel, context.voxelHit!.normal, activeMaterial))
         else applyStrokeRemove(hitVoxel)
@@ -6917,7 +7013,7 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
     }
     const customHit = hits.find((item) => intersectionVoxel(item, 'customVoxels', 'customVoxel') && belongsToEditEntity(item.object))
     if (customHit) {
-      const hitVoxel = intersectionVoxel(customHit, 'customVoxels', 'customVoxel')
+      const hitVoxel = sceneVoxelFromHit(customHit)
       if (!hitVoxel) return
       if (tool === 'brush') {
         if (!customHit.face) return
@@ -6944,10 +7040,12 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
       return
     }
     if (tool === 'brush') {
-      if (project.customVoxels.some((voxel) => voxel.x === x && voxel.y === 0 && voxel.z === z)) onNotice('目标网格已有体素 · 请点击体素表面添加')
+      const customSceneVoxels = scenePartsRef.current.filter((part) => part.kind === 'custom').flatMap((part) => scenePartVoxels(part))
+      if (customSceneVoxels.some((voxel) => voxel.x === x && voxel.y === 0 && voxel.z === z)) onNotice('目标网格已有体素 · 请点击体素表面添加')
       else applyStrokeAdd(sceneVoxel)
     } else {
-      const highest = highestVoxelAt(project.customVoxels, x, z)
+      const customSceneVoxels = scenePartsRef.current.filter((part) => part.kind === 'custom').flatMap((part) => scenePartVoxels(part))
+      const highest = highestVoxelAt(customSceneVoxels, x, z)
       if (highest) applyStrokeRemove(highest)
     }
   }
@@ -6972,16 +7070,14 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
       const assemblyId = editEntityId.slice('assembly:'.length)
       return (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(assemblyId)
     }
-    const customTargets = project.customVoxels.filter((voxel) => {
-      if (editEntityId) {
-        const part = parts.find((candidate) => candidate.kind === 'custom' && candidate.partId === voxelEntityId(voxel))
-        if (!part || !belongsToCurrentEdit(part)) return false
-      }
-      const dx = voxel.x - center.x
-      const dy = voxel.y - center.y
-      const dz = voxel.z - center.z
-      return dx * dx + dy * dy + dz * dz <= radiusSquared
-    }).filter((voxel) => {
+    const customTargets = parts.filter((part) => part.kind === 'custom' && (!editEntityId || belongsToCurrentEdit(part)))
+      .flatMap((part) => scenePartVoxels(part))
+      .filter((voxel) => {
+        const dx = voxel.x - center.x
+        const dy = voxel.y - center.y
+        const dz = voxel.z - center.z
+        return dx * dx + dy * dy + dz * dz <= radiusSquared
+      }).filter((voxel) => {
       const key = `quick:custom:${strokeVoxelKey(voxel)}`
       if (editStrokeVisitedRef.current.has(key)) return false
       editStrokeVisitedRef.current.add(key)

@@ -83,6 +83,12 @@ export type ProjectState = {
   instances: SceneInstance[]
   customVoxels: Voxel[]
   customColors?: Record<string, string>
+  /**
+   * Lazy scene-space translation for manually authored entities. The voxel
+   * arrays remain canonical and are only translated when a consumer needs
+   * effective scene coordinates.
+   */
+  customEntityOffsets?: Record<string, { x: number; y: number; z: number }>
   entityNames?: Record<string, string>
   entityNameModes?: Record<string, 'auto' | 'custom'>
   entityNameSequences?: Record<string, number>
@@ -149,22 +155,46 @@ export type SceneEntityPart = {
   voxels: Voxel[]
 }
 
-const scenePartVoxelCache = new WeakMap<SceneEntityPart, { key: string; voxels: Voxel[] }>()
+const scenePartVoxelCache = new WeakMap<ReadonlyArray<Voxel>, Map<string, Voxel[]>>()
+
+export function customEntityOffset(project: Pick<ProjectState, 'customEntityOffsets'>, entityId: string): { x: number; y: number; z: number } {
+  return project.customEntityOffsets?.[entityId] ?? { x: 0, y: 0, z: 0 }
+}
+
+export function sceneToStoredCustomVoxel(project: Pick<ProjectState, 'customEntityOffsets'>, voxel: Voxel, entityId: string): Voxel {
+  const offset = customEntityOffset(project, entityId)
+  if (!offset.x && !offset.y && !offset.z) return voxel
+  return { ...voxel, x: voxel.x - offset.x, y: voxel.y - offset.y, z: voxel.z - offset.z }
+}
 
 export function scenePartVoxels(part: SceneEntityPart): Voxel[] {
   const offset = part.sceneOffset
   if (!offset || (!offset.x && !offset.y && !offset.z)) return part.voxels
   const key = `${offset.x},${offset.y},${offset.z}`
-  const cached = scenePartVoxelCache.get(part)
-  if (cached?.key === key) return cached.voxels
+  let variants = scenePartVoxelCache.get(part.voxels)
+  if (!variants) {
+    variants = new Map()
+    scenePartVoxelCache.set(part.voxels, variants)
+  }
+  const cached = variants.get(`${key}:${part.voxels.length}`)
+  if (cached) return cached
   const voxels = part.voxels.map((voxel) => ({
     ...voxel,
     x: voxel.x + offset.x,
     y: voxel.y + offset.y,
     z: voxel.z + offset.z,
   }))
-  scenePartVoxelCache.set(part, { key, voxels })
+  variants.set(`${key}:${part.voxels.length}`, voxels)
   return voxels
+}
+
+/** Read one effective scene-space voxel without materializing the whole part. */
+export function scenePartVoxelAt(part: SceneEntityPart, index: number): Voxel | undefined {
+  const voxel = part.voxels[index]
+  if (!voxel) return undefined
+  const offset = part.sceneOffset
+  if (!offset || (!offset.x && !offset.y && !offset.z)) return voxel
+  return { ...voxel, x: voxel.x + offset.x, y: voxel.y + offset.y, z: voxel.z + offset.z }
 }
 
 export function uniqueAssetName(assets: VoxelAsset[], requestedName: string): string {
@@ -723,7 +753,8 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
   cache.customGroups.forEach((voxels, entityId) => {
     const memberKey = `voxel:${entityId}`
     const assemblyIds = assemblyPathForMemberKey(memberKey)
-    parts.push({ id: `custom:${entityId}`, kind: 'custom', partId: entityId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label: '手动体素实体', colorOverride: project.customColors?.[entityId], voxels })
+    const sceneOffset = project.customEntityOffsets?.[entityId]
+    parts.push({ id: `custom:${entityId}`, kind: 'custom', partId: entityId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label: '手动体素实体', colorOverride: project.customColors?.[entityId], sceneOffset, voxels })
   })
   return parts
 }
@@ -1059,7 +1090,7 @@ export function makeDefaultProject(): ProjectState {
     { id: 'inst-tree-a', assetId: sceneAssetId('tree-basic'), x: -9, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
     { id: 'inst-tree-b', assetId: sceneAssetId('tree-basic'), x: 8, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
   ]
-  return { version: 1, sampleRevision: DEFAULT_SAMPLE_REVISION, name: '莫测里·第一街区', voxelSizeMm: DEFAULT_VOXEL_SIZE_MM, sceneSizeCm: 20, sceneBounds: { x: 200, y: 200, z: 200 }, materials: MATERIALS, assets: [...templateAssets, ...sceneAssets], instances, customVoxels: [], customColors: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
+  return { version: 1, sampleRevision: DEFAULT_SAMPLE_REVISION, name: '莫测里·第一街区', voxelSizeMm: DEFAULT_VOXEL_SIZE_MM, sceneSizeCm: 20, sceneBounds: { x: 200, y: 200, z: 200 }, materials: MATERIALS, assets: [...templateAssets, ...sceneAssets], instances, customVoxels: [], customColors: {}, customEntityOffsets: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
 }
 
 function defaultSampleInstanceIds(project: ProjectState): boolean {

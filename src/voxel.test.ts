@@ -80,6 +80,22 @@ describe('莫测造境体素核心数据', () => {
     expect(movedSceneVoxels).not.toEqual(originalSceneVoxels)
   })
 
+  it('keeps manually authored topology canonical while moving through a lazy entity offset', () => {
+    const project = makeDefaultProject()
+    project.customVoxels = [
+      { x: 2, y: 0, z: 3, materialId: 'terracotta', entityId: 'manual-a' },
+      { x: 3, y: 0, z: 3, materialId: 'terracotta', entityId: 'manual-a' },
+    ]
+    project.customEntityOffsets = {}
+    const originalPart = sceneEntityParts(project).find((part) => part.id === 'custom:manual-a')!
+    const originalSceneVoxels = scenePartVoxels(originalPart)
+    const movedProject = { ...project, customEntityOffsets: { 'manual-a': { x: 7, y: 2, z: -4 } } }
+    const movedPart = sceneEntityParts(movedProject).find((part) => part.id === 'custom:manual-a')!
+    expect(movedPart.voxels).toBe(originalPart.voxels)
+    expect(scenePartVoxels(movedPart)[0]).toEqual({ ...originalSceneVoxels[0], x: 9, y: 2, z: -1 })
+    expect(scenePartVoxels(movedPart)[1]).toEqual({ ...originalSceneVoxels[1], x: 10, y: 2, z: -1 })
+  })
+
   it('keeps a pure instance move out of the render geometry signature', () => {
     const project = makeDefaultProject()
     const original = project.instances[0]

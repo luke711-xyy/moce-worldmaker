@@ -104,6 +104,16 @@ function validateSceneState(value: unknown): asserts value is PortableSceneState
     requireArray(item.overrides, `scene.instances[${index}].overrides`).forEach((voxel, voxelIndex) => validateVoxel(voxel, `scene.instances[${index}].overrides[${voxelIndex}]`, true))
   })
   requireArray(scene.customVoxels, 'scene.customVoxels').forEach((voxel, index) => validateVoxel(voxel, `scene.customVoxels[${index}]`))
+  if (scene.customEntityOffsets !== undefined) {
+    const offsets = requirePlainObject(scene.customEntityOffsets, 'scene.customEntityOffsets')
+    Object.entries(offsets).forEach(([entityId, offset]) => {
+      const item = requirePlainObject(offset, `scene.customEntityOffsets.${entityId}`)
+      for (const axis of ['x', 'y', 'z'] as const) {
+        const value = requireNumber(item[axis], `scene.customEntityOffsets.${entityId}.${axis}`)
+        if (!Number.isInteger(value)) throw new SceneFileError(`scene.customEntityOffsets.${entityId}.${axis}必须是整数`)
+      }
+    })
+  }
   if (scene.assemblies !== undefined) requireArray(scene.assemblies, 'scene.assemblies').forEach((assembly, index) => {
     const item = requirePlainObject(assembly, `scene.assemblies[${index}]`) as SceneAssembly
     requireString(item.id, `scene.assemblies[${index}].id`)
