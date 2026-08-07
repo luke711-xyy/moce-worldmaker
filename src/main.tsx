@@ -4125,69 +4125,79 @@ function App() {
     })
     const selectedCustomParts = new Map(selectedEntityParts.filter((part) => part.kind === 'custom').map((part) => [part.partId, part]))
 
-    updateProject((draft) => {
-      draft.instances.forEach((instance) => {
-        const parts = selectedPartsByInstance.get(instance.id)
-        if (!parts?.length) return
-        const sourceInstance = sourceProject.instances.find((candidate) => candidate.id === instance.id)
-        const sourceAsset = sourceInstance ? sourceProject.assets.find((asset) => asset.id === sourceInstance.assetId) : undefined
-        if (!sourceInstance || !sourceAsset) return
-        const overrides = [...(instance.overrides ?? [])]
-        const overrideIndex = new Map<string, number>()
-        overrides.forEach((override, index) => overrideIndex.set(sceneVoxelKey(override), index))
-        const localBySceneKey = new Map<string, Voxel>()
-        instanceVoxelPairs(sourceInstance, sourceAsset).forEach(({ scene, local }) => {
-          localBySceneKey.set(sceneVoxelKey(scene), local)
-        })
-        const upsertPaint = (localVoxel: Voxel, color: string) => {
-          const key = sceneVoxelKey(localVoxel)
-          const index = overrideIndex.get(key)
-          if (index === undefined) {
-            overrides.push({ ...localVoxel, materialId: color, mode: 'paint' })
-            overrideIndex.set(key, overrides.length - 1)
-            return
-          }
-          const existing = overrides[index]
-          overrides[index] = existing.mode === 'add' || !existing.mode
-            ? { ...existing, paintMaterialId: color }
-            : { ...existing, materialId: color, mode: 'paint' }
+    const sourceAssetById = new Map(sourceProject.assets.map((asset) => [asset.id, asset]))
+    const nextInstances = sourceProject.instances.map((sourceInstance) => {
+      const parts = selectedPartsByInstance.get(sourceInstance.id)
+      if (!parts?.length) return sourceInstance
+      const sourceAsset = sourceAssetById.get(sourceInstance.assetId)
+      if (!sourceAsset) return sourceInstance
+      const overrides = (sourceInstance.overrides ?? []).map((override) => ({ ...override }))
+      const overrideIndex = new Map<string, number>()
+      overrides.forEach((override, index) => overrideIndex.set(sceneVoxelKey(override), index))
+      const localBySceneKey = new Map<string, Voxel>()
+      instanceVoxelPairs(sourceInstance, sourceAsset).forEach(({ scene, local }) => localBySceneKey.set(sceneVoxelKey(scene), local))
+      const upsertPaint = (localVoxel: Voxel, color: string) => {
+        const key = sceneVoxelKey(localVoxel)
+        const index = overrideIndex.get(key)
+        if (index === undefined) {
+          overrides.push({ ...localVoxel, materialId: color, mode: 'paint' })
+          overrideIndex.set(key, overrides.length - 1)
+          return
         }
-        parts.forEach((part) => scenePartVoxels(part).forEach((voxel) => {
-          const localVoxel = localBySceneKey.get(sceneVoxelKey(voxel))
-          if (!localVoxel) return
-          upsertPaint(localVoxel, adjustHexHsl(scenePartVoxelDisplayColor(sourceProject, part, voxel), hueDelta, saturationTarget))
-        }))
-        instance.overrides = overrides
-
-        // Whole-entity overrides also need to move so future unpainted voxels
-        // follow the same adjustment. Do this only when every part of the
-        // instance is selected; editing one sub-part must not recolor siblings.
-        const allInstanceParts = sceneParts.filter((part) => part.instanceId === instance.id)
-        const coversInstance = allInstanceParts.length > 0 && allInstanceParts.every((part) => selectedPartsById.has(part.id))
-        if (coversInstance) {
-          const baseColor = sourceInstance.colorOverride ?? sourceAsset.templateColor
-          if (baseColor) instance.colorOverride = adjustHexHsl(baseColor, hueDelta, saturationTarget)
-        }
-      })
-
-      const selectedCustomVoxelByKey = new Map<string, { part: SceneEntityPart; voxel: Voxel }>()
-      selectedCustomParts.forEach((part) => scenePartVoxels(part).forEach((voxel) => {
-        selectedCustomVoxelByKey.set(`${part.partId}:${sceneVoxelKey(voxel)}`, { part, voxel })
+        const existing = overrides[index]
+        overrides[index] = existing.mode === 'add' || !existing.mode
+          ? { ...existing, paintMaterialId: color }
+          : { ...existing, materialId: color, mode: 'paint' }
+      }
+      parts.forEach((part) => scenePartVoxels(part).forEach((voxel) => {
+        const localVoxel = localBySceneKey.get(sceneVoxelKey(voxel))
+        if (!localVoxel) return
+        upsertPaint(localVoxel, adjustHexHsl(scenePartVoxelDisplayColor(sourceProject, part, voxel), hueDelta, saturationTarget))
       }))
-      draft.customVoxels = draft.customVoxels.map((voxel) => {
+      const nextInstance: SceneInstance = { ...sourceInstance, overrides }
+      // Whole-entity overrides also need to move so future unpainted voxels
+      // follow the same adjustment. Editing one sub-part must not recolor
+      // siblings in a multi-part asset.
+      const allInstanceParts = sceneParts.filter((part) => part.instanceId === sourceInstance.id)
+      const coversInstance = allInstanceParts.length > 0 && allInstanceParts.every((part) => selectedPartsById.has(part.id))
+      if (coversInstance) {
+        const baseColor = sourceInstance.colorOverride ?? sourceAsset.templateColor
+        if (baseColor) nextInstance.colorOverride = adjustHexHsl(baseColor, hueDelta, saturationTarget)
+      }
+      return nextInstance
+    })
+
+    const selectedCustomVoxelByKey = new Map<string, { part: SceneEntityPart; voxel: Voxel }>()
+    selectedCustomParts.forEach((part) => scenePartVoxels(part).forEach((voxel) => {
+      selectedCustomVoxelByKey.set(`${part.partId}:${sceneVoxelKey(voxel)}`, { part, voxel })
+    }))
+    const sourceOffsets = sourceProject.customEntityOffsets ?? {}
+    const nextCustomVoxels = selectedCustomParts.size
+      ? sourceProject.customVoxels.map((voxel) => {
         const entityId = voxelEntityId(voxel)
-        const offset = customEntityOffset(draft, entityId)
+        const offset = sourceOffsets[entityId] ?? { x: 0, y: 0, z: 0 }
         const sceneKey = sceneVoxelKey({ x: voxel.x + offset.x, y: voxel.y + offset.y, z: voxel.z + offset.z })
         const match = selectedCustomVoxelByKey.get(`${entityId}:${sceneKey}`)
         if (!match) return voxel
         return { ...voxel, paintMaterialId: adjustHexHsl(scenePartVoxelDisplayColor(sourceProject, match.part, match.voxel), hueDelta, saturationTarget) }
       })
-      const nextCustomColors = { ...(draft.customColors ?? {}) }
-      selectedCustomParts.forEach((part, entityId) => {
-        const baseColor = sourceProject.customColors?.[entityId]
-        if (baseColor) nextCustomColors[entityId] = adjustHexHsl(baseColor, hueDelta, saturationTarget)
-      })
-      draft.customColors = nextCustomColors
+      : sourceProject.customVoxels
+    const nextCustomColors = { ...(sourceProject.customColors ?? {}) }
+    selectedCustomParts.forEach((part, entityId) => {
+      const baseColor = sourceProject.customColors?.[entityId]
+      if (baseColor) nextCustomColors[entityId] = adjustHexHsl(baseColor, hueDelta, saturationTarget)
+    })
+    const nextProject: ProjectState = { ...sourceProject, instances: nextInstances, customVoxels: nextCustomVoxels, customColors: nextCustomColors }
+    historyRef.current.past = [...historyRef.current.past, { project: sourceProject, editEntityId, selectedId, checkedTreePartIds: [...checkedTreePartIds] }].slice(-50)
+    historyRef.current.future = []
+    // Color changes do not alter occupancy. Avoid rehashing every scene voxel
+    // while the inspector publishes the new material state.
+    skipSceneOccupancySyncRef.current = true
+    projectRef.current = nextProject
+    markSceneDirty()
+    startTransition(() => {
+      setProject(nextProject)
+      setHistoryRevision((value) => value + 1)
     })
   }
 
