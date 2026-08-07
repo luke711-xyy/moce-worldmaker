@@ -1366,7 +1366,14 @@ function App() {
   }
 
   const commitProject = (next: ProjectState, trackHistory = true) => {
-    const normalizedNext = normalizeStoredProject(next)
+    // updateProject()/replaceProject() already provide an isolated next
+    // project. The default storage normalizer would deep-clone it again from
+    // normalizeProjectNaming(), which is especially costly for large voxel
+    // assets. Keep storage-field normalization, then normalize names in-place
+    // on this caller-owned next tree. File loading still uses the full clone
+    // path above before reaching this commit boundary.
+    const normalizedBase = normalizeStoredProject(next, { normalizeNaming: false })
+    const normalizedNext = normalizeProjectNaming(normalizedBase, { clone: false })
     if (trackHistory) {
       historyRef.current.past = [...historyRef.current.past, {
         project: structuredClone(projectRef.current),
