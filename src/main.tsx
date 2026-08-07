@@ -383,6 +383,7 @@ function normalizeStoredProject(loaded: ProjectState, options: NormalizeStoredPr
       isTemplate: asset.isTemplate ?? (!asset.source || asset.source === '场景实体保存' || (asset.kind !== 'imported' && !asset.source.includes('拆分子实体'))),
     })),
     customVoxels: (migrated.customVoxels ?? []).map((voxel, index) => ({ ...voxel, entityId: voxel.entityId ?? `legacy-${voxel.x}-${voxel.y}-${voxel.z}-${index}` })),
+    customVoxelRenderModes: { ...(migrated.customVoxelRenderModes ?? {}) },
     customColors: { ...(migrated.customColors ?? {}) },
     customEntityOffsets: Object.fromEntries(Object.entries(migrated.customEntityOffsets ?? {}).map(([entityId, offset]) => [entityId, {
       x: Math.round(offset.x),
@@ -3516,6 +3517,8 @@ function App() {
           scenePartVoxels(sourcePart ?? { id: `custom:${oldId}`, kind: 'custom', partId: oldId, memberKey: `voxel:${oldId}`, voxels: draft.customVoxels.filter((voxel) => voxelEntityId(voxel) === oldId) })
             .forEach((voxel) => draft.customVoxels.push({ ...structuredClone(voxel), x: voxel.x + offset.x, y: voxel.y + offset.y, z: voxel.z + offset.z, entityId: newId }))
           if (draft.customColors?.[oldId]) draft.customColors = { ...(draft.customColors ?? {}), [newId]: draft.customColors[oldId] }
+          const renderMode = draft.customVoxelRenderModes?.[oldId]
+          if (renderMode) draft.customVoxelRenderModes = { ...(draft.customVoxelRenderModes ?? {}), [newId]: renderMode }
         })
         const assemblyMapForCopy = new Map<string, string>(); [...assemblyTreeIds].forEach((oldId) => assemblyMapForCopy.set(oldId, `assembly-${copyBatchId}-${copyIndex + 1}-${oldId}`))
         const mapLeafKey = (memberKey: string) => { for (const [oldId, newId] of instanceMap) if (memberKey === `asset:${oldId}` || memberKey.startsWith(`asset:${oldId}:`)) return memberKey.replace(`asset:${oldId}`, `asset:${newId}`); for (const [oldId, newId] of customMap) if (memberKey === `voxel:${oldId}`) return `voxel:${newId}`; return memberKey }
@@ -3546,6 +3549,7 @@ function App() {
     const removedMemberKeys = new Set(targetParts.map((part) => part.memberKey))
     updateProject((draft) => {
       draft.customVoxels = draft.customVoxels.filter((voxel) => !removedCustomIds.has(voxelEntityId(voxel)))
+      if (draft.customVoxelRenderModes) draft.customVoxelRenderModes = Object.fromEntries(Object.entries(draft.customVoxelRenderModes).filter(([entityId]) => !removedCustomIds.has(entityId)))
       if (draft.customEntityOffsets) {
         draft.customEntityOffsets = Object.fromEntries(Object.entries(draft.customEntityOffsets).filter(([entityId]) => !removedCustomIds.has(entityId)))
       }
@@ -3686,7 +3690,9 @@ function App() {
     const firstResultEntityId = selectedResultEntityIds[0]
     const remainingCustomVoxels = sourceProject.customVoxels.filter((voxel) => !selectedCustomIds.has(voxelEntityId(voxel)))
     const nextCustomColors = { ...(sourceProject.customColors ?? {}) }
+    const nextCustomVoxelRenderModes = { ...(sourceProject.customVoxelRenderModes ?? {}) }
     selectedCustomIds.forEach((entityId) => { delete nextCustomColors[entityId] })
+    selectedCustomIds.forEach((entityId) => { delete nextCustomVoxelRenderModes[entityId] })
     const preservedCustomColor = selectedCustomIds.size === 1 && firstResultEntityId === [...selectedCustomIds][0]
       ? sourceProject.customColors?.[[...selectedCustomIds][0]]
       : undefined
@@ -3698,6 +3704,7 @@ function App() {
       // project before the history/React commit.
       instances: sourceProject.instances.filter((instance) => !selectedInstanceIds.has(instance.id)),
       customVoxels: [...remainingCustomVoxels, ...transformed],
+      customVoxelRenderModes: nextCustomVoxelRenderModes,
       customColors: nextCustomColors,
       customEntityOffsets: Object.fromEntries(Object.entries(sourceProject.customEntityOffsets ?? {}).filter(([entityId]) => !selectedCustomIds.has(entityId))),
       assemblies: (sourceProject.assemblies ?? []).map((assembly) => {
@@ -3709,6 +3716,11 @@ function App() {
     // this structurally shared project rather than paying for a second deep
     // clone of the large voxel payload.
     const namedNextProject = normalizeProjectNaming(nextProject, { clone: false })
+    if (geometryPreview.operation === 'scale' && geometryPreview.scaleMode === 'up') {
+      const renderModes = { ...(namedNextProject.customVoxelRenderModes ?? {}) }
+      selectedResultEntityIds.forEach((entityId) => { renderModes[entityId] = 'cells' })
+      namedNextProject.customVoxelRenderModes = renderModes
+    }
     commitGeometryProject(namedNextProject, [...selectedIds], transformedGroups)
     setSelectedId(firstResultEntityId ? `custom:${firstResultEntityId}` : '')
     setCheckedTreePartIds(firstResultEntityId ? [`custom:${firstResultEntityId}`] : [])
@@ -5827,13 +5839,18 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
     root.clear()
     const previewState = geometryPreview
     const preview = previewState?.result?.voxels ?? []
-    if (!preview.length) { invalidateRenderRef.current(); return }
+    if (!previewState || !preview.length) { invalidateRenderRef.current(); return }
 
     // Large geometry previews are rendered from the worker's greedy surface
     // mesh. The full voxel list remains in previewState for confirmation, but
     // Three.js no longer receives one InstancedMesh entry per voxel (or one
     // temporary array copy per color bucket).
-    const previewMesh = previewState?.mesh
+    // An enlargement is a discrete cell operation: its preview must show the
+    // same unit-cell representation that will be committed, rather than the
+    // worker's greedy surface mesh which visually merges adjacent cells into
+    // large blocks. Shell/reduction previews can still use the compact mesh.
+    const preserveScaleCells = previewState?.operation === 'scale' && previewState.scaleMode === 'up'
+    const previewMesh = preserveScaleCells ? null : previewState?.mesh
     if (previewMesh) {
       const positions = previewMesh.positions.slice()
       for (let index = 0; index < positions.length; index += 1) positions[index] *= VOXEL_WORLD_SIZE
@@ -6353,11 +6370,12 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
         // rebuild or remap every voxel on pointer release.
         const component = part.voxels
         const scenePartId = `custom:${entityId}`
-        const renderSignature = voxelRenderSignature(component, project.customColors?.[entityId])
+        const forceCellRender = project.customVoxelRenderModes?.[entityId] === 'cells'
+        const renderSignature = voxelRenderSignature(component, project.customColors?.[entityId], forceCellRender)
         const existingComponent = existingComponents.get(scenePartId)
         const componentGroup = existingComponent && existingComponent.userData.renderSignature === renderSignature
           ? existingComponent
-          : buildCustomComponentGroup(component, entityId, materialMap, project.customColors?.[entityId])
+          : buildCustomComponentGroup(component, entityId, materialMap, project.customColors?.[entityId], forceCellRender)
         if (componentGroup !== existingComponent) {
           if (existingComponent) {
             custom.remove(existingComponent)
@@ -6386,7 +6404,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
       disposeThreeObject(existingCustom)
     }
     invalidateRenderRef.current()
-  }, [project.assets, project.customVoxels, project.customColors, sceneGeometryRenderKey, materialMap])
+  }, [project.assets, project.customVoxels, project.customColors, project.customVoxelRenderModes, sceneGeometryRenderKey, materialMap])
 
   useEffect(() => {
     const group = groupRef.current
@@ -6481,7 +6499,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
     return () => {
       cancelled = true
     }
-  }, [project.assets, project.customVoxels, project.customColors, sceneGeometryRenderKey, materialMap])
+  }, [project.assets, project.customVoxels, project.customColors, project.customVoxelRenderModes, sceneGeometryRenderKey, materialMap])
 
   useEffect(() => {
     const group = groupRef.current
@@ -7851,13 +7869,13 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
 const voxelRenderSignatureCache = new WeakMap<Voxel[], Map<string, string>>()
 const voxelRenderOriginCache = new WeakMap<ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>, { x: number; y: number; z: number }>()
 
-function voxelRenderSignature(component: Voxel[], componentColor?: string): string {
+function voxelRenderSignature(component: Voxel[], componentColor?: string, forceCellRender = false): string {
   // A scene move changes only the component group's transform. The canonical
   // voxel array is shared by sceneEntityParts across transform-only project
   // commits, so cache the expensive content hash by array identity and color.
   // Voxel arrays are treated as immutable ProjectState data; edits publish a
   // new array and therefore naturally receive a new cache entry.
-  const colorKey = componentColor ?? ''
+  const colorKey = `${componentColor ?? ''}|${forceCellRender ? 'cells' : 'auto'}`
   const cachedVariants = voxelRenderSignatureCache.get(component)
   const cached = cachedVariants?.get(colorKey)
   if (cached) return cached
@@ -7916,11 +7934,11 @@ function customComponentRenderOrigin(component: ReadonlyArray<Pick<Voxel, 'x' | 
 
 const CUSTOM_INSTANCE_RENDER_LIMIT = 16_384
 
-function buildCustomComponentGroup(component: Voxel[], entityId: string, materialMap: Map<string, THREE.MeshStandardMaterial>, componentColor?: string) {
+function buildCustomComponentGroup(component: Voxel[], entityId: string, materialMap: Map<string, THREE.MeshStandardMaterial>, componentColor?: string, forceCellRender = false) {
   const componentGroup = new THREE.Group()
   const componentScenePartId = `custom:${entityId}`
   const origin = customComponentRenderOrigin(component)
-  const preserveVoxelCells = component.some((voxel) => voxel.preserveVoxelCells)
+  const preserveVoxelCells = forceCellRender || component.some((voxel) => voxel.preserveVoxelCells)
   // Greedy mesh vertices are cell boundaries, so the component origin is the
   // lower corner of the minimum voxel. Instanced voxel centers add their own
   // half-cell offset below.

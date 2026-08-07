@@ -89,6 +89,8 @@ export type ProjectState = {
   assets: VoxelAsset[]
   instances: SceneInstance[]
   customVoxels: Voxel[]
+  /** Per custom entity render policy. Enlargement keeps the source voxel cell size. */
+  customVoxelRenderModes?: Record<string, 'cells' | 'greedy'>
   customColors?: Record<string, string>
   /**
    * Lazy scene-space translation for manually authored entities. The voxel
@@ -1150,7 +1152,7 @@ export function makeDefaultProject(): ProjectState {
     { id: 'inst-tree-a', assetId: sceneAssetId('tree-basic'), x: -9, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
     { id: 'inst-tree-b', assetId: sceneAssetId('tree-basic'), x: 8, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
   ]
-  return { version: 1, sampleRevision: DEFAULT_SAMPLE_REVISION, name: '莫测里·第一街区', voxelSizeMm: DEFAULT_VOXEL_SIZE_MM, sceneSizeCm: 20, sceneBounds: { x: 200, y: 200, z: 200 }, materials: MATERIALS, assets: [...templateAssets, ...sceneAssets], instances, customVoxels: [], customColors: {}, customEntityOffsets: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
+  return { version: 1, sampleRevision: DEFAULT_SAMPLE_REVISION, name: '莫测里·第一街区', voxelSizeMm: DEFAULT_VOXEL_SIZE_MM, sceneSizeCm: 20, sceneBounds: { x: 200, y: 200, z: 200 }, materials: MATERIALS, assets: [...templateAssets, ...sceneAssets], instances, customVoxels: [], customVoxelRenderModes: {}, customColors: {}, customEntityOffsets: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
 }
 
 function defaultSampleInstanceIds(project: ProjectState): boolean {
