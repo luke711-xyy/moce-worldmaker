@@ -5464,7 +5464,7 @@ const SceneLibraryPreview = React.memo(function SceneLibraryPreview({ cacheKey, 
   return <canvas ref={canvasRef} className="scene-preview-canvas" aria-label={`场景预览，显示 ${payload.sampledVoxelCount} 个预览体素`} />
 })
 
-const VoxelMiniPreview = React.memo(function VoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, materialColors = {}, maxPreviewVoxels }: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string>; maxPreviewVoxels?: number }) {
+const SynchronousVoxelMiniPreview = React.memo(function SynchronousVoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, materialColors = {}, maxPreviewVoxels }: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string>; maxPreviewVoxels?: number }) {
   if (!voxels.length) return <div className="mini-preview-empty">暂无预览</div>
   // A preview is a visual LOD, not the source model. The source can contain
   // hundreds of thousands of cells (for example an imported robot), while
@@ -5549,6 +5549,54 @@ const VoxelMiniPreview = React.memo(function VoxelMiniPreview({ voxels, asset, c
   return <div className="mini-preview" aria-label="固定斜前方实体预览"><svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet" role="img" aria-label="组合式 3D 体素预览">
     {[...facePaths].map(([fill, d]) => <path key={fill} d={d} fill={fill} />)}
   </svg></div>
+})
+
+const LARGE_MINI_PREVIEW_THRESHOLD = 20_000
+const previewInputArrayIds = new WeakMap<object, number>()
+let nextPreviewInputArrayId = 1
+
+function previewInputArrayId(voxels: ScenePreviewInputVoxel[]): number {
+  const existing = previewInputArrayIds.get(voxels)
+  if (existing) return existing
+  const id = nextPreviewInputArrayId++
+  previewInputArrayIds.set(voxels, id)
+  return id
+}
+
+function miniPreviewVoxelColor(voxel: Voxel, asset: VoxelAsset | undefined, colorOverride: string | undefined, voxelColors: Record<string, string>, materialColors: Record<string, string>): string {
+  const key = `${voxel.x},${voxel.y},${voxel.z}`
+  const materialColor = (materialId: string) => materialColors[materialId] ?? MATERIALS.find((material) => material.id === materialId)?.color
+  return voxelColors[key]
+    ?? (voxel.paintMaterialId ? materialColor(voxel.paintMaterialId) ?? (voxel.paintMaterialId.startsWith('#') ? voxel.paintMaterialId : undefined) : undefined)
+    ?? colorOverride
+    ?? asset?.templateColor
+    ?? (voxel.materialId === 'primary'
+      ? asset?.color ?? '#6c827d'
+      : voxel.materialId === 'accent'
+        ? asset?.accent ?? '#d2a354'
+        : voxel.materialId.startsWith('#') ? voxel.materialId : materialColor(voxel.materialId) ?? '#6c827d')
+}
+
+const WorkerVoxelMiniPreview = React.memo(function WorkerVoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, materialColors = {}, maxPreviewVoxels }: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string>; maxPreviewVoxels?: number }) {
+  const inputVoxels = useMemo<ScenePreviewInputVoxel[]>(() => voxels.map((voxel) => ({
+    x: voxel.x,
+    y: voxel.y,
+    z: voxel.z,
+    color: miniPreviewVoxelColor(voxel, asset, colorOverride, voxelColors, materialColors),
+  })), [asset, colorOverride, materialColors, voxelColors, voxels])
+  const cacheKey = `entity-mini:${previewInputArrayId(inputVoxels)}:${maxPreviewVoxels ?? MAX_PREVIEW_VOXELS}`
+  return <div className="mini-preview" aria-label="固定斜前方实体预览"><SceneLibraryPreview cacheKey={cacheKey} voxels={inputVoxels} maxVoxels={maxPreviewVoxels ?? MAX_PREVIEW_VOXELS} /></div>
+})
+
+/**
+ * Keep the exact SVG path for small assets. Large imported entities use the
+ * worker-backed canvas path so the expensive occupancy and face generation do
+ * not block selection, camera movement, or the inspector itself.
+ */
+const VoxelMiniPreview = React.memo(function VoxelMiniPreview(props: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string>; maxPreviewVoxels?: number }) {
+  return props.voxels.length > LARGE_MINI_PREVIEW_THRESHOLD
+    ? <WorkerVoxelMiniPreview {...props} />
+    : <SynchronousVoxelMiniPreview {...props} />
 })
 
 function TransformRow({ icon, label, values, editable, onChange }: { icon: React.ReactNode; label: string; values: number[]; editable: boolean; onChange: (axis: number, value: number) => void }) {
