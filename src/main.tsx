@@ -3718,42 +3718,56 @@ function App() {
     const selectedIds = new Set(selectedEntityParts.map((part) => part.id))
     const selectedCustomIds = new Set(selectedEntityParts.filter((part) => part.kind === 'custom').map((part) => part.partId))
     const selectedInstanceIds = new Set(selectedEntityParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
-    const allInstanceParts = new Map<string, SceneEntityPart[]>()
+    const allInstancePartCounts = new Map<string, number>()
+    const selectedInstancePartCounts = new Map<string, number>()
     sceneParts.forEach((part) => {
-      if (!part.instanceId) return
-      const parts = allInstanceParts.get(part.instanceId)
-      if (parts) parts.push(part)
-      else allInstanceParts.set(part.instanceId, [part])
+      if (!part.instanceId || !selectedInstanceIds.has(part.instanceId)) return
+      allInstancePartCounts.set(part.instanceId, (allInstancePartCounts.get(part.instanceId) ?? 0) + 1)
+      if (selectedIds.has(part.id)) selectedInstancePartCounts.set(part.instanceId, (selectedInstancePartCounts.get(part.instanceId) ?? 0) + 1)
     })
     for (const instanceId of selectedInstanceIds) {
-      const all = allInstanceParts.get(instanceId) ?? []
-      if (all.some((part) => !selectedIds.has(part.id))) {
+      if ((selectedInstancePartCounts.get(instanceId) ?? 0) < (allInstancePartCounts.get(instanceId) ?? 0)) {
         setNotice('请先选中完整资产实体，再进行整体几何处理')
         return
       }
     }
     const operationBatchId = `voxel-geometry-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
     const firstSourcePartId = selectedEntityParts[0]?.id ?? ''
-    const resultGroups = new Map<string, GeometryVoxel[]>()
-    geometryPreview.result.voxels.forEach((voxel) => {
-      const sourcePartId = voxel.sourcePartId && selectedIds.has(voxel.sourcePartId) ? voxel.sourcePartId : firstSourcePartId
-      const group = resultGroups.get(sourcePartId)
-      if (group) group.push(voxel)
-      else resultGroups.set(sourcePartId, [voxel])
-    })
     const sourcePartById = new Map(selectedEntityParts.map((part) => [part.id, part]))
-    const groupEntries = [...resultGroups.entries()].filter(([, voxels]) => voxels.length > 0).map(([sourcePartId, voxels], index) => {
-      const sourcePart = sourcePartById.get(sourcePartId)
-      const entityId = selectedCustomIds.size === 1 && selectedInstanceIds.size === 0 && selectedEntityParts.length === 1
-        ? [...selectedCustomIds][0]
-        : `${operationBatchId}-${index + 1}`
-      return { sourcePartId, entityId, sourcePart, voxels }
-    })
-    const transformedGroups = groupEntries.map(({ entityId, voxels }) => ({
-      entityId,
-      voxels: voxels.map(({ sourcePartId: _sourcePartId, ...voxel }) => ({ ...voxel, entityId })),
-    }))
-    const transformed = transformedGroups.flatMap(({ voxels }) => voxels)
+    const singleCustomEntityId = selectedCustomIds.size === 1 && selectedInstanceIds.size === 0 && selectedEntityParts.length === 1
+      ? [...selectedCustomIds][0]
+      : undefined
+    let groupEntries: Array<{ sourcePartId: string; entityId: string; sourcePart?: SceneEntityPart; voxels: Voxel[] }>
+    let transformed: Voxel[]
+    if (singleCustomEntityId) {
+      // The common large-model case has one custom entity. Do not build a
+      // per-source grouping map and then flatten it again: the worker result
+      // is already one contiguous batch, so a single pass is sufficient.
+      const voxels = new Array<Voxel>(geometryPreview.result.voxels.length)
+      for (let index = 0; index < geometryPreview.result.voxels.length; index += 1) {
+        const { sourcePartId: _sourcePartId, ...voxel } = geometryPreview.result.voxels[index]
+        voxels[index] = { ...voxel, entityId: singleCustomEntityId }
+      }
+      groupEntries = [{ sourcePartId: firstSourcePartId, entityId: singleCustomEntityId, sourcePart: selectedEntityParts[0], voxels }]
+      transformed = voxels
+    } else {
+      const resultGroups = new Map<string, GeometryVoxel[]>()
+      geometryPreview.result.voxels.forEach((voxel) => {
+        const sourcePartId = voxel.sourcePartId && selectedIds.has(voxel.sourcePartId) ? voxel.sourcePartId : firstSourcePartId
+        const group = resultGroups.get(sourcePartId)
+        if (group) group.push(voxel)
+        else resultGroups.set(sourcePartId, [voxel])
+      })
+      transformed = []
+      groupEntries = [...resultGroups.entries()].filter(([, voxels]) => voxels.length > 0).map(([sourcePartId, voxels], index) => {
+        const sourcePart = sourcePartById.get(sourcePartId)
+        const entityId = `${operationBatchId}-${index + 1}`
+        const transformedVoxels = voxels.map(({ sourcePartId: _sourcePartId, ...voxel }) => ({ ...voxel, entityId }))
+        transformed.push(...transformedVoxels)
+        return { sourcePartId, entityId, sourcePart, voxels: transformedVoxels }
+      })
+    }
+    const transformedGroups = groupEntries.map(({ entityId, voxels }) => ({ entityId, voxels }))
     const selectedReplacementKeys = new Map<string, string[]>()
     groupEntries.forEach(({ sourcePartId, entityId, sourcePart }) => {
       if (!sourcePart) return
