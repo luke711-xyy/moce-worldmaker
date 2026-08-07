@@ -6679,13 +6679,15 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         // geometry. addVoxelHighlight() is intentionally idempotent here;
         // rebuilding per-voxel line positions on every mouse release was the
         // main source of the size-dependent post-drag hitch.
-        addVoxelHighlight(object)
+        const highlights = addVoxelHighlight(object)
+        // Keep the generated outline objects attached to the mesh and toggle
+        // visibility instead of disposing/rebuilding them on every selection
+        // change. This is especially important for large voxel entities,
+        // whose first outline build is expensive but whose subsequent
+        // selection changes should be a constant-time visibility update.
+        highlights.forEach((highlight) => { highlight.visible = true })
       } else if (oldHighlights) {
-        oldHighlights.forEach((highlight) => {
-          object.remove(highlight)
-          disposeThreeObject(highlight)
-        })
-        delete object.userData.selectionGlowParts
+        oldHighlights.forEach((highlight) => { highlight.visible = false })
       }
       // The edit-mode dimming is rendered once as a stable fullscreen pass
       // below. Do not mutate per-object colors here: doing so made every
