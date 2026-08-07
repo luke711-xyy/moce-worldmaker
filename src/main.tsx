@@ -894,6 +894,7 @@ function App() {
   const sceneLibraryLoadRequestRef = useRef(0)
   const sceneLibraryAbortRef = useRef<AbortController | null>(null)
   const sceneLibraryProjectCacheRef = useRef(new Map<string, ProjectState>())
+  const sceneDirtyRef = useRef(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sceneLibraryImportInputRef = useRef<HTMLInputElement>(null)
   const entityFileInputRef = useRef<HTMLInputElement>(null)
@@ -904,14 +905,32 @@ function App() {
   const [modelImportMode, setModelImportMode] = useState<VoxelizeMode>('solid')
 
   const currentSceneBounds = sceneBoundsForProject(project)
-  const currentSceneSignature = useMemo(() => {
-    try {
-      return sceneContentSignature(project)
-    } catch {
-      return ''
+  const refreshSceneDirty = () => {
+    const savedSignature = savedSceneSignatureRef.current
+    if (!savedSignature) {
+      sceneDirtyRef.current = false
+      return false
     }
-  }, [project])
-  const sceneDirty = savedSceneSignature !== null && currentSceneSignature !== savedSceneSignature
+    let dirty = false
+    try {
+      dirty = sceneContentSignature(projectRef.current) !== savedSignature
+    } catch {
+      // An invalid in-memory project must remain conservatively dirty. This
+      // prevents a failed signature calculation from allowing a destructive
+      // scene replacement without confirmation.
+      dirty = true
+    }
+    sceneDirtyRef.current = dirty
+    return dirty
+  }
+
+  const markSceneDirty = () => {
+    // Dirty state is event-driven rather than derived during every render.
+    // We only need the exact signature at a correctness boundary (New/Open,
+    // exit recovery, or an explicit save); normal edits can mark the ref in
+    // O(1) and return control to the browser immediately.
+    if (savedSceneSignatureRef.current) sceneDirtyRef.current = true
+  }
 
   const sceneFitsBounds = (candidate: SceneBounds, source = projectRef.current) => {
     const customSceneVoxels = sceneEntityParts(source).filter((part) => part.kind === 'custom').flatMap((part) => scenePartVoxels(part))
@@ -1173,6 +1192,7 @@ function App() {
     historyRef.current.future = []
     sceneOccupancyRef.current?.syncParts(sceneEntityParts(next))
     projectRef.current = next
+    markSceneDirty()
     setProject(next)
     setHistoryRevision((value) => value + 1)
     const strokeNotice = voxelStrokeNoticeRef.current
@@ -1201,6 +1221,7 @@ function App() {
     }
     sceneOccupancyRef.current?.syncParts(sceneEntityParts(normalizedNext))
     projectRef.current = normalizedNext
+    markSceneDirty()
     setProject(normalizedNext)
     setHistoryRevision((value) => value + 1)
   }
@@ -1226,6 +1247,7 @@ function App() {
     // scene synchronization when the new React project reaches the effect.
     skipSceneOccupancySyncRef.current = true
     projectRef.current = nextProject
+    markSceneDirty()
     setProject(nextProject)
     setHistoryRevision((value) => value + 1)
   }
@@ -1249,6 +1271,7 @@ function App() {
     // sceneParts effect must not sort and rescan the same large result again.
     skipSceneOccupancySyncRef.current = true
     projectRef.current = next
+    markSceneDirty()
     setProject(next)
     setHistoryRevision((value) => value + 1)
   }
@@ -1274,6 +1297,7 @@ function App() {
   const markSceneSaved = (savedProject: ProjectState, fileRef?: SceneFileRef | null) => {
     const signature = sceneContentSignature(savedProject)
     savedSceneSignatureRef.current = signature
+    sceneDirtyRef.current = false
     setSavedSceneSignature(signature)
     if (fileRef !== undefined) {
       sceneFileRefRef.current = fileRef
@@ -1283,7 +1307,10 @@ function App() {
   }
 
   const requestSceneReplace = (operation: () => Promise<void>) => {
-    if (!sceneDirty) {
+    // Recompute only at the correctness boundary for New/Open/Library
+    // actions. Normal editing uses the O(1) dirty hint above and stays off
+    // the synchronous signature path.
+    if (!refreshSceneDirty()) {
       void operation()
       return
     }
@@ -1577,6 +1604,7 @@ function App() {
     })
     sceneOccupancyRef.current?.syncParts(sceneEntityParts(previous.project))
     projectRef.current = previous.project
+    markSceneDirty()
     setProject(previous.project)
     setEditEntityId(previous.editEntityId)
     setSelectedId(previous.selectedId)
@@ -1599,6 +1627,7 @@ function App() {
     })
     sceneOccupancyRef.current?.syncParts(sceneEntityParts(next.project))
     projectRef.current = next.project
+    markSceneDirty()
     setProject(next.project)
     setEditEntityId(next.editEntityId)
     setSelectedId(next.selectedId)
