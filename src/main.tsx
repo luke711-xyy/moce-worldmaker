@@ -1197,13 +1197,10 @@ function App() {
     }].slice(-50)
     historyRef.current.future = []
     movableParts.forEach((part) => {
-      sceneOccupancyRef.current?.removeOwner(part.id)
-      sceneOccupancyRef.current?.insertOwner(part.id, part.voxels.map((voxel) => ({
-        ...voxel,
-        x: voxel.x + deltaX,
-        y: voxel.y + deltaY,
-        z: voxel.z + deltaZ,
-      })))
+      // A move preserves the owner's topology. Let the occupancy index keep
+      // its existing chunk data and record only the transform; this removes
+      // the release-time O(n) voxel remove/reinsert for large entities.
+      sceneOccupancyRef.current?.translateOwner(part.id, { x: deltaX, y: deltaY, z: deltaZ })
     })
     // We already updated only the moved owners above. Avoid a second full
     // scene synchronization when the new React project reaches the effect.
