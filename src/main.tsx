@@ -8256,27 +8256,32 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
   componentGroup.userData.renderOrigin = origin
   componentGroup.userData.scenePartId = componentScenePartId
   componentGroup.userData.greedyDisabled = preserveVoxelCells
-  const greedyColorIds = new Map<string, number>()
-  const greedyColors: string[] = ['#ffffff']
-  const greedyVoxels = component.map((voxel) => {
-    const material = voxel.paintMaterialId ? materialMap.get(voxel.paintMaterialId) : undefined
-    const colorKey = material
-      ? `#${material.color.getHexString()}`
-      : componentColor
-        ? componentColor
-        : voxel.materialId.startsWith('#')
-          ? voxel.materialId
-          : `#${(materialMap.get(voxel.materialId) ?? materialMap.get('terracotta')!).color.getHexString()}`
-    let materialId = greedyColorIds.get(colorKey)
-    if (materialId === undefined) {
-      materialId = greedyColors.length
-      greedyColorIds.set(colorKey, materialId)
-      greedyColors.push(colorKey)
-    }
-    return { gx: voxel.x - origin.x, gy: voxel.z - origin.z, gz: voxel.y - origin.y, materialId }
-  })
-  componentGroup.userData.greedyVoxels = greedyVoxels
-  componentGroup.userData.greedyColors = greedyColors
+  // Cell-preserving results (notably enlargement) never enter the greedy
+  // worker path. Do not allocate and scan a second full voxel array for data
+  // that this component will not use.
+  if (!preserveVoxelCells) {
+    const greedyColorIds = new Map<string, number>()
+    const greedyColors: string[] = ['#ffffff']
+    const greedyVoxels = component.map((voxel) => {
+      const material = voxel.paintMaterialId ? materialMap.get(voxel.paintMaterialId) : undefined
+      const colorKey = material
+        ? `#${material.color.getHexString()}`
+        : componentColor
+          ? componentColor
+          : voxel.materialId.startsWith('#')
+            ? voxel.materialId
+            : `#${(materialMap.get(voxel.materialId) ?? materialMap.get('terracotta')!).color.getHexString()}`
+      let materialId = greedyColorIds.get(colorKey)
+      if (materialId === undefined) {
+        materialId = greedyColors.length
+        greedyColorIds.set(colorKey, materialId)
+        greedyColors.push(colorKey)
+      }
+      return { gx: voxel.x - origin.x, gy: voxel.z - origin.z, gz: voxel.y - origin.y, materialId }
+    })
+    componentGroup.userData.greedyVoxels = greedyVoxels
+    componentGroup.userData.greedyColors = greedyColors
+  }
   // Large results go straight to the worker-backed greedy mesh. Building one
   // Matrix4 and one InstancedMesh entry per voxel here would block the main
   // thread again immediately after the fast geometry commit.
@@ -8289,16 +8294,22 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
   const deferCellBuild = preserveVoxelCells && component.length > CUSTOM_INSTANCE_RENDER_LIMIT
   const occupied = deferCellBuild ? undefined : new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
   const batches = new Map<string, { color: THREE.Color; voxels: Voxel[] }>()
+  const batchColors = new Map<string, THREE.Color>()
+  const stringColorKeys = new Map<string, string>()
   component.forEach((voxel) => {
     const material = voxel.paintMaterialId ? materialMap.get(voxel.paintMaterialId) : undefined
-    const color = material
-      ? material.color.clone()
-      : componentColor
-        ? new THREE.Color(componentColor)
-        : voxel.materialId.startsWith('#')
-          ? new THREE.Color(voxel.materialId)
-          : (materialMap.get(voxel.materialId) ?? materialMap.get('terracotta')!).color.clone()
-    const key = color.getHexString()
+    const sourceColor = material?.color
+      ?? (componentColor ? componentColor : voxel.materialId.startsWith('#') ? voxel.materialId : undefined)
+      ?? (materialMap.get(voxel.materialId) ?? materialMap.get('terracotta')!).color
+    const key = typeof sourceColor === 'string'
+      ? stringColorKeys.get(sourceColor) ?? (() => {
+        const next = new THREE.Color(sourceColor).getHexString()
+        stringColorKeys.set(sourceColor, next)
+        return next
+      })()
+      : sourceColor.getHexString()
+    const color = batchColors.get(key) ?? (typeof sourceColor === 'string' ? new THREE.Color(sourceColor) : sourceColor.clone())
+    batchColors.set(key, color)
     const batch = batches.get(key) ?? { color, voxels: [] }
     batch.voxels.push(voxel)
     batches.set(key, batch)
