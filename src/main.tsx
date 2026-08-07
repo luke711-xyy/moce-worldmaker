@@ -576,20 +576,24 @@ function scenePartGridOffset(part: Pick<SceneEntityPart, 'sceneOffset' | 'partSc
   }
 }
 
-function scenePartsGridBounds(parts: ReadonlyArray<SceneEntityPart>): GridVoxelBounds | null {
+function scenePartsGridBounds(parts: ReadonlyArray<SceneEntityPart>, occupancyIndex?: SceneOccupancyIndex | null): GridVoxelBounds | null {
   let combined: GridVoxelBounds | null = null
   parts.forEach((part) => {
-    const local = gridVoxelBounds(part.voxels)
-    if (!local) return
-    const offset = scenePartGridOffset(part)
-    const translated = {
-      minX: local.minX + offset.x,
-      maxX: local.maxX + offset.x,
-      minY: local.minY + offset.y,
-      maxY: local.maxY + offset.y,
-      minZ: local.minZ + offset.z,
-      maxZ: local.maxZ + offset.z,
-    }
+    const indexed = occupancyIndex?.getProjectBounds(part.id)
+    const translated = indexed ?? (() => {
+      const local = gridVoxelBounds(part.voxels)
+      if (!local) return null
+      const offset = scenePartGridOffset(part)
+      return {
+        minX: local.minX + offset.x,
+        maxX: local.maxX + offset.x,
+        minY: local.minY + offset.y,
+        maxY: local.maxY + offset.y,
+        minZ: local.minZ + offset.z,
+        maxZ: local.maxZ + offset.z,
+      }
+    })()
+    if (!translated) return
     combined = combined
       ? {
           minX: Math.min(combined.minX, translated.minX),
@@ -2557,7 +2561,7 @@ function App() {
     }
     const cachedMove = sceneMoveBoundsRef.current?.parts === parts ? sceneMoveBoundsRef.current : null
     const bounds = sceneBoundsForProject(projectRef.current)
-    const cachedBounds = cachedMove?.bounds ?? scenePartsGridBounds(movableParts)
+    const cachedBounds = cachedMove?.bounds ?? scenePartsGridBounds(movableParts, sceneOccupancyRef.current)
     const movingIds = cachedMove?.movingIds ?? movableParts.map((part) => part.id)
     sceneMoveBoundsRef.current = { parts, movingIds, bounds: cachedBounds }
     if (!cachedBounds) {

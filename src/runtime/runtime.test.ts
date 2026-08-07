@@ -106,6 +106,14 @@ describe('SceneOccupancyIndex', () => {
     expect(index.queryProjectVoxel(voxel(41, 7, 1)).occupied).toBe(false)
   })
 
+  it('returns current owner bounds without expanding the voxel payload', () => {
+    const topology = Array.from({ length: 5000 }, (_, x) => voxel(x, 2, -3))
+    const index = SceneOccupancyIndex.fromParts([part('entity', topology)])
+    expect(index.getProjectBounds('entity')).toEqual({ minX: 0, maxX: 4999, minY: 2, maxY: 2, minZ: -3, maxZ: -3 })
+    index.translateOwner('entity', { x: 40, y: 5, z: -2 })
+    expect(index.getProjectBounds('entity')).toEqual({ minX: 40, maxX: 5039, minY: 7, maxY: 7, minZ: -5, maxZ: -5 })
+  })
+
   it('collects only occupied owners inside a local erase region', () => {
     const index = SceneOccupancyIndex.fromParts([
       part('center', [voxel(0, 0, 0), voxel(1, 0, 0)]),

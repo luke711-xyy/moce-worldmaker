@@ -164,6 +164,30 @@ export class SceneOccupancyIndex {
     return this.ownerIdToHandle.has(ownerId)
   }
 
+  /**
+   * Return the current project-space bounds already maintained by the
+   * occupancy index. Drag validation can use this broad-phase box without
+   * rescanning a large owner's voxel array.
+   */
+  getProjectBounds(ownerId: string): ProjectVoxelRegion | null {
+    const ownerHandle = this.ownerIdToHandle.get(ownerId)
+    if (!ownerHandle) return null
+    const bounds = this.ownerBounds.get(ownerHandle)
+    if (!bounds) return null
+    const translation = this.ownerTranslations.get(ownerHandle)
+    const gx = translation?.gx ?? 0
+    const gy = translation?.gy ?? 0
+    const gz = translation?.gz ?? 0
+    return {
+      minX: bounds.minGx + gx,
+      maxX: bounds.maxGx + gx,
+      minY: bounds.minGz + gz,
+      maxY: bounds.maxGz + gz,
+      minZ: bounds.minGy + gy,
+      maxZ: bounds.maxGy + gy,
+    }
+  }
+
   insertOwner(
     ownerId: string,
     voxels: Voxel[],
@@ -548,6 +572,7 @@ export class SceneOccupancyIndex {
     voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>,
     delta: Pick<Voxel, 'x' | 'y' | 'z'>,
     excludedOwnerIds: Iterable<string> = [],
+    movingBoundsOverride?: RuntimeVoxelBounds,
   ): boolean {
     const runtimeDelta = projectVoxelToRuntime(delta)
     const excluded = new Set(excludedOwnerIds)
@@ -558,7 +583,7 @@ export class SceneOccupancyIndex {
     // overlap. The narrow phase below remains exact at voxel resolution.
     if (excluded.size) {
       const cacheKey = voxels as object
-      let movingBounds = this.projectVoxelBoundsCache.get(cacheKey)
+      let movingBounds = movingBoundsOverride ?? this.projectVoxelBoundsCache.get(cacheKey)
       if (!movingBounds) {
         movingBounds = projectVoxelBounds(voxels)
         if (movingBounds) this.projectVoxelBoundsCache.set(cacheKey, movingBounds)
@@ -633,12 +658,33 @@ export class SceneOccupancyIndex {
     return parts.some((part) => {
       const rootOffset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
       const partOffset = part.partSceneOffset ?? { x: 0, y: 0, z: 0 }
+      const localBounds = this.ownerLocalRuntimeBounds(part.id, {
+        x: rootOffset.x + partOffset.x,
+        y: rootOffset.y + partOffset.y,
+        z: rootOffset.z + partOffset.z,
+      })
       return this.collidesTranslatedProjectVoxels(part.voxels, {
         x: delta.x + rootOffset.x + partOffset.x,
         y: delta.y + rootOffset.y + partOffset.y,
         z: delta.z + rootOffset.z + partOffset.z,
-      }, excludedOwnerIds)
+      }, excludedOwnerIds, localBounds)
     })
+  }
+
+  private ownerLocalRuntimeBounds(ownerId: string, projectOffset: Pick<Voxel, 'x' | 'y' | 'z'>): RuntimeVoxelBounds | undefined {
+    const ownerHandle = this.ownerIdToHandle.get(ownerId)
+    if (!ownerHandle) return undefined
+    const bounds = this.ownerBounds.get(ownerHandle)
+    if (!bounds) return undefined
+    const translation = this.ownerTranslations.get(ownerHandle)
+    return {
+      minGx: bounds.minGx + (translation?.gx ?? 0) - projectOffset.x,
+      maxGx: bounds.maxGx + (translation?.gx ?? 0) - projectOffset.x,
+      minGy: bounds.minGy + (translation?.gy ?? 0) - projectOffset.z,
+      maxGy: bounds.maxGy + (translation?.gy ?? 0) - projectOffset.z,
+      minGz: bounds.minGz + (translation?.gz ?? 0) - projectOffset.y,
+      maxGz: bounds.maxGz + (translation?.gz ?? 0) - projectOffset.y,
+    }
   }
 
   private registerOwner(ownerId: string): number {
