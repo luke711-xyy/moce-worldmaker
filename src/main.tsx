@@ -798,9 +798,31 @@ type AssetCategoryNode = {
 
 type ProjectHistoryEntry = {
   project: ProjectState
+  parts?: SceneEntityPart[]
   editEntityId: string | null
   selectedId: string
   checkedTreePartIds: string[]
+}
+
+function sameScenePartOffset(left: { x?: number; y?: number; z?: number } | undefined, right: { x?: number; y?: number; z?: number } | undefined): boolean {
+  return (left?.x ?? 0) === (right?.x ?? 0)
+    && (left?.y ?? 0) === (right?.y ?? 0)
+    && (left?.z ?? 0) === (right?.z ?? 0)
+}
+
+function changedOccupancyOwnerIds(currentParts: ReadonlyArray<SceneEntityPart>, targetParts: ReadonlyArray<SceneEntityPart>): Set<string> {
+  const currentById = new Map(currentParts.map((part) => [part.id, part]))
+  const changed = new Set<string>()
+  targetParts.forEach((part) => {
+    const current = currentById.get(part.id)
+    if (!current
+      || current.voxels !== part.voxels
+      || !sameScenePartOffset(current.sceneOffset, part.sceneOffset)
+      || !sameScenePartOffset(current.partSceneOffset, part.partSceneOffset)) changed.add(part.id)
+    currentById.delete(part.id)
+  })
+  currentById.forEach((part) => changed.add(part.id))
+  return changed
 }
 
 type VoxelStrokeTransaction = {
@@ -1088,6 +1110,13 @@ function App() {
   }
 
   const sceneParts = useMemo(() => sceneEntityParts(project), [project])
+  const makeHistoryEntry = (historyProject: ProjectState, historyParts = sceneParts): ProjectHistoryEntry => ({
+    project: historyProject,
+    parts: historyParts,
+    editEntityId,
+    selectedId,
+    checkedTreePartIds: [...checkedTreePartIds],
+  })
   useEffect(() => {
     // Editing is also a tree-selection state. Keep the checkbox invariant in
     // one place so a newly-created custom entity cannot render as selected
@@ -1344,7 +1373,7 @@ function App() {
     // full asset/voxel clone on pointer-up.
     const next = finalizeVoxelStrokeProject(transaction.draft)
     historyRef.current.past = [...historyRef.current.past, {
-      project: transaction.original,
+      ...makeHistoryEntry(transaction.original, initialParts),
       editEntityId: transaction.historyEditEntityId,
       selectedId: transaction.historySelectedId,
       checkedTreePartIds: [...transaction.historyCheckedTreePartIds],
@@ -1389,15 +1418,7 @@ function App() {
     const normalizedBase = normalizeStoredProject(next, { normalizeNaming: false })
     const normalizedNext = normalizeProjectNaming(normalizedBase, { clone: false })
     if (trackHistory) {
-      historyRef.current.past = [...historyRef.current.past, {
-        // `next` is structurally cloned before this commit, so the current
-        // root remains immutable and can be retained as the history snapshot.
-        // Cloning it here duplicated every asset voxel on every edit.
-        project: projectRef.current,
-        editEntityId,
-        selectedId,
-        checkedTreePartIds: [...checkedTreePartIds],
-      }].slice(-50)
+      historyRef.current.past = [...historyRef.current.past, makeHistoryEntry(projectRef.current)].slice(-50)
       historyRef.current.future = []
     }
     sceneOccupancyRef.current?.syncParts(sceneEntityParts(normalizedNext))
@@ -1408,15 +1429,7 @@ function App() {
   }
 
   const commitScenePartsMoveFast = (nextProject: ProjectState, movableParts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => {
-    historyRef.current.past = [...historyRef.current.past, {
-      // This path creates new instance/custom voxel arrays and leaves the
-      // previous project tree untouched, so the old root is a safe immutable
-      // history snapshot without cloning every asset voxel for undo.
-      project: projectRef.current,
-      editEntityId,
-      selectedId,
-      checkedTreePartIds: [...checkedTreePartIds],
-    }].slice(-50)
+    historyRef.current.past = [...historyRef.current.past, makeHistoryEntry(projectRef.current)].slice(-50)
     historyRef.current.future = []
     movableParts.forEach((part) => {
       // A move preserves the owner's topology. Let the occupancy index keep
@@ -1447,12 +1460,7 @@ function App() {
     // project and normalizeStoredProject() then walks every asset and voxel.
     // The project root and mutable scene arrays were prepared by the caller;
     // history can therefore retain the immutable previous root directly.
-    historyRef.current.past = [...historyRef.current.past, {
-      project: projectRef.current,
-      editEntityId,
-      selectedId,
-      checkedTreePartIds: [...checkedTreePartIds],
-    }].slice(-50)
+    historyRef.current.past = [...historyRef.current.past, makeHistoryEntry(projectRef.current)].slice(-50)
     historyRef.current.future = []
     removedPartIds.forEach((partId) => sceneOccupancyRef.current?.removeOwner(partId))
     resultGroups.forEach(({ entityId, voxels }) => sceneOccupancyRef.current?.replaceOwnerFromValidatedBatch(`custom:${entityId}`, voxels))
@@ -1796,15 +1804,11 @@ function App() {
       setNotice('没有可撤销的操作')
       return
     }
-    historyRef.current.future.push({
-      // Committed project roots are immutable; retain the current root instead
-      // of cloning the complete scene before every undo.
-      project: projectRef.current,
-      editEntityId,
-      selectedId,
-      checkedTreePartIds: [...checkedTreePartIds],
-    })
-    sceneOccupancyRef.current?.syncParts(sceneEntityParts(previous.project))
+    historyRef.current.future.push(makeHistoryEntry(projectRef.current))
+    const previousParts = previous.parts ?? sceneEntityParts(previous.project)
+    const changedOwnerIds = changedOccupancyOwnerIds(sceneParts, previousParts)
+    if (changedOwnerIds.size) sceneOccupancyRef.current?.syncOwnerParts(previousParts, changedOwnerIds)
+    skipSceneOccupancySyncRef.current = true
     projectRef.current = previous.project
     markSceneDirty()
     setProject(previous.project)
@@ -1821,15 +1825,11 @@ function App() {
       setNotice('没有可重做的操作')
       return
     }
-    historyRef.current.past.push({
-      // Committed project roots are immutable; retain the current root instead
-      // of cloning the complete scene before every redo.
-      project: projectRef.current,
-      editEntityId,
-      selectedId,
-      checkedTreePartIds: [...checkedTreePartIds],
-    })
-    sceneOccupancyRef.current?.syncParts(sceneEntityParts(next.project))
+    historyRef.current.past.push(makeHistoryEntry(projectRef.current))
+    const nextParts = next.parts ?? sceneEntityParts(next.project)
+    const changedOwnerIds = changedOccupancyOwnerIds(sceneParts, nextParts)
+    if (changedOwnerIds.size) sceneOccupancyRef.current?.syncOwnerParts(nextParts, changedOwnerIds)
+    skipSceneOccupancySyncRef.current = true
     projectRef.current = next.project
     markSceneDirty()
     setProject(next.project)
@@ -3772,7 +3772,7 @@ function App() {
     const normalizedNext = normalizeProjectNaming(normalizeStoredProject(unnormalizedNext, { normalizeNaming: false }), { clone: false })
     const newOwnerIds = new Set<string>([...createdCustomIds].map((entityId) => `custom:${entityId}`))
     sceneEntityParts(normalizedNext).filter((part) => part.instanceId && createdInstanceIds.has(part.instanceId)).forEach((part) => newOwnerIds.add(part.id))
-    historyRef.current.past = [...historyRef.current.past, { project: sourceProject, editEntityId, selectedId, checkedTreePartIds: [...checkedTreePartIds] }].slice(-50)
+    historyRef.current.past = [...historyRef.current.past, makeHistoryEntry(sourceProject)].slice(-50)
     historyRef.current.future = []
     sceneOccupancyRef.current?.syncOwnerParts(sceneEntityParts(normalizedNext), newOwnerIds)
     skipSceneOccupancySyncRef.current = true
@@ -4259,7 +4259,7 @@ function App() {
       if (baseColor) nextCustomColors[entityId] = adjustHexHsl(baseColor, hueDelta, saturationTarget)
     })
     const nextProject: ProjectState = { ...sourceProject, instances: nextInstances, customVoxels: nextCustomVoxels, customColors: nextCustomColors }
-    historyRef.current.past = [...historyRef.current.past, { project: sourceProject, editEntityId, selectedId, checkedTreePartIds: [...checkedTreePartIds] }].slice(-50)
+    historyRef.current.past = [...historyRef.current.past, makeHistoryEntry(sourceProject)].slice(-50)
     historyRef.current.future = []
     // Color changes do not alter occupancy. Avoid rehashing every scene voxel
     // while the inspector publishes the new material state.
@@ -4345,12 +4345,7 @@ function App() {
       sceneParts.filter((part) => part.instanceId === instanceId).forEach((part) => changedOwnerIds.add(part.id))
     })
     const nextProject: ProjectState = { ...sourceProject, customVoxels: nextCustomVoxels, instances: nextInstances }
-    historyRef.current.past = [...historyRef.current.past, {
-      project: sourceProject,
-      editEntityId,
-      selectedId,
-      checkedTreePartIds: [...checkedTreePartIds],
-    }].slice(-50)
+    historyRef.current.past = [...historyRef.current.past, makeHistoryEntry(sourceProject)].slice(-50)
     historyRef.current.future = []
     const nextParts = sceneEntityParts(nextProject)
     sceneOccupancyRef.current?.syncOwnerParts(nextParts, changedOwnerIds)
