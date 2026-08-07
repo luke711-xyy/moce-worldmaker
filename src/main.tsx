@@ -5892,6 +5892,20 @@ const voxelFaceDirections: Array<{ key: VoxelFaceKey; neighbor: [number, number,
   { key: 'nz', neighbor: [0, 0, -1], normal: [0, 0, -1] },
 ]
 
+const greedyColorCache = new Map<string, THREE.Color>()
+
+function cachedGreedyColor(value: string): THREE.Color {
+  const cached = greedyColorCache.get(value)
+  if (cached) return cached
+  const color = new THREE.Color(value)
+  greedyColorCache.set(value, color)
+  if (greedyColorCache.size > 128) {
+    const oldest = greedyColorCache.keys().next().value as string | undefined
+    if (oldest) greedyColorCache.delete(oldest)
+  }
+  return color
+}
+
 function exposedVoxelFaces(voxel: Pick<Voxel, 'x' | 'y' | 'z'>, occupied: Set<string>): VoxelFaceKey[] {
   return voxelFaceDirections.filter(({ neighbor: [dx, dy, dz] }) => !occupied.has(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`)).map(({ key }) => key)
 }
@@ -7172,17 +7186,30 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         const geometry = new THREE.BufferGeometry()
         geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
         geometry.setAttribute('normal', new THREE.BufferAttribute(payload.normals, 3, true))
-        const vertexColors = new Float32Array(payload.materialIds.length * 3)
-        payload.materialIds.forEach((materialId, index) => {
-          const color = new THREE.Color(colors[materialId] ?? '#6c827d')
-          vertexColors[index * 3] = color.r
-          vertexColors[index * 3 + 1] = color.g
-          vertexColors[index * 3 + 2] = color.b
-        })
-        geometry.setAttribute('color', new THREE.BufferAttribute(vertexColors, 3))
+        const hasMultipleColors = colors.length > 2
+        if (hasMultipleColors) {
+          // Parse each palette entry once. The previous loop constructed a
+          // THREE.Color for every vertex, which is particularly expensive for
+          // high-resolution imported meshes with hundreds of thousands of
+          // greedy vertices.
+          const parsedColors = colors.map(cachedGreedyColor)
+          const vertexColors = new Float32Array(payload.materialIds.length * 3)
+          payload.materialIds.forEach((materialId, index) => {
+            const color = parsedColors[materialId] ?? parsedColors[0]
+            vertexColors[index * 3] = color.r
+            vertexColors[index * 3 + 1] = color.g
+            vertexColors[index * 3 + 2] = color.b
+          })
+          geometry.setAttribute('color', new THREE.BufferAttribute(vertexColors, 3))
+        }
         geometry.setIndex(new THREE.BufferAttribute(payload.indices, 1))
         geometry.computeBoundingSphere()
-        const material = new THREE.MeshStandardMaterial({ color: '#ffffff', vertexColors: true, roughness: 0.72, metalness: 0.03 })
+        const material = new THREE.MeshStandardMaterial({
+          color: hasMultipleColors ? '#ffffff' : (colors[1] ?? colors[0] ?? '#6c827d'),
+          vertexColors: hasMultipleColors,
+          roughness: 0.72,
+          metalness: 0.03,
+        })
         configureGreedyPreviewMaterial(material)
         const greedyMesh = new THREE.Mesh(geometry, material)
         greedyMesh.userData.scenePartId = scenePartId
