@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxels, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceLocalVoxelToSceneVoxelFast, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxels, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
@@ -332,6 +332,25 @@ describe('莫测造境体素核心数据', () => {
     const sceneVoxel = instanceLocalVoxelToSceneVoxel(instance, asset, localVoxel)
     expect(sceneVoxel).toBeDefined()
     expect(findInstanceVoxelAtSceneVoxel(instance, asset, sceneVoxel!)).toEqual(expect.objectContaining({ x: localVoxel.x, y: localVoxel.y, z: localVoxel.z }))
+  })
+
+  it('converts a raycast voxel in O(1) when its rendered part id is known', () => {
+    const project = makeDefaultProject()
+    const asset = project.assets.find((item) => item.id === 'house-chinese')!
+    const instance = {
+      ...project.instances[0],
+      assetId: asset.id,
+      x: snapAssetOrigin(3, asset.width),
+      z: snapAssetOrigin(-2, asset.depth),
+      rotation: 90,
+      rotationX: 90,
+      rotationY: 180,
+      mirror: { x: true, y: false, z: true },
+    }
+    const component = resolveInstanceComponents(asset, instance.overrides)[0]
+    const localVoxel = component.voxels[Math.min(3, component.voxels.length - 1)]
+    expect(instanceLocalVoxelToSceneVoxelFast(instance, asset, localVoxel, component.partId))
+      .toEqual(instanceLocalVoxelToSceneVoxel(instance, asset, localVoxel))
   })
 
   it('groups only face-connected voxels into one draggable component', () => {

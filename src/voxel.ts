@@ -570,28 +570,30 @@ function rotateSceneVector(vector: { x: number; y: number; z: number }, rotation
   return { x: cz * afterY.x - sz * afterY.y, y: sz * afterY.x + cz * afterY.y, z: afterY.z }
 }
 
-function resolveInstanceComponentSceneVoxels(instance: SceneInstance, asset: VoxelAsset, component: Voxel[], componentId = voxelComponentId(component), x = instance.x, z = instance.z, y = instance.y ?? 0): Voxel[] {
+function resolveInstanceComponentSceneVoxel(instance: SceneInstance, asset: VoxelAsset, voxel: Voxel, componentId: string, x = instance.x, z = instance.z, y = instance.y ?? 0): Voxel {
   const offset = instance.partOffsets?.[componentId] ?? { x: 0, y: 0, z: 0 }
   const mirror = instance.mirror ?? { x: false, y: false, z: false }
   const rotationX = (instance.rotationX ?? 0) * Math.PI / 180
   const rotationY = (instance.rotationY ?? 0) * Math.PI / 180
   const rotationZ = -(instance.rotation + (instance.rotationZ ?? 0)) * Math.PI / 180
-  return component.map((voxel) => {
-    const localXIndex = mirror.x ? asset.width - 1 - voxel.x : voxel.x
-    const localYIndex = mirror.z ? asset.height - 1 - voxel.y : voxel.y
-    const localZIndex = mirror.y ? asset.depth - 1 - voxel.z : voxel.z
-    const local = rotateSceneVector({
-      x: (localXIndex + 0.5 - asset.width / 2) * VOXEL_WORLD_SIZE + (mirror.x ? -offset.x : offset.x),
-      y: (localZIndex + 0.5 - asset.depth / 2) * VOXEL_WORLD_SIZE + (mirror.y ? -offset.z : offset.z),
-      z: (localYIndex + 0.5) * VOXEL_WORLD_SIZE + (mirror.z ? -offset.y : offset.y),
-    }, rotationX, rotationY, rotationZ)
-    return {
-      ...voxel,
-      x: worldToVoxelCenter(x + local.x),
-      y: Math.round((local.z + y) / VOXEL_WORLD_SIZE - 0.5),
-      z: worldToVoxelCenter(z + local.y),
-    }
-  })
+  const localXIndex = mirror.x ? asset.width - 1 - voxel.x : voxel.x
+  const localYIndex = mirror.z ? asset.height - 1 - voxel.y : voxel.y
+  const localZIndex = mirror.y ? asset.depth - 1 - voxel.z : voxel.z
+  const local = rotateSceneVector({
+    x: (localXIndex + 0.5 - asset.width / 2) * VOXEL_WORLD_SIZE + (mirror.x ? -offset.x : offset.x),
+    y: (localZIndex + 0.5 - asset.depth / 2) * VOXEL_WORLD_SIZE + (mirror.y ? -offset.z : offset.z),
+    z: (localYIndex + 0.5) * VOXEL_WORLD_SIZE + (mirror.z ? -offset.y : offset.y),
+  }, rotationX, rotationY, rotationZ)
+  return {
+    ...voxel,
+    x: worldToVoxelCenter(x + local.x),
+    y: Math.round((local.z + y) / VOXEL_WORLD_SIZE - 0.5),
+    z: worldToVoxelCenter(z + local.y),
+  }
+}
+
+function resolveInstanceComponentSceneVoxels(instance: SceneInstance, asset: VoxelAsset, component: Voxel[], componentId = voxelComponentId(component), x = instance.x, z = instance.z, y = instance.y ?? 0): Voxel[] {
+  return component.map((voxel) => resolveInstanceComponentSceneVoxel(instance, asset, voxel, componentId, x, z, y))
 }
 
 export function resolveInstanceSceneVoxels(instance: SceneInstance, asset: VoxelAsset, x = instance.x, z = instance.z, y = instance.y ?? 0): Voxel[] {
@@ -606,6 +608,16 @@ export function instanceLocalVoxelToSceneVoxel(instance: SceneInstance, asset: V
     return resolveInstanceComponentSceneVoxels(instance, asset, voxels, partId)[localIndex]
   }
   return undefined
+}
+
+/**
+ * Convert a raycast voxel using the part ID already attached to the rendered
+ * mesh. Unlike instanceLocalVoxelToSceneVoxel(), this does not resolve or
+ * scan the complete asset; it is intended for pointer hits on large imported
+ * models and is therefore O(1) with respect to the model voxel count.
+ */
+export function instanceLocalVoxelToSceneVoxelFast(instance: SceneInstance, asset: VoxelAsset, localVoxel: Voxel, componentId: string): Voxel {
+  return resolveInstanceComponentSceneVoxel(instance, asset, localVoxel, componentId)
 }
 
 type CachedAssetSceneParts = {

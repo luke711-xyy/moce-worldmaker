@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, instanceLocalVoxelToSceneVoxelFast, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, loadScenePreview, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
@@ -2155,7 +2155,13 @@ function App() {
     // edits to the template asset (name, color, or geometry) leak into entities
     // that already exist in the scene.
     const sceneAsset: VoxelAsset = {
-      ...structuredClone(asset),
+      // Asset voxel arrays are treated as immutable throughout ProjectState.
+      // Share the read-only topology when creating a scene snapshot instead
+      // of structured-cloning every voxel on the pointer-up path; subsequent
+      // updateProject() calls clone the project before any mutation.
+      ...asset,
+      parts: asset.parts ? [...asset.parts] : asset.parts,
+      partVoxels: asset.partVoxels ? { ...asset.partVoxels } : asset.partVoxels,
       id: `scene-asset-${instanceId}`,
       source: asset.isTemplate === true ? '资产库实例快照' : (asset.source ?? '场景实体实例快照'),
       isTemplate: false,
@@ -3801,6 +3807,42 @@ function App() {
   }
 
   const selectedColor = scenePartsDisplayColor(project, selectedEntityParts, selectedAsset)
+  const previewColorSignature = useMemo(() => {
+    const base = selectedEntityParts[0]
+      ? {
+          x: (selectedEntityParts[0].sceneOffset?.x ?? 0) + (selectedEntityParts[0].partSceneOffset?.x ?? 0),
+          y: (selectedEntityParts[0].sceneOffset?.y ?? 0) + (selectedEntityParts[0].partSceneOffset?.y ?? 0),
+          z: (selectedEntityParts[0].sceneOffset?.z ?? 0) + (selectedEntityParts[0].partSceneOffset?.z ?? 0),
+        }
+      : { x: 0, y: 0, z: 0 }
+    const materialSignature = project.materials.map((material) => `${material.id}:${material.color}`).join(';')
+    const partSignature = selectedEntityParts.map((part) => {
+      const instance = part.instanceId ? project.instances.find((item) => item.id === part.instanceId) : undefined
+      const asset = instance ? project.assets.find((item) => item.id === instance.assetId) : undefined
+      const offset = {
+        x: (part.sceneOffset?.x ?? 0) + (part.partSceneOffset?.x ?? 0) - base.x,
+        y: (part.sceneOffset?.y ?? 0) + (part.partSceneOffset?.y ?? 0) - base.y,
+        z: (part.sceneOffset?.z ?? 0) + (part.partSceneOffset?.z ?? 0) - base.z,
+      }
+      return [
+        part.id,
+        previewVoxelArrayId(part.voxels),
+        part.voxels.length,
+        offset.x,
+        offset.y,
+        offset.z,
+        part.colorOverride ?? '',
+        part.kind === 'custom' ? project.customColors?.[part.partId] ?? '' : '',
+        instance?.colorOverride ?? '',
+        instance?.overrides?.length ?? 0,
+        asset?.id ?? '',
+        asset?.templateColor ?? '',
+        asset?.color ?? '',
+        asset?.accent ?? '',
+      ].join(':')
+    }).join('|')
+    return `${materialSignature}|${partSignature}`
+  }, [project.assets, project.customColors, project.instances, project.materials, selectedEntityParts])
   const previewVoxelColors = useMemo(() => {
     // A single selected entity already carries its color/material fallback in
     // the preview props. Building a coordinate -> color entry for every voxel
@@ -3812,19 +3854,34 @@ function App() {
     // rerun the full face/occupancy pass on every move release.
     if (selectedEntityParts.length <= 1) return EMPTY_PREVIEW_COLORS
     const colors: Record<string, string> = {}
+    const base = selectedEntityParts[0]
+      ? {
+          x: (selectedEntityParts[0].sceneOffset?.x ?? 0) + (selectedEntityParts[0].partSceneOffset?.x ?? 0),
+          y: (selectedEntityParts[0].sceneOffset?.y ?? 0) + (selectedEntityParts[0].partSceneOffset?.y ?? 0),
+          z: (selectedEntityParts[0].sceneOffset?.z ?? 0) + (selectedEntityParts[0].partSceneOffset?.z ?? 0),
+        }
+      : { x: 0, y: 0, z: 0 }
     selectedEntityParts.forEach((part) => {
       const instance = part.instanceId ? project.instances.find((item) => item.id === part.instanceId) : undefined
       const asset = instance ? project.assets.find((item) => item.id === instance.assetId) : undefined
+      const offset = {
+        x: (part.sceneOffset?.x ?? 0) + (part.partSceneOffset?.x ?? 0) - base.x,
+        y: (part.sceneOffset?.y ?? 0) + (part.partSceneOffset?.y ?? 0) - base.y,
+        z: (part.sceneOffset?.z ?? 0) + (part.partSceneOffset?.z ?? 0) - base.z,
+      }
       // Match buildAssetGroup's precedence: an instance override, template
       // color, or custom-entity color is applied to every voxel, including
       // voxels whose materialId is ivory/gold/etc. Only an ordinary asset with
       // no whole-entity color uses its material colors below.
       const wholeEntityColor = part.colorOverride ?? asset?.templateColor ?? (part.kind === 'custom' ? project.customColors?.[part.partId] : undefined)
       const primaryColor = wholeEntityColor ?? asset?.color
-      scenePartVoxels(part).forEach((voxel) => {
-        const key = `${voxel.x},${voxel.y},${voxel.z}`
-        const paintedColor = voxel.paintMaterialId
-          ? materialColorForVoxel(project, { ...voxel, materialId: voxel.paintMaterialId }, asset)
+      part.voxels.forEach((voxel) => {
+        const previewVoxel = offset.x || offset.y || offset.z
+          ? { ...voxel, x: voxel.x + offset.x, y: voxel.y + offset.y, z: voxel.z + offset.z }
+          : voxel
+        const key = `${previewVoxel.x},${previewVoxel.y},${previewVoxel.z}`
+        const paintedColor = previewVoxel.paintMaterialId
+          ? materialColorForVoxel(project, { ...previewVoxel, materialId: previewVoxel.paintMaterialId }, asset)
           : undefined
         if (paintedColor) colors[key] = paintedColor
         else if (wholeEntityColor) colors[key] = wholeEntityColor
@@ -3835,7 +3892,7 @@ function App() {
       })
     })
     return colors
-  }, [project, selectedEntityParts])
+  }, [previewColorSignature])
   const previewMaterialColors = useMemo(() => Object.fromEntries(project.materials.map((material) => [material.id, material.color])), [project.materials])
   const changeSelectedColor = (color: string) => {
     cancelColorPreview()
@@ -4453,20 +4510,47 @@ function previewVoxelArrayId(voxels: Voxel[]): number {
 }
 
 function previewPartsSignature(parts: SceneEntityPart[]): string {
+  const base = parts[0]
+    ? {
+        x: (parts[0].sceneOffset?.x ?? 0) + (parts[0].partSceneOffset?.x ?? 0),
+        y: (parts[0].sceneOffset?.y ?? 0) + (parts[0].partSceneOffset?.y ?? 0),
+        z: (parts[0].sceneOffset?.z ?? 0) + (parts[0].partSceneOffset?.z ?? 0),
+      }
+    : { x: 0, y: 0, z: 0 }
   return parts.map((part) => {
-    const offset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
-    return `${part.id}:${previewVoxelArrayId(part.voxels)}:${offset.x},${offset.y},${offset.z}`
+    const offset = {
+      x: (part.sceneOffset?.x ?? 0) + (part.partSceneOffset?.x ?? 0) - base.x,
+      y: (part.sceneOffset?.y ?? 0) + (part.partSceneOffset?.y ?? 0) - base.y,
+      z: (part.sceneOffset?.z ?? 0) + (part.partSceneOffset?.z ?? 0) - base.z,
+    }
+    return `${part.id}:${previewVoxelArrayId(part.voxels)}:${part.voxels.length}:${offset.x},${offset.y},${offset.z}`
   }).join('|')
 }
 
 function previewVoxelsForParts(parts: SceneEntityPart[]): Voxel[] {
-  if (parts.length === 1) {
-    // A uniform scene translation does not change the shape shown in the
-    // inspector. Keep the canonical array so a large moved entity does not
-    // allocate a second full voxel array just for its thumbnail.
-    return parts[0].voxels
+  if (!parts.length) return []
+  // Inspector previews describe shape, not world position. Remove the
+  // common scene translation so moving a large multi-part entity does not
+  // allocate/map every voxel again merely because its position changed.
+  const base = {
+    x: (parts[0].sceneOffset?.x ?? 0) + (parts[0].partSceneOffset?.x ?? 0),
+    y: (parts[0].sceneOffset?.y ?? 0) + (parts[0].partSceneOffset?.y ?? 0),
+    z: (parts[0].sceneOffset?.z ?? 0) + (parts[0].partSceneOffset?.z ?? 0),
   }
-  return parts.flatMap((part) => scenePartVoxels(part))
+  return parts.flatMap((part) => {
+    const offset = {
+      x: (part.sceneOffset?.x ?? 0) + (part.partSceneOffset?.x ?? 0) - base.x,
+      y: (part.sceneOffset?.y ?? 0) + (part.partSceneOffset?.y ?? 0) - base.y,
+      z: (part.sceneOffset?.z ?? 0) + (part.partSceneOffset?.z ?? 0) - base.z,
+    }
+    if (!offset.x && !offset.y && !offset.z) return part.voxels
+    return part.voxels.map((voxel) => ({
+      ...voxel,
+      x: voxel.x + offset.x,
+      y: voxel.y + offset.y,
+      z: voxel.z + offset.z,
+    }))
+  })
 }
 
 function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSceneProject, onClose, onImportScene, onLoadScene, onSelectScene, onSaveSceneEntity, onAddSceneEntityToCurrentScene, onDeleteSceneEntity, contextMenu, onContextMenu, onCloseContextMenu, onDuplicateScene, onDeleteScene }: { library: LibraryResponse; busy: boolean; error: string | null; selectedSceneId: string | null; selectedSceneProject: ProjectState | null; onClose: () => void; onImportScene: () => void; onLoadScene: (id: string, name: string) => void; onSelectScene: (id: string, name: string, x: number, y: number) => void; onSaveSceneEntity: (asset: VoxelAsset) => void; onAddSceneEntityToCurrentScene: (asset: VoxelAsset) => void; onDeleteSceneEntity: (sceneId: string, entity: SceneLibraryEntity) => void | Promise<void>; contextMenu: SceneLibraryContextMenuState; onContextMenu: (sceneId: string, x: number, y: number) => void; onCloseContextMenu: () => void; onDuplicateScene: (sceneId: string, name: string) => void; onDeleteScene: (sceneId: string, name: string) => void }) {
@@ -7156,6 +7240,8 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
     }
     const instance = project.instances.find((candidate) => candidate.id === instanceId)
     const asset = instance ? project.assets.find((candidate) => candidate.id === instance.assetId) : undefined
+    const componentId = hit.object.userData.instancePartId as string | undefined
+    if (instance && asset && componentId) return instanceLocalVoxelToSceneVoxelFast(instance, asset, localVoxel, componentId)
     return instance && asset ? instanceLocalVoxelToSceneVoxel(instance, asset, localVoxel) : undefined
   }
 
