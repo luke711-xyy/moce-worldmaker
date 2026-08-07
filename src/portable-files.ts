@@ -1,5 +1,5 @@
 import { MoceSceneFile, parseSceneFile } from './scene-file'
-import { AssetAssembly, SceneAssembly, SceneEntityPart, Voxel, VoxelAsset, ProjectState, makeAssetFromSceneParts, normalizeAssetCategoryPath, voxelBounds } from './voxel'
+import { AssetAssembly, SceneAssembly, SceneEntityPart, Voxel, VoxelAsset, ProjectState, makeAssetFromSceneParts, normalizeAssetCategoryPath, scenePartVoxels, voxelBounds } from './voxel'
 
 export const MOCE_ASSET_FORMAT = 'moce-asset' as const
 export const MOCE_ENTITY_FORMAT = 'moce-entity' as const
@@ -186,7 +186,8 @@ export function createEntityFile(project: ProjectState, parts: SceneEntityPart[]
     const exportParts = voxelColorResolver
       ? groupParts.map((part) => ({
         ...part,
-        voxels: part.voxels.map((voxel) => {
+        sceneOffset: undefined,
+        voxels: scenePartVoxels(part).map((voxel) => {
           const color = voxelColorResolver(voxel, part)
           return /^#[0-9a-f]{6}$/i.test(color)
             ? { ...voxel, paintMaterialId: color }
@@ -194,7 +195,7 @@ export function createEntityFile(project: ProjectState, parts: SceneEntityPart[]
         }),
       }))
       : groupParts
-    const sourceVoxels = exportParts.flatMap((part) => part.voxels)
+    const sourceVoxels = exportParts.flatMap((part) => scenePartVoxels(part))
     if (!sourceVoxels.length) continue
     const bounds = voxelBounds(sourceVoxels)!
     const minX = bounds.min.x
@@ -211,7 +212,7 @@ export function createEntityFile(project: ProjectState, parts: SceneEntityPart[]
     asset.templateColor = entityColor
     const partVoxels: Record<string, Voxel[]> = {}
     exportParts.forEach((part, index) => {
-      partVoxels[`part-${index + 1}`] = part.voxels.map((voxel) => ({ x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ, materialId: voxel.materialId, ...(voxel.paintMaterialId ? { paintMaterialId: voxel.paintMaterialId } : {}) }))
+      partVoxels[`part-${index + 1}`] = scenePartVoxels(part).map((voxel) => ({ x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ, materialId: voxel.materialId, ...(voxel.paintMaterialId ? { paintMaterialId: voxel.paintMaterialId } : {}) }))
     })
     asset.parts = Object.keys(partVoxels)
     asset.partVoxels = partVoxels

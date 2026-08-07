@@ -1,4 +1,4 @@
-import { SceneEntityPart, Voxel } from '../voxel'
+import { SceneEntityPart, Voxel, scenePartVoxels } from '../voxel'
 import {
   projectVoxelToRuntime,
   RUNTIME_CHUNK_VOLUME,
@@ -79,7 +79,7 @@ export class SceneOccupancyIndex {
 
   static fromParts(parts: SceneEntityPart[]): SceneOccupancyIndex {
     const index = new SceneOccupancyIndex()
-    parts.forEach((part) => index.insertOwner(part.id, part.voxels))
+    parts.forEach((part) => index.insertOwner(part.id, scenePartVoxels(part)))
     return index
   }
 
@@ -192,7 +192,7 @@ export class SceneOccupancyIndex {
   }
 
   syncParts(parts: SceneEntityPart[]): OccupancySyncResult {
-    const incoming = new Map(parts.map((part) => [part.id, part.voxels]))
+    const incoming = new Map(parts.map((part) => [part.id, scenePartVoxels(part)]))
     const result: OccupancySyncResult = { inserted: 0, updated: 0, removed: 0, unchanged: 0 }
     for (const ownerId of [...this.ownerIdToHandle.keys()]) {
       if (incoming.has(ownerId)) continue

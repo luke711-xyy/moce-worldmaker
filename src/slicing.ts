@@ -1,4 +1,4 @@
-import { SceneEntityPart, Voxel, VoxelAsset } from './voxel'
+import { SceneEntityPart, Voxel, VoxelAsset, scenePartVoxels } from './voxel'
 
 export type SlicePlane = 'xy' | 'xz' | 'yz'
 
@@ -36,7 +36,7 @@ export function sliceEntityParts(parts: SceneEntityPart[], plane: SlicePlane, re
     maxV: Number.NEGATIVE_INFINITY,
   }
   parts.forEach((part) => {
-    part.voxels.forEach((voxel) => {
+    scenePartVoxels(part).forEach((voxel) => {
       const coordinates = planeCoordinates(plane, voxel)
       overallBounds.minU = Math.min(overallBounds.minU, coordinates.u)
       overallBounds.maxU = Math.max(overallBounds.maxU, coordinates.u)

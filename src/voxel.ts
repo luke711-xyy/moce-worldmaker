@@ -139,7 +139,32 @@ export type SceneEntityPart = {
   colorOverride?: string
   /** Original voxel count when a read-only preview keeps only a sampled LOD. */
   sourceVoxelCount?: number
+  /**
+   * Scene-space translation in voxel units for cached asset topology.
+   * Asset parts keep their canonical voxel array so a pure instance move does
+   * not allocate/map the whole model again. Use scenePartVoxels() whenever
+   * actual scene coordinates are required.
+   */
+  sceneOffset?: { x: number; y: number; z: number }
   voxels: Voxel[]
+}
+
+const scenePartVoxelCache = new WeakMap<SceneEntityPart, { key: string; voxels: Voxel[] }>()
+
+export function scenePartVoxels(part: SceneEntityPart): Voxel[] {
+  const offset = part.sceneOffset
+  if (!offset || (!offset.x && !offset.y && !offset.z)) return part.voxels
+  const key = `${offset.x},${offset.y},${offset.z}`
+  const cached = scenePartVoxelCache.get(part)
+  if (cached?.key === key) return cached.voxels
+  const voxels = part.voxels.map((voxel) => ({
+    ...voxel,
+    x: voxel.x + offset.x,
+    y: voxel.y + offset.y,
+    z: voxel.z + offset.z,
+  }))
+  scenePartVoxelCache.set(part, { key, voxels })
+  return voxels
 }
 
 export function uniqueAssetName(assets: VoxelAsset[], requestedName: string): string {
@@ -163,7 +188,7 @@ export function uniqueTemplateAssetName(assets: VoxelAsset[], requestedName: str
 }
 
 export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEntityPart[], color = '#6c827d', accent = '#d2a354', materialIdResolver?: (voxel: Voxel, part: SceneEntityPart) => string): VoxelAsset {
-  const sourceVoxels = parts.flatMap((part) => part.voxels.map((voxel) => ({
+  const sourceVoxels = parts.flatMap((part) => scenePartVoxels(part).map((voxel) => ({
     ...voxel,
     materialId: materialIdResolver ? materialIdResolver(voxel, part) : voxel.materialId,
   })))
@@ -564,28 +589,6 @@ function sceneAssemblySignature(assemblies: SceneAssembly[]): string {
   return assemblies.map((assembly) => `${assembly.id}:${assembly.memberKeys.join(',')}`).join('|')
 }
 
-function sceneInstanceSignature(instance: SceneInstance): string {
-  const overrides = (instance.overrides ?? []).map((voxel) => `${voxel.x},${voxel.y},${voxel.z},${voxel.materialId},${voxel.paintMaterialId ?? ''},${voxel.mode ?? 'add'}`).join(';')
-  const offsets = Object.entries(instance.partOffsets ?? {}).sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => `${key}:${value.x},${value.y},${value.z}`).join(';')
-  const mirror = instance.mirror ? `${instance.mirror.x ? 1 : 0}${instance.mirror.y ? 1 : 0}${instance.mirror.z ? 1 : 0}` : ''
-  return [
-    instance.assetId,
-    instance.visible ? '1' : '0',
-    instance.x,
-    instance.y ?? 0,
-    instance.z,
-    instance.rotation,
-    instance.rotationX ?? 0,
-    instance.rotationY ?? 0,
-    instance.rotationZ ?? 0,
-    instance.style,
-    instance.colorOverride ?? '',
-    mirror,
-    offsets,
-    overrides,
-  ].join('|')
-}
-
 /**
  * Signature for render geometry only. Instance position is applied to the
  * Three.js group and must not invalidate the voxel mesh cache.
@@ -607,6 +610,20 @@ export function sceneInstanceRenderSignature(instance: SceneInstance): string {
     offsets,
     overrides,
   ].join('|')
+}
+
+function sceneInstanceVoxelOffset(instance: SceneInstance, asset: VoxelAsset): { x: number; y: number; z: number } {
+  const canonicalX = snapAssetOrigin(0, asset.width)
+  const canonicalZ = snapAssetOrigin(0, asset.depth)
+  return {
+    x: assetOriginGridCoordinate(instance.x, asset.width) - assetOriginGridCoordinate(canonicalX, asset.width),
+    y: worldToVoxel(instance.y ?? 0),
+    z: assetOriginGridCoordinate(instance.z, asset.depth) - assetOriginGridCoordinate(canonicalZ, asset.depth),
+  }
+}
+
+function sameSceneOffset(left: { x: number; y: number; z: number } | undefined, right: { x: number; y: number; z: number }): boolean {
+  return Boolean(left && left.x === right.x && left.y === right.y && left.z === right.z)
 }
 
 export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
@@ -655,18 +672,28 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
     const asset = assetMap.get(instance.assetId)
     if (!asset) continue
     retainedInstanceIds.add(instance.id)
-    const signature = sceneInstanceSignature(instance)
+    const signature = sceneInstanceRenderSignature(instance)
     const cached = cache.assetParts.get(instance.id)
+    const sceneOffset = sceneInstanceVoxelOffset(instance, asset)
     if (!cached || cached.asset !== asset || cached.signature !== signature) {
       const nextParts: SceneEntityPart[] = []
-      for (const { partId, voxels: component } of resolveInstanceComponents(asset, instance.overrides ?? [])) {
-        const sceneVoxels = resolveInstanceComponentSceneVoxels(instance, asset, component, partId)
+      const canonicalX = snapAssetOrigin(0, asset.width)
+      const canonicalZ = snapAssetOrigin(0, asset.depth)
+      const canonicalInstance = { ...instance, x: canonicalX, y: 0, z: canonicalZ }
+      for (const { partId, voxels: component } of resolveInstanceComponents(asset, canonicalInstance.overrides ?? [])) {
+        const sceneVoxels = resolveInstanceComponentSceneVoxels(canonicalInstance, asset, component, partId)
         const label = partId.split('#')[0]
         const memberKey = `asset:${instance.id}:${partId}`
         const assemblyIds = assemblyPathForMemberKey(memberKey)
-        nextParts.push({ id: `asset:${instance.id}:${partId}`, kind: 'asset', instanceId: instance.id, partId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label, colorOverride: instance.colorOverride, voxels: sceneVoxels })
+        nextParts.push({ id: `asset:${instance.id}:${partId}`, kind: 'asset', instanceId: instance.id, partId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label, colorOverride: instance.colorOverride, sceneOffset, voxels: sceneVoxels })
       }
       cache.assetParts.set(instance.id, { asset, signature, parts: nextParts })
+    } else {
+      // Keep the canonical voxel topology and refresh only the small offset
+      // object when the instance position changes.
+      if (!cached.parts.every((part) => sameSceneOffset(part.sceneOffset, sceneOffset))) {
+        cached.parts = cached.parts.map((part) => ({ ...part, sceneOffset }))
+      }
     }
     parts.push(...(cache.assetParts.get(instance.id)?.parts ?? []))
   }
@@ -897,7 +924,7 @@ export function sceneAssemblies(parts: SceneEntityPart[], options: { includeCont
     }
   })
   const occupied = new Map<string, number[]>()
-  if (options.includeContacts !== false) parts.forEach((part, partIndex) => part.voxels.forEach((voxel) => {
+  if (options.includeContacts !== false) parts.forEach((part, partIndex) => scenePartVoxels(part).forEach((voxel) => {
     const key = voxelKey(voxel)
     occupied.set(key, [...(occupied.get(key) ?? []), partIndex])
   }))
@@ -906,7 +933,7 @@ export function sceneAssemblies(parts: SceneEntityPart[], options: { includeCont
     [voxel.x, voxel.y + 1, voxel.z], [voxel.x, voxel.y - 1, voxel.z],
     [voxel.x, voxel.y, voxel.z + 1], [voxel.x, voxel.y, voxel.z - 1],
   ]
-  parts.forEach((part, partIndex) => part.voxels.forEach((voxel) => {
+  parts.forEach((part, partIndex) => scenePartVoxels(part).forEach((voxel) => {
     for (const key of [voxelKey(voxel), ...neighbors(voxel).map(([x, y, z]) => `${x},${y},${z}`)]) {
       for (const otherIndex of occupied.get(key) ?? []) join(partIndex, otherIndex)
     }

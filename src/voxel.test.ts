@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceRenderSignature, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceRenderSignature, scenePartVoxels, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
@@ -48,6 +48,36 @@ describe('莫测造境体素核心数据', () => {
     }
     const secondParts = sceneEntityParts(movedProject)
     expect(secondParts.find((part) => part.id === stablePart.id)?.voxels).toBe(stablePart.voxels)
+  })
+
+  it('keeps asset topology canonical while resolving moved scene coordinates lazily', () => {
+    const project = makeDefaultProject()
+    const instance = project.instances[0]
+    const originalPart = sceneEntityParts(project).find((part) => part.instanceId === instance.id)!
+    const originalSceneVoxels = scenePartVoxels(originalPart)
+    const movedProject = {
+      ...project,
+      instances: project.instances.map((candidate, index) => index === 0
+        ? { ...candidate, x: candidate.x + 1.2, y: (candidate.y ?? 0) + 0.4, z: candidate.z - 0.7 }
+        : candidate),
+    }
+    const movedPart = sceneEntityParts(movedProject).find((part) => part.id === originalPart.id)!
+    expect(movedPart.voxels).toBe(originalPart.voxels)
+    expect(movedPart.sceneOffset).toBeDefined()
+    const movedSceneVoxels = scenePartVoxels(movedPart)
+    expect(movedSceneVoxels).toHaveLength(originalSceneVoxels.length)
+    const offset = movedPart.sceneOffset!
+    const canonicalVoxel = movedPart.voxels[0]
+    expect(movedSceneVoxels[0]).toEqual({
+      ...canonicalVoxel,
+      x: canonicalVoxel.x + offset.x,
+      y: canonicalVoxel.y + offset.y,
+      z: canonicalVoxel.z + offset.z,
+    })
+    expect(movedSceneVoxels[0].x - originalSceneVoxels[0].x).toBe(12)
+    expect(movedSceneVoxels[0].y - originalSceneVoxels[0].y).toBe(4)
+    expect(movedSceneVoxels[0].z - originalSceneVoxels[0].z).toBe(-7)
+    expect(movedSceneVoxels).not.toEqual(originalSceneVoxels)
   })
 
   it('keeps a pure instance move out of the render geometry signature', () => {

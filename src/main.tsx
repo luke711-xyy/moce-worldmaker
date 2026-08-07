@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceRenderSignature, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceRenderSignature, scenePartVoxels, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, loadScenePreview, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
@@ -309,7 +309,7 @@ function materialColorForVoxel(project: ProjectState, voxel: Voxel, asset?: Voxe
 
 function scenePartsDisplayColor(project: ProjectState, parts: SceneEntityPart[], asset?: VoxelAsset): string {
   const firstPart = parts[0]
-  const firstVoxel = firstPart?.voxels[0]
+  const firstVoxel = firstPart ? scenePartVoxels(firstPart)[0] : undefined
   return firstPart && firstVoxel
     ? scenePartVoxelDisplayColor(project, firstPart, firstVoxel)
     : asset?.templateColor ?? asset?.color ?? '#6c827d'
@@ -1025,7 +1025,7 @@ function App() {
     const instance = project.instances.find((candidate) => candidate.id === part.instanceId)
     return `${part.id}:${instance ? sceneInstanceRenderSignature(instance) : ''}`
   }).join('|')
-  const geometrySourceVoxels = useMemo<GeometryVoxel[]>(() => selectedEntityParts.flatMap((part) => part.voxels.map((voxel) => ({
+  const geometrySourceVoxels = useMemo<GeometryVoxel[]>(() => selectedEntityParts.flatMap((part) => scenePartVoxels(part).map((voxel) => ({
     ...voxel,
     // Geometry operations write back as editable scene voxels. Resolve the
     // display color here so an asset's primary/accent palette cannot collapse
@@ -1033,7 +1033,7 @@ function App() {
     materialId: scenePartVoxelDisplayColor(project, part, voxel),
     sourcePartId: part.id,
   }))), [selectedEntityPartsKey, selectedGeometryStateKey, project.assets, project.customVoxels, project.customColors, project.materials])
-  const currentGeometrySourceVoxels = () => selectedEntityParts.flatMap((part) => part.voxels.map((voxel) => ({
+  const currentGeometrySourceVoxels = () => selectedEntityParts.flatMap((part) => scenePartVoxels(part).map((voxel) => ({
     ...voxel,
     materialId: scenePartVoxelDisplayColor(projectRef.current, part, voxel),
     sourcePartId: part.id,
@@ -1617,7 +1617,7 @@ function App() {
     const assetNeighbor = activeEditEntityId
       ? currentParts.find((part) => part.kind === 'asset'
         && (part.id === activeEditEntityId || Boolean(editAssemblyId && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(editAssemblyId)))
-        && part.voxels.some((candidate) => neighbors.some((neighbor) => sceneVoxelKey(candidate) === sceneVoxelKey(neighbor))))
+        && scenePartVoxels(part).some((candidate) => neighbors.some((neighbor) => sceneVoxelKey(candidate) === sceneVoxelKey(neighbor))))
       : undefined
     if (editAssemblyId) {
       const entityId = voxelStrokeEntityRef.current ?? `voxel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -1635,7 +1635,7 @@ function App() {
     if (assetNeighbor?.instanceId && activeEditEntityId) {
       const instance = currentProject.instances.find((item) => item.id === assetNeighbor.instanceId)
       const asset = instance ? currentProject.assets.find((item) => item.id === instance.assetId) : undefined
-      const sceneNeighbor = assetNeighbor.voxels.find((candidate) => neighbors.some((neighbor) => sceneVoxelKey(candidate) === sceneVoxelKey(neighbor)))
+      const sceneNeighbor = scenePartVoxels(assetNeighbor).find((candidate) => neighbors.some((neighbor) => sceneVoxelKey(candidate) === sceneVoxelKey(neighbor)))
       const localNeighbor = instance && asset && sceneNeighbor ? findInstanceVoxelAtSceneVoxel(instance, asset, sceneNeighbor) : undefined
       if (instance && asset && sceneNeighbor && localNeighbor) {
         const angle = instance.rotation * Math.PI / 180
@@ -1840,12 +1840,12 @@ function App() {
       const assetTargets = new Map<string, Voxel[]>()
       const parts = voxelStrokePartsRef.current ?? sceneEntityParts(projectRef.current)
       const customTargets = targets.filter((target) => {
-        const part = parts.find((candidate) => candidate.kind === 'custom' && candidate.voxels.some((voxel) => sceneVoxelKey(voxel) === sceneVoxelKey(target)))
+        const part = parts.find((candidate) => candidate.kind === 'custom' && scenePartVoxels(candidate).some((voxel) => sceneVoxelKey(voxel) === sceneVoxelKey(target)))
         return Boolean(part && (!editEntityId || partBelongsToEditTarget(part, editEntityId)))
       })
       if (customTargets.length) removeVoxels(customTargets)
       targets.forEach((target) => {
-        const part = parts.find((candidate) => candidate.kind === 'asset' && candidate.voxels.some((voxel) => sceneVoxelKey(voxel) === sceneVoxelKey(target)))
+        const part = parts.find((candidate) => candidate.kind === 'asset' && scenePartVoxels(candidate).some((voxel) => sceneVoxelKey(voxel) === sceneVoxelKey(target)))
         if (!part?.instanceId || (editEntityId && !partBelongsToEditTarget(part, editEntityId))) return
         const instance = projectRef.current.instances.find((item) => item.id === part.instanceId)
         const asset = instance ? projectRef.current.assets.find((item) => item.id === instance.assetId) : undefined
@@ -1867,7 +1867,7 @@ function App() {
         : voxel)
       const assetTargets = new Map<string, Voxel[]>()
       targets.forEach((target) => {
-        const part = parts.find((candidate) => candidate.kind === 'asset' && candidate.voxels.some((voxel) => sceneVoxelKey(voxel) === sceneVoxelKey(target)) && partBelongsToEditTarget(candidate, editEntityId))
+        const part = parts.find((candidate) => candidate.kind === 'asset' && scenePartVoxels(candidate).some((voxel) => sceneVoxelKey(voxel) === sceneVoxelKey(target)) && partBelongsToEditTarget(candidate, editEntityId))
         if (!part?.instanceId) return
         const instance = draft.instances.find((item) => item.id === part.instanceId)
         const asset = instance ? draft.assets.find((item) => item.id === instance.assetId) : undefined
@@ -2158,7 +2158,7 @@ function App() {
       return { moved: false, blocked: true, deltaX: 0, deltaY: 0, deltaZ: 0 }
     }
     const cachedMove = sceneMoveBoundsRef.current?.parts === parts ? sceneMoveBoundsRef.current : null
-    const movingVoxels = cachedMove?.voxels ?? movableParts.flatMap((part) => part.voxels)
+    const movingVoxels = cachedMove?.voxels ?? movableParts.flatMap((part) => scenePartVoxels(part))
     const movingIds = movableParts.map((part) => part.id)
     const bounds = sceneBoundsForProject(projectRef.current)
     const cachedBounds = cachedMove?.bounds ?? gridVoxelBounds(movingVoxels)
@@ -2179,7 +2179,7 @@ function App() {
     const movableParts = parts.filter((part) => !scenePartIsLocked(projectRef.current, part))
     const currentParts = sceneParts
     const movingIds = new Set(movableParts.map((part) => part.id))
-    const movingCustomIds = new Set(movableParts.filter((part) => part.kind === 'custom').flatMap((part) => part.voxels.map(voxelEntityId)))
+    const movingCustomIds = new Set(movableParts.filter((part) => part.kind === 'custom').flatMap((part) => scenePartVoxels(part).map(voxelEntityId)))
     const assetPartsByInstance = new Map<string, SceneEntityPart[]>()
     movableParts.filter((part) => part.kind === 'asset' && part.instanceId).forEach((part) => {
       const list = assetPartsByInstance.get(part.instanceId!) ?? []
@@ -3094,7 +3094,7 @@ function App() {
     collectAssemblyIds(rootAssemblyId)
     const includedParts = sourceParts.filter((part) => (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(rootAssemblyId))
     if (includedParts.length < 2) return null
-    const allVoxels = includedParts.flatMap((part) => part.voxels)
+    const allVoxels = includedParts.flatMap((part) => scenePartVoxels(part))
     const assemblyBounds = voxelBounds(allVoxels)!
     const minX = assemblyBounds.min.x
     const minY = assemblyBounds.min.y
@@ -3104,7 +3104,7 @@ function App() {
     includedParts.forEach((part, index) => {
       const localPartId = `part-${index + 1}`
       partIdMap.set(part.id, localPartId)
-      partVoxels[localPartId] = part.voxels.map((voxel) => ({ x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ, materialId: voxel.materialId }))
+      partVoxels[localPartId] = scenePartVoxels(part).map((voxel) => ({ x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ, materialId: voxel.materialId }))
     })
     const uniqueVoxels = new Map<string, Voxel>()
     Object.values(partVoxels).flat().forEach((voxel) => uniqueVoxels.set(`${voxel.x},${voxel.y},${voxel.z}`, voxel))
@@ -3160,7 +3160,8 @@ function App() {
     // a multi-selection with the first selected entity's color.
     const colorizedParts = selectedEntityParts.map((part) => ({
       ...part,
-      voxels: part.voxels.map((voxel) => ({
+      sceneOffset: undefined,
+      voxels: scenePartVoxels(part).map((voxel) => ({
         ...voxel,
         materialId: scenePartVoxelDisplayColor(projectRef.current, part, voxel),
       })),
@@ -3237,7 +3238,7 @@ function App() {
 
   const createCopyPreview = (sourceProject: ProjectState, sourceParts: SceneEntityPart[], count: number, gap: number, axis: CopyDirectionAxis, sign: 1 | -1): CopyPreviewState | null => {
     if (!sourceParts.length) return null
-    const sourceVoxels = sourceParts.flatMap((part) => part.voxels)
+    const sourceVoxels = sourceParts.flatMap((part) => scenePartVoxels(part))
     if (!sourceVoxels.length) return null
     const sourceBounds = voxelBounds(sourceVoxels)!
     const minX = sourceBounds.min.x
@@ -3561,11 +3562,12 @@ function App() {
   }
 
   const selectedTransformEditable = selectedEntityParts.length === 1
+  const selectedScenePartVoxels = selectedScenePart ? scenePartVoxels(selectedScenePart) : []
   const selectedPosition = selectedTransformEditable && selectedScenePart
     ? selectedScenePart.kind === 'asset' && selectedInstance
       ? [selectedInstance.x, selectedInstance.z, selectedInstance.y ?? 0]
-      : selectedScenePart.voxels[0]
-        ? [voxelCenterToWorld(selectedScenePart.voxels[0].x), voxelCenterToWorld(selectedScenePart.voxels[0].z), voxelCenterToWorld(selectedScenePart.voxels[0].y)]
+      : selectedScenePartVoxels[0]
+        ? [voxelCenterToWorld(selectedScenePartVoxels[0].x), voxelCenterToWorld(selectedScenePartVoxels[0].z), voxelCenterToWorld(selectedScenePartVoxels[0].y)]
         : [0, 0, 0]
     : [0, 0, 0]
 
@@ -3594,7 +3596,7 @@ function App() {
       return
     }
     const entityId = selectedScenePart.partId
-    const firstVoxel = selectedScenePart.voxels[0]
+    const firstVoxel = scenePartVoxels(selectedScenePart)[0]
     if (!firstVoxel) return
     const targetVoxel = axis === 2 ? Math.round(value / VOXEL_WORLD_SIZE - 0.5) : worldToVoxelCenter(value)
     const currentVoxel = axis === 0 ? firstVoxel.x : axis === 1 ? firstVoxel.z : firstVoxel.y
@@ -3628,7 +3630,7 @@ function App() {
       // no whole-entity color uses its material colors below.
       const wholeEntityColor = part.colorOverride ?? asset?.templateColor ?? (part.kind === 'custom' ? project.customColors?.[part.partId] : undefined)
       const primaryColor = wholeEntityColor ?? asset?.color
-      part.voxels.forEach((voxel) => {
+      scenePartVoxels(part).forEach((voxel) => {
         const key = `${voxel.x},${voxel.y},${voxel.z}`
         const paintedColor = voxel.paintMaterialId
           ? materialColorForVoxel(project, { ...voxel, materialId: voxel.paintMaterialId }, asset)
@@ -3724,7 +3726,7 @@ function App() {
             ? { ...existing, paintMaterialId: color }
             : { ...existing, materialId: color, mode: 'paint' }
         }
-        parts.forEach((part) => part.voxels.forEach((voxel) => {
+        parts.forEach((part) => scenePartVoxels(part).forEach((voxel) => {
           const localVoxel = localBySceneKey.get(sceneVoxelKey(voxel))
           if (!localVoxel) return
           upsertPaint(localVoxel, adjustHexHsl(scenePartVoxelDisplayColor(sourceProject, part, voxel), hueDelta, saturationTarget))
@@ -3743,7 +3745,7 @@ function App() {
       })
 
       const selectedCustomVoxelByKey = new Map<string, { part: SceneEntityPart; voxel: Voxel }>()
-      selectedCustomParts.forEach((part) => part.voxels.forEach((voxel) => {
+      selectedCustomParts.forEach((part) => scenePartVoxels(part).forEach((voxel) => {
         selectedCustomVoxelByKey.set(`${part.partId}:${sceneVoxelKey(voxel)}`, { part, voxel })
       }))
       draft.customVoxels = draft.customVoxels.map((voxel) => {
@@ -4257,7 +4259,7 @@ function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSce
   )
   const scenePreviewVoxels = useMemo<ScenePreviewInputVoxel[]>(() => {
     if (!selectedSceneProject || !scenePartVoxelDisplayColorResolver) return []
-    return selectedSceneParts.flatMap((part) => part.voxels.map((voxel) => ({
+    return selectedSceneParts.flatMap((part) => scenePartVoxels(part).map((voxel) => ({
       x: voxel.x,
       y: voxel.y,
       z: voxel.z,
@@ -4318,7 +4320,7 @@ function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSce
     const entityPartIds = new Set(entity.partIds)
     const entityParts = sceneEntityParts(selectedSceneProject).filter((part) => entityPartIds.has(part.id) || (part.instanceId && entity.instanceIds.includes(part.instanceId)))
     if (!entityParts.length) return null
-    const firstVoxel = entityParts[0].voxels[0]
+    const firstVoxel = scenePartVoxels(entityParts[0])[0]
     const color = entityParts.map((part) => part.colorOverride).find(Boolean)
       ?? (firstVoxel ? materialColorForVoxel(selectedSceneProject, firstVoxel) : '#6c827d')
     const asset = makeAssetFromSceneParts(
@@ -4503,7 +4505,7 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
     setRotateAxis('z')
     setRotateDegrees(90)
   }, [selectedPartsKey])
-  const previewVoxels = useMemo(() => selectedParts.flatMap((part) => part.voxels), [selectedParts])
+  const previewVoxels = useMemo(() => selectedParts.flatMap((part) => scenePartVoxels(part)), [selectedParts])
   return <aside className="inspector">
     <div className="inspector-section entity-summary-section">
       <div className="inspector-inline-field"><span className="inspector-inline-label">选中实体</span><div className="select-field entity-name-field">{entityName}</div></div>
@@ -6129,7 +6131,7 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
       const retainedComponents = new Set<string>()
       for (const part of customParts) {
         const entityId = part.partId
-        const component = part.voxels
+        const component = scenePartVoxels(part)
         const scenePartId = `custom:${entityId}`
         const renderSignature = voxelRenderSignature(component, project.customColors?.[entityId])
         const existingComponent = existingComponents.get(scenePartId)
@@ -6472,7 +6474,7 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
 
   const extrudeSourceFor = (axis: VoxelAxis, hitVoxel: Pick<Voxel, 'x' | 'y' | 'z'>) => {
     const layer = hitVoxel[axis]
-    return extrudeParts().flatMap((part) => part.voxels).filter((voxel) => voxel[axis] === layer)
+    return extrudeParts().flatMap((part) => scenePartVoxels(part)).filter((voxel) => voxel[axis] === layer)
   }
 
   const chooseExtrudeDirection = (startVoxel: Pick<Voxel, 'x' | 'y' | 'z'>, startClient: { x: number; y: number }, event: { clientX: number; clientY: number }, fallbackAxis: VoxelAxis, fallbackSign: 1 | -1) => {
@@ -6749,7 +6751,7 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
     const maxY = Math.max(startY, endY)
     const selected = new Set<string>()
     for (const part of sceneEntityParts(project)) {
-      if (part.voxels.some((voxel) => {
+      if (scenePartVoxels(part).some((voxel) => {
         const point = toSceneWorld(voxelCenterToWorld(voxel.x), voxelCenterToWorld(voxel.y), voxelCenterToWorld(voxel.z)).project(camera)
         const screenX = rect.left + (point.x + 1) * 0.5 * rect.width
         const screenY = rect.top + (1 - point.y) * 0.5 * rect.height
@@ -6993,7 +6995,7 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
         const instance = project.instances.find((candidate) => candidate.id === part.instanceId)
         const asset = instance ? project.assets.find((candidate) => candidate.id === instance.assetId) : undefined
         if (!instance || !asset) return
-        part.voxels.forEach((sceneVoxel) => {
+        scenePartVoxels(part).forEach((sceneVoxel) => {
           const dx = sceneVoxel.x - center.x
           const dy = sceneVoxel.y - center.y
           const dz = sceneVoxel.z - center.z
@@ -7152,7 +7154,7 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
           onNotice('当前实体已固定 · 请先在右键菜单中取消固定')
           return
         }
-        const anchorVoxel = hitPart.voxels[0]
+        const anchorVoxel = scenePartVoxels(hitPart)[0]
         const anchor = instance
           ? toSceneWorld(instance.x, instance.y ?? 0, instance.z)
           : toSceneWorld(voxelCenterToWorld(anchorVoxel?.x ?? 0), voxelCenterToWorld(anchorVoxel?.y ?? 0), voxelCenterToWorld(anchorVoxel?.z ?? 0))
