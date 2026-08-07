@@ -6305,6 +6305,10 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   const cameraZoomLevelRef = useRef(100)
   const cameraFitZoomRef = useRef(1)
   const invalidateRenderRef = useRef<(durationMs?: number) => void>(() => {})
+  // Rendering a large greedy mesh is GPU-bound during pointer interactions.
+  // Keep the interaction-quality switch imperative so it does not add a React
+  // render to every pointer event.
+  const interactionQualityRef = useRef<(active: boolean) => void>(() => {})
   const perspectiveBaseDistanceRef = useRef(Math.sqrt(16 ** 2 + 18 ** 2 + 18 ** 2))
   const editRenderStateRef = useRef<{ active: boolean; partIds: Set<string> }>({ active: false, partIds: new Set() })
   const drawingGestureRef = useRef<DrawingGesture | null>(null)
@@ -6341,6 +6345,10 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   const toolPreviewRevisionRef = useRef(0)
   const latestToolPreviewVoxelsRef = useRef<Voxel[]>([])
   const [ready, setReady] = useState(false)
+  const setViewportInteraction = useStableEvent((active: boolean) => {
+    interactionQualityRef.current(active)
+    onInteractionChange(active)
+  })
   useEffect(() => {
     onZoomChangeRef.current = onZoomChange
   }, [onZoomChange])
@@ -6365,7 +6373,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       toolPreviewRevisionRef.current += 1
       setToolPreviewVoxels([])
       onCancelPendingEntityOperation()
-      onInteractionChange(false)
+      setViewportInteraction(false)
     }
     window.addEventListener('keydown', handleEscape)
     return () => window.removeEventListener('keydown', handleEscape)
@@ -6732,6 +6740,27 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       if (!frame) frame = requestAnimationFrame(animate)
     }
     invalidateRenderRef.current = invalidateRender
+    const setInteractionQuality = (active: boolean) => {
+      // Do not pay the toggle cost for small scenes. The quality fallback is
+      // only useful once the current frame is large enough to be GPU-bound.
+      if (active && renderer.info.render.triangles < 100_000) return
+      const shouldRenderShadows = !active
+      if (renderer.shadowMap.enabled === shouldRenderShadows && key.castShadow === shouldRenderShadows && floor.receiveShadow === shouldRenderShadows) return
+      // Voxel meshes do not cast shadows; the expensive shadow pass only
+      // exists for the key light/floor pair. Disable that pass while the user
+      // is dragging, drawing, or placing, then rebuild it once on release.
+      renderer.shadowMap.enabled = shouldRenderShadows
+      renderer.shadowMap.autoUpdate = shouldRenderShadows
+      renderer.shadowMap.needsUpdate = shouldRenderShadows
+      key.castShadow = shouldRenderShadows
+      floor.receiveShadow = shouldRenderShadows
+      invalidateRender(active ? 0 : 120)
+    }
+    interactionQualityRef.current = setInteractionQuality
+    const handleControlsStart = () => interactionQualityRef.current(true)
+    const handleControlsEnd = () => interactionQualityRef.current(false)
+    controls.addEventListener('start', handleControlsStart)
+    controls.addEventListener('end', handleControlsEnd)
     // Initialize the camera from the external ruler once. After this point
     // all zoom changes go through setCameraZoomLevel imperatively.
     setCameraZoomLevel(zoomLevel)
@@ -6885,8 +6914,11 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       cancelAnimationFrame(frame)
       if (zoomReportTimerRef.current !== null) window.clearTimeout(zoomReportTimerRef.current)
       invalidateRenderRef.current = () => {}
+      interactionQualityRef.current = () => {}
       observer.disconnect()
       renderer.domElement.removeEventListener('wheel', applyWheelZoom)
+      controls.removeEventListener('start', handleControlsStart)
+      controls.removeEventListener('end', handleControlsEnd)
       controls.dispose()
       disposeThreeObject(scene)
       renderer.dispose()
@@ -8269,7 +8301,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
           visualRoots: collectDragVisualRoots(movableParts.map((part) => part.id)),
           moved: false,
         }
-        onInteractionChange(true)
+        setViewportInteraction(true)
       } else {
         boxSelectGestureRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, currentX: event.clientX, currentY: event.clientY, additive: event.metaKey || event.shiftKey, moved: false }
         setSceneSelectionBox(null)
@@ -8323,7 +8355,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     const activeGesture = drawingGestureRef.current
     editStrokeVisitedRef.current.clear()
     if (controlsRef.current) controlsRef.current.enabled = false
-    onInteractionChange(true)
+    setViewportInteraction(true)
     if (tool === 'brush' || tool === 'erase') applyPlanarBrushAt(activeGesture.current, activeGesture.current)
     else requestShapePreview(activeGesture)
   }
@@ -8455,7 +8487,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         drawingGesture.depthStartClientY = undefined
         drawingGesture.current = drawingGesture.start
         requestShapePreview(drawingGesture)
-        onInteractionChange(false)
+        setViewportInteraction(false)
         onNotice('长方体底面已确定 · 再拖动确定厚度')
         return
       }
@@ -8476,7 +8508,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
             drawingGestureRef.current = null
             latestToolPreviewVoxelsRef.current = []
             setToolPreviewVoxels([])
-            onInteractionChange(false)
+            setViewportInteraction(false)
             if (controlsRef.current) controlsRef.current.enabled = true
           }
         })
@@ -8487,7 +8519,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       drawingGestureRef.current = null
       latestToolPreviewVoxelsRef.current = []
       setToolPreviewVoxels([])
-      onInteractionChange(false)
+      setViewportInteraction(false)
       if (controlsRef.current) controlsRef.current.enabled = true
       return
     }
@@ -8512,7 +8544,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     if (selectGesture?.pointerId === event.pointerId) {
       selectGestureRef.current = null
       commitDragGesture(selectGesture)
-      onInteractionChange(false)
+      setViewportInteraction(false)
       if (controlsRef.current) controlsRef.current.enabled = true
       return
     }
@@ -8521,7 +8553,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     editGestureRef.current = null
     if (!gesture || gesture.pointerId !== event.pointerId) return
     editStrokeVisitedRef.current.clear()
-    onInteractionChange(false)
+    setViewportInteraction(false)
     if (controlsRef.current) controlsRef.current.enabled = true
   }
 
@@ -8538,7 +8570,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     editStrokeVisitedRef.current.clear()
     if (selectGestureRef.current) resetDragVisuals(selectGestureRef.current)
     selectGestureRef.current = null
-    onInteractionChange(false)
+    setViewportInteraction(false)
     if (controlsRef.current) controlsRef.current.enabled = true
   }
 
@@ -8567,14 +8599,14 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         const selectGesture = selectGestureRef.current
         selectGestureRef.current = null
         commitDragGesture(selectGesture)
-        onInteractionChange(false)
+        setViewportInteraction(false)
         if (controlsRef.current) controlsRef.current.enabled = true
         return
       }
       flushPendingEditMove({ pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY })
       editGestureRef.current = null
       editStrokeVisitedRef.current.clear()
-      onInteractionChange(false)
+      setViewportInteraction(false)
     }
     const cancelWindowPointer = () => {
       cameraGestureRef.current = null
@@ -8589,7 +8621,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       editStrokeVisitedRef.current.clear()
       if (selectGestureRef.current) resetDragVisuals(selectGestureRef.current)
       selectGestureRef.current = null
-      onInteractionChange(false)
+      setViewportInteraction(false)
       if (controlsRef.current) controlsRef.current.enabled = true
     }
     window.addEventListener('pointerup', finishWindowPointer)
