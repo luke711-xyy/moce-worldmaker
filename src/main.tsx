@@ -998,6 +998,8 @@ function App() {
   const [copyPreview, setCopyPreview] = useState<CopyPreviewState | null>(null)
   const [colorPreview, setColorPreview] = useState<ColorPreviewState | null>(null)
   const [geometryPreview, setGeometryPreview] = useState<GeometryPreviewState | null>(null)
+  const [geometryApplying, setGeometryApplying] = useState(false)
+  const geometryApplyingRef = useRef(false)
   const geometryWorkerRef = useRef<VoxelToolsWorkerClient | null>(null)
   const geometryRequestRevisionRef = useRef(0)
   const colorPreviewPendingRef = useRef<ColorPreviewState | null>(null)
@@ -1011,6 +1013,7 @@ function App() {
     setColorPreview(null)
   }
   const cancelGeometryPreview = () => {
+    if (geometryApplyingRef.current) return
     geometryRequestRevisionRef.current += 1
     setGeometryPreview(null)
   }
@@ -1534,7 +1537,7 @@ function App() {
     })
   }
 
-  const commitGeometryProject = (next: ProjectState, removedPartIds: string[], resultGroups: Array<{ entityId: string; voxels: Voxel[] }>) => {
+  const commitGeometryProject = async (next: ProjectState, removedPartIds: string[], resultGroups: Array<{ entityId: string; voxels: Voxel[] }>) => {
     // Geometry confirmation is already a validated, integer-grid batch. Do
     // not send it through updateProject(): that path deep-clones the whole
     // project and normalizeStoredProject() then walks every asset and voxel.
@@ -1542,8 +1545,6 @@ function App() {
     // history can therefore retain the immutable previous root directly.
     historyRef.current.past = [...historyRef.current.past, makeHistoryEntry(projectRef.current)].slice(-50)
     historyRef.current.future = []
-    removedPartIds.forEach((partId) => sceneOccupancyRef.current?.removeOwner(partId))
-    resultGroups.forEach(({ entityId, voxels }) => sceneOccupancyRef.current?.replaceOwnerFromValidatedBatch(`custom:${entityId}`, voxels))
     // The occupancy index was updated incrementally above. The following
     // sceneParts effect must not sort and rescan the same large result again.
     skipSceneOccupancySyncRef.current = true
@@ -1553,6 +1554,17 @@ function App() {
       setProject(next)
       setHistoryRevision((value) => value + 1)
     })
+
+    // Rebuild the occupancy index in bounded batches after publishing the
+    // already-validated project. The viewport is temporarily interaction
+    // locked by geometryApplying, so queries cannot observe the intermediate
+    // state while the browser gets a chance to paint between batches.
+    const occupancy = sceneOccupancyRef.current
+    if (!occupancy) return
+    for (const partId of removedPartIds) await occupancy.removeOwnerChunked(partId)
+    for (const { entityId, voxels } of resultGroups) {
+      await occupancy.insertOwnerFromValidatedBatchChunked(`custom:${entityId}`, voxels)
+    }
   }
 
   const updateProject = (updater: (draft: ProjectState) => void, trackHistory = true) => {
@@ -3977,6 +3989,7 @@ function App() {
   }
 
   const confirmGeometryPreview = () => {
+    if (geometryApplyingRef.current) return
     if (!geometryPreview?.result || !geometryPreview.valid) { setNotice(geometryPreview?.invalidReason ?? '当前几何预览不可应用'); return }
     const sourceProject = projectRef.current
     const selectedIds = new Set(selectedEntityParts.map((part) => part.id))
@@ -4077,12 +4090,24 @@ function App() {
       selectedResultEntityIds.forEach((entityId) => { renderModes[entityId] = 'cells' })
       namedNextProject.customVoxelRenderModes = renderModes
     }
-    commitGeometryProject(namedNextProject, [...selectedIds], transformedGroups)
+    geometryApplyingRef.current = true
+    setGeometryApplying(true)
+    const completionNotice = `已应用${geometryPreview.operation === 'shell' ? '外壳' : geometryPreview.scaleMode === 'up' ? '放大' : '缩小'}处理 · ${transformed.length} 个体素 · ${groupEntries.length} 个零件`
+    setNotice('正在应用几何处理…')
+    const applyTask = commitGeometryProject(namedNextProject, [...selectedIds], transformedGroups)
     setSelectedId(firstResultEntityId ? `custom:${firstResultEntityId}` : '')
     setCheckedTreePartIds(firstResultEntityId ? [`custom:${firstResultEntityId}`] : [])
     setEditEntityId(null)
     setGeometryPreview(null)
-    setNotice(`已应用${geometryPreview.operation === 'shell' ? '外壳' : geometryPreview.scaleMode === 'up' ? '放大' : '缩小'}处理 · ${transformed.length} 个体素 · ${groupEntries.length} 个零件`)
+    void applyTask.then(() => {
+      geometryApplyingRef.current = false
+      setGeometryApplying(false)
+      setNotice(completionNotice)
+    }).catch((error) => {
+      geometryApplyingRef.current = false
+      setGeometryApplying(false)
+      setNotice(error instanceof Error ? `几何处理应用失败：${error.message}` : '几何处理应用失败')
+    })
   }
 
   const selectedTransformEditable = selectedEntityParts.length === 1
@@ -4683,7 +4708,7 @@ function App() {
               </div>}
             </div>
           </div>
-          <MemoizedVoxelViewport project={project} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
+          <MemoizedVoxelViewport project={project} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} geometryApplying={geometryApplying} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
           <ToolboxPopover open={toolboxOpen} onClose={() => setToolboxOpen(false)} tool={tool} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} onToolChange={changeTool} onPlaneChange={setDrawingPlane} onOperationChange={setDrawOperation} onBrushSizeChange={setBrushSize} />
           <div className="viewport-footer">
             <div className="tool-group">
@@ -6284,7 +6309,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   </div>
 }
 
-function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCache, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, activeMaterial, materials, dragAxis, placementAsset, copyPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; sceneParts: SceneEntityPart[]; occupancyIndex: SceneOccupancyIndex | null; assetTransformCache: AssetTransformCache; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
+function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCache, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, geometryApplying, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, activeMaterial, materials, dragAxis, placementAsset, copyPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; sceneParts: SceneEntityPart[]; occupancyIndex: SceneOccupancyIndex | null; assetTransformCache: AssetTransformCache; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; geometryApplying: boolean; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.Camera | null>(null)
@@ -6359,6 +6384,9 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   useEffect(() => {
     scenePartsRef.current = sceneParts
   }, [sceneParts])
+  useEffect(() => {
+    if (controlsRef.current) controlsRef.current.enabled = !geometryApplying
+  }, [geometryApplying])
   useEffect(() => {
     if (drawingMoveFrameRef.current !== null) cancelAnimationFrame(drawingMoveFrameRef.current)
     drawingMoveFrameRef.current = null
@@ -8240,6 +8268,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   }
 
   const handleEditPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (geometryApplying) return
     if (isPreviewTouch(event)) {
       beginPreviewTouch(event)
       return

@@ -53,6 +53,11 @@ type RuntimeVoxelBounds = {
 // source array reference across transforms; sorting hundreds of thousands of
 // keys during insertion only duplicates work that the chunk index already did.
 const OWNER_KEY_CACHE_LIMIT = 4096
+const OCCUPANCY_BATCH_SIZE = 4096
+
+function yieldOccupancyBatch(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
 
 function projectVoxelBounds(voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>): RuntimeVoxelBounds | undefined {
   if (!voxels.length) return undefined
@@ -218,35 +223,7 @@ export class SceneOccupancyIndex {
         bounds.maxGy = Math.max(bounds.maxGy, runtimeVoxel.gy)
         bounds.maxGz = Math.max(bounds.maxGz, runtimeVoxel.gz)
       }
-      const { chunkKey, localIndex } = runtimeVoxelAddress(runtimeVoxel)
-      const chunk = this.chunks.get(chunkKey) ?? createRuntimeChunk(chunkKey)
-      if (!this.chunks.has(chunkKey)) this.chunks.set(chunkKey, chunk)
-      const { wordIndex, bitMask } = bitAddress(localIndex)
-      const wasOccupied = (chunk.occupancyBits[wordIndex] & bitMask) !== 0
-      if (assumeEmpty && !wasOccupied) {
-        // Geometry confirmation has already validated the result against all
-        // non-selected owners and removed the old selected owners. In this
-        // common replacement path there is no need to allocate overflow sets
-        // or resolve a primary owner for every newly generated cell.
-        chunk.ownerIds[localIndex] = ownerHandle
-        chunk.occupancyBits[wordIndex] |= bitMask
-        chunk.occupiedCount += 1
-        chunk.materialIds[localIndex] = this.materialIndex(voxel.materialId)
-        chunk.dataRevision += 1
-      } else {
-        const primaryOwner = chunk.ownerIds[localIndex]
-        if (primaryOwner && primaryOwner !== ownerHandle) {
-          const owners = chunk.overflowOwners.get(localIndex) ?? new Set<number>()
-          owners.add(ownerHandle)
-          chunk.overflowOwners.set(localIndex, owners)
-        } else {
-          chunk.ownerIds[localIndex] = ownerHandle
-        }
-        chunk.occupancyBits[wordIndex] |= bitMask
-        if (!wasOccupied) chunk.occupiedCount += 1
-        chunk.materialIds[localIndex] = this.materialIndex(voxel.materialId)
-        chunk.dataRevision += 1
-      }
+      this.insertOwnerVoxel(ownerHandle, voxel, runtimeVoxel, assumeEmpty)
     })
     if (bounds) this.ownerBounds.set(ownerHandle, bounds)
   }
@@ -255,40 +232,68 @@ export class SceneOccupancyIndex {
     const ownerHandle = this.ownerIdToHandle.get(ownerId)
     if (!ownerHandle) return
     for (const voxel of this.ownerVoxels.get(ownerHandle) ?? []) {
-      const { chunkKey, localIndex } = runtimeVoxelAddress(voxel)
-      const chunk = this.chunks.get(chunkKey)
-      if (!chunk) continue
-      const primaryOwner = chunk.ownerIds[localIndex]
-      const overflowOwners = chunk.overflowOwners.get(localIndex)
-      if (primaryOwner === ownerHandle) {
-        const promotedOwner = overflowOwners?.values().next().value as number | undefined
-        if (promotedOwner) {
-          chunk.ownerIds[localIndex] = promotedOwner
-          overflowOwners!.delete(promotedOwner)
-          if (!overflowOwners!.size) chunk.overflowOwners.delete(localIndex)
-        } else {
-          chunk.ownerIds[localIndex] = 0
-          chunk.materialIds[localIndex] = 0
-          const { wordIndex, bitMask } = bitAddress(localIndex)
-          const wasOccupied = (chunk.occupancyBits[wordIndex] & bitMask) !== 0
-          chunk.occupancyBits[wordIndex] &= ~bitMask
-          if (wasOccupied) chunk.occupiedCount -= 1
-        }
-      } else if (overflowOwners?.delete(ownerHandle) && !overflowOwners.size) {
-        chunk.overflowOwners.delete(localIndex)
-      }
-      chunk.dataRevision += 1
-      if (chunk.occupiedCount === 0 && !chunk.overflowOwners.size) this.chunks.delete(chunkKey)
+      this.removeOwnerVoxel(ownerHandle, voxel)
     }
-    this.ownerVoxels.delete(ownerHandle)
+    this.finalizeRemovedOwner(ownerId, ownerHandle)
+  }
+
+  /**
+   * Rebuild a large owner without monopolising the pointer-up event. Geometry
+   * confirmation has already performed collision validation, so the batch can
+   * use the same compact, assume-empty insertion path as the synchronous API.
+   * The index is intentionally incomplete while this Promise is pending; the
+   * caller must temporarily disable scene interaction until it resolves.
+   */
+  async removeOwnerChunked(ownerId: string, batchSize = OCCUPANCY_BATCH_SIZE): Promise<void> {
+    const ownerHandle = this.ownerIdToHandle.get(ownerId)
+    if (!ownerHandle) return
+    const voxels = this.ownerVoxels.get(ownerHandle) ?? []
+    for (let start = 0; start < voxels.length; start += batchSize) {
+      const end = Math.min(voxels.length, start + batchSize)
+      for (let index = start; index < end; index += 1) this.removeOwnerVoxel(ownerHandle, voxels[index])
+      if (end < voxels.length) await yieldOccupancyBatch()
+    }
+    this.finalizeRemovedOwner(ownerId, ownerHandle)
+  }
+
+  async insertOwnerFromValidatedBatchChunked(
+    ownerId: string,
+    voxels: Voxel[],
+    sourceVoxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>> = voxels,
+    baseOffset: Pick<Voxel, 'x' | 'y' | 'z'> = { x: 0, y: 0, z: 0 },
+    batchSize = OCCUPANCY_BATCH_SIZE,
+  ): Promise<void> {
+    if (this.ownerIdToHandle.has(ownerId)) await this.removeOwnerChunked(ownerId, batchSize)
+    const ownerHandle = this.registerOwner(ownerId)
+    const runtimeVoxels = new Array<RuntimeVoxelCoord>(voxels.length)
+    let bounds: RuntimeVoxelBounds | undefined
+    this.ownerVoxels.set(ownerHandle, runtimeVoxels)
     this.ownerTranslations.delete(ownerHandle)
-    this.ownerBounds.delete(ownerHandle)
-    this.ownerVoxelRefs.delete(ownerId)
-    this.ownerVoxelKeys.delete(ownerId)
-    this.ownerSourceRefs.delete(ownerId)
-    this.ownerBaseOffsets.delete(ownerId)
-    this.ownerIdToHandle.delete(ownerId)
-    this.handleToOwnerId[ownerHandle] = ''
+    this.ownerVoxelRefs.set(ownerId, voxels)
+    if (voxels.length <= OWNER_KEY_CACHE_LIMIT) this.ownerVoxelKeys.set(ownerId, this.sortedVoxelKeys(voxels))
+    this.ownerSourceRefs.set(ownerId, sourceVoxels)
+    this.ownerBaseOffsets.set(ownerId, projectVoxelToRuntime(baseOffset))
+    for (let start = 0; start < voxels.length; start += batchSize) {
+      const end = Math.min(voxels.length, start + batchSize)
+      for (let index = start; index < end; index += 1) {
+        const voxel = voxels[index]
+        const runtimeVoxel = projectVoxelToRuntime(voxel)
+        runtimeVoxels[index] = runtimeVoxel
+        if (!bounds) {
+          bounds = { minGx: runtimeVoxel.gx, minGy: runtimeVoxel.gy, minGz: runtimeVoxel.gz, maxGx: runtimeVoxel.gx, maxGy: runtimeVoxel.gy, maxGz: runtimeVoxel.gz }
+        } else {
+          bounds.minGx = Math.min(bounds.minGx, runtimeVoxel.gx)
+          bounds.minGy = Math.min(bounds.minGy, runtimeVoxel.gy)
+          bounds.minGz = Math.min(bounds.minGz, runtimeVoxel.gz)
+          bounds.maxGx = Math.max(bounds.maxGx, runtimeVoxel.gx)
+          bounds.maxGy = Math.max(bounds.maxGy, runtimeVoxel.gy)
+          bounds.maxGz = Math.max(bounds.maxGz, runtimeVoxel.gz)
+        }
+        this.insertOwnerVoxel(ownerHandle, voxel, runtimeVoxel, true)
+      }
+      if (end < voxels.length) await yieldOccupancyBatch()
+    }
+    if (bounds) this.ownerBounds.set(ownerHandle, bounds)
   }
 
   replaceOwner(
@@ -694,6 +699,73 @@ export class SceneOccupancyIndex {
     this.ownerIdToHandle.set(ownerId, handle)
     this.handleToOwnerId.push(ownerId)
     return handle
+  }
+
+  private insertOwnerVoxel(ownerHandle: number, voxel: Voxel, runtimeVoxel: RuntimeVoxelCoord, assumeEmpty: boolean): void {
+    const { chunkKey, localIndex } = runtimeVoxelAddress(runtimeVoxel)
+    const chunk = this.chunks.get(chunkKey) ?? createRuntimeChunk(chunkKey)
+    if (!this.chunks.has(chunkKey)) this.chunks.set(chunkKey, chunk)
+    const { wordIndex, bitMask } = bitAddress(localIndex)
+    const wasOccupied = (chunk.occupancyBits[wordIndex] & bitMask) !== 0
+    if (assumeEmpty && !wasOccupied) {
+      chunk.ownerIds[localIndex] = ownerHandle
+      chunk.occupancyBits[wordIndex] |= bitMask
+      chunk.occupiedCount += 1
+      chunk.materialIds[localIndex] = this.materialIndex(voxel.materialId)
+      chunk.dataRevision += 1
+      return
+    }
+    const primaryOwner = chunk.ownerIds[localIndex]
+    if (primaryOwner && primaryOwner !== ownerHandle) {
+      const owners = chunk.overflowOwners.get(localIndex) ?? new Set<number>()
+      owners.add(ownerHandle)
+      chunk.overflowOwners.set(localIndex, owners)
+    } else {
+      chunk.ownerIds[localIndex] = ownerHandle
+    }
+    chunk.occupancyBits[wordIndex] |= bitMask
+    if (!wasOccupied) chunk.occupiedCount += 1
+    chunk.materialIds[localIndex] = this.materialIndex(voxel.materialId)
+    chunk.dataRevision += 1
+  }
+
+  private removeOwnerVoxel(ownerHandle: number, voxel: RuntimeVoxelCoord): void {
+    const { chunkKey, localIndex } = runtimeVoxelAddress(voxel)
+    const chunk = this.chunks.get(chunkKey)
+    if (!chunk) return
+    const primaryOwner = chunk.ownerIds[localIndex]
+    const overflowOwners = chunk.overflowOwners.get(localIndex)
+    if (primaryOwner === ownerHandle) {
+      const promotedOwner = overflowOwners?.values().next().value as number | undefined
+      if (promotedOwner) {
+        chunk.ownerIds[localIndex] = promotedOwner
+        overflowOwners!.delete(promotedOwner)
+        if (!overflowOwners!.size) chunk.overflowOwners.delete(localIndex)
+      } else {
+        chunk.ownerIds[localIndex] = 0
+        chunk.materialIds[localIndex] = 0
+        const { wordIndex, bitMask } = bitAddress(localIndex)
+        const wasOccupied = (chunk.occupancyBits[wordIndex] & bitMask) !== 0
+        chunk.occupancyBits[wordIndex] &= ~bitMask
+        if (wasOccupied) chunk.occupiedCount -= 1
+      }
+    } else if (overflowOwners?.delete(ownerHandle) && !overflowOwners.size) {
+      chunk.overflowOwners.delete(localIndex)
+    }
+    chunk.dataRevision += 1
+    if (chunk.occupiedCount === 0 && !chunk.overflowOwners.size) this.chunks.delete(chunkKey)
+  }
+
+  private finalizeRemovedOwner(ownerId: string, ownerHandle: number): void {
+    this.ownerVoxels.delete(ownerHandle)
+    this.ownerTranslations.delete(ownerHandle)
+    this.ownerBounds.delete(ownerHandle)
+    this.ownerVoxelRefs.delete(ownerId)
+    this.ownerVoxelKeys.delete(ownerId)
+    this.ownerSourceRefs.delete(ownerId)
+    this.ownerBaseOffsets.delete(ownerId)
+    this.ownerIdToHandle.delete(ownerId)
+    this.handleToOwnerId[ownerHandle] = ''
   }
 
   private sortedVoxelKeys(voxels: Array<Pick<Voxel, 'x' | 'y' | 'z'>>): string[] {

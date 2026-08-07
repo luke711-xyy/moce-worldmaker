@@ -87,6 +87,18 @@ describe('SceneOccupancyIndex', () => {
     expect(index.chunks.get('0,0,0')?.occupiedCount).toBe(4)
   })
 
+  it('rebuilds a validated batch in asynchronous chunks', async () => {
+    const index = SceneOccupancyIndex.fromParts([
+      part('old', [voxel(0, 0, 0), voxel(1, 0, 0), voxel(2, 0, 0)]),
+      part('stable', [voxel(8, 0, 0)]),
+    ])
+    await index.removeOwnerChunked('old', 2)
+    await index.insertOwnerFromValidatedBatchChunked('replacement', [voxel(3, 0, 0), voxel(4, 0, 0), voxel(5, 0, 0)], undefined, undefined, 2)
+    expect(index.queryProjectVoxel(voxel(0, 0, 0)).occupied).toBe(false)
+    expect(index.queryProjectVoxel(voxel(4, 0, 0)).ownerIds).toEqual(['replacement'])
+    expect(index.queryProjectVoxel(voxel(8, 0, 0)).ownerIds).toEqual(['stable'])
+  })
+
   it('tracks chunk occupancy without scanning the full chunk on removal', () => {
     const index = SceneOccupancyIndex.fromParts([part('entity', [voxel(0, 0, 0), voxel(1, 0, 0)])])
     const chunk = index.chunks.get('0,0,0')
