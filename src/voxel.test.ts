@@ -77,6 +77,18 @@ describe('莫测造境体素核心数据', () => {
     expect(part?.voxels.every((cell) => cell.preserveVoxelCells)).toBe(true)
   })
 
+  it('recovers cell rendering for enlarged entities from voxel markers', () => {
+    const project = makeDefaultProject()
+    const nextProject = {
+      ...project,
+      instances: [],
+      customVoxels: [{ x: 0, y: 0, z: 0, materialId: 'stone', entityId: 'legacy-enlarged', preserveVoxelCells: true }],
+      customVoxelRenderModes: {},
+    }
+    const part = sceneEntityParts(nextProject).find((candidate) => candidate.partId === 'legacy-enlarged')
+    expect(part?.renderMode).toBe('cells')
+  })
+
   it('keeps asset topology canonical while resolving moved scene coordinates lazily', () => {
     const project = makeDefaultProject()
     const instance = project.instances[0]
