@@ -1042,15 +1042,13 @@ function App() {
     : selectedTemplateSource
     ? `资产库 · ${normalizeAssetCategoryPath(selectedTemplateSource.categoryPath).join(' / ')}`
     : '还未保存到资产库'
-  // Position-only changes do not affect geometry-operation choices. Keep this
-  // prepared source stable across entity drags; requestGeometryPreview() will
-  // still build a fresh, absolute-coordinate batch at the moment the user
-  // explicitly starts a preview.
-  const selectedGeometryStateKey = selectedEntityParts.map((part) => {
-    if (!part.instanceId) return part.id
-    const instance = project.instances.find((candidate) => candidate.id === part.instanceId)
-    return `${part.id}:${instance ? sceneInstanceRenderSignature(instance) : ''}`
-  }).join('|')
+  // Position-only changes do not affect the available geometry-operation
+  // choices. In particular, do not include instance root/part offsets here:
+  // validShellThicknesses() performs cavity filling plus repeated erosion, and
+  // validScaleFactors() scans the selected voxel set. Re-running either on
+  // every move-release made large entities stall the UI even though the user
+  // had not started a geometry operation. The actual preview path below still
+  // builds a fresh absolute-coordinate batch from projectRef at click time.
   const geometrySourceVoxels = useMemo<GeometryVoxel[]>(() => selectedEntityParts.flatMap((part) => scenePartVoxels(part).map((voxel) => ({
     ...voxel,
     // Geometry operations write back as editable scene voxels. Resolve the
@@ -1058,7 +1056,7 @@ function App() {
     // to the generic custom-entity material during the replacement.
     materialId: scenePartVoxelDisplayColor(project, part, voxel),
     sourcePartId: part.id,
-  }))), [selectedEntityPartsKey, selectedGeometryStateKey, project.assets, project.customVoxels, project.customColors, project.materials])
+  }))), [selectedEntityPartsKey, project.assets, project.customVoxels, project.customColors, project.materials])
   const currentGeometrySourceVoxels = () => selectedEntityParts.flatMap((part) => scenePartVoxels(part).map((voxel) => ({
     ...voxel,
     materialId: scenePartVoxelDisplayColor(projectRef.current, part, voxel),
