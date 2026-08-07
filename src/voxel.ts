@@ -207,8 +207,14 @@ export function scenePartVoxels(part: SceneEntityPart): Voxel[] {
 export function scenePartVoxelAt(part: SceneEntityPart, index: number): Voxel | undefined {
   const voxel = part.voxels[index]
   if (!voxel) return undefined
-  const offset = part.sceneOffset
-  if (!offset || (!offset.x && !offset.y && !offset.z)) return voxel
+  const rootOffset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
+  const partOffset = part.partSceneOffset ?? { x: 0, y: 0, z: 0 }
+  const offset = {
+    x: rootOffset.x + partOffset.x,
+    y: rootOffset.y + partOffset.y,
+    z: rootOffset.z + partOffset.z,
+  }
+  if (!offset.x && !offset.y && !offset.z) return voxel
   return { ...voxel, x: voxel.x + offset.x, y: voxel.y + offset.y, z: voxel.z + offset.z }
 }
 

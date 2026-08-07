@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxels, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxels, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
@@ -101,6 +101,20 @@ describe('莫测造境体素核心数据', () => {
       y: movedPart.voxels[0].y + rootOffset.y + offset.y,
       z: movedPart.voxels[0].z + rootOffset.z + offset.z,
     })
+  })
+
+  it('reads one scene voxel with both root and part offsets without materializing the part', () => {
+    const part = {
+      id: 'asset:instance:part',
+      kind: 'asset' as const,
+      partId: 'part',
+      memberKey: 'asset:instance:part',
+      sceneOffset: { x: 10, y: 20, z: 30 },
+      partSceneOffset: { x: 2, y: 3, z: 4 },
+      voxels: [{ x: 1, y: 2, z: 3, materialId: 'primary' }],
+    }
+    expect(scenePartVoxelAt(part, 0)).toEqual({ x: 13, y: 25, z: 37, materialId: 'primary' })
+    expect(scenePartVoxelAt(part, 1)).toBeUndefined()
   })
 
   it('preserves exact scene coordinates for rotated and mirrored part offsets', () => {

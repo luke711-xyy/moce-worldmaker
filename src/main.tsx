@@ -3677,12 +3677,15 @@ function App() {
   }
 
   const selectedTransformEditable = selectedEntityParts.length === 1
-  const selectedScenePartVoxels = selectedScenePart ? scenePartVoxels(selectedScenePart) : []
+  // The inspector only needs an anchor for the position fields. Mapping the
+  // entire selected entity here made every render after a large-entity move
+  // allocate a second full voxel array before the viewport could continue.
+  const selectedScenePartVoxel = selectedScenePart ? scenePartVoxelAt(selectedScenePart, 0) : undefined
   const selectedPosition = selectedTransformEditable && selectedScenePart
     ? selectedScenePart.kind === 'asset' && selectedInstance
       ? [selectedInstance.x, selectedInstance.z, selectedInstance.y ?? 0]
-      : selectedScenePartVoxels[0]
-        ? [voxelCenterToWorld(selectedScenePartVoxels[0].x), voxelCenterToWorld(selectedScenePartVoxels[0].z), voxelCenterToWorld(selectedScenePartVoxels[0].y)]
+      : selectedScenePartVoxel
+        ? [voxelCenterToWorld(selectedScenePartVoxel.x), voxelCenterToWorld(selectedScenePartVoxel.z), voxelCenterToWorld(selectedScenePartVoxel.y)]
         : [0, 0, 0]
     : [0, 0, 0]
 
@@ -5739,6 +5742,13 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
   }
 
   const materialMap = useMemo(() => new Map(project.materials.map((material) => [material.id, new THREE.MeshStandardMaterial({ color: material.color, roughness: 0.72, metalness: 0.03 })])), [project.materials])
+  // Keep transform-only commits off the expensive geometry effects below.
+  // Position, custom-entity offsets and partial part offsets are applied by a
+  // small transform pass; this key changes only when a mesh must be rebuilt.
+  const sceneGeometryRenderKey = useMemo(
+    () => project.instances.map((instance) => `${instance.id}:${sceneInstanceGeometrySignature(instance)}`).join('\u001e'),
+    [project.instances],
+  )
 
   useEffect(() => {
     const root = toolPreviewGroupRef.current
@@ -6335,7 +6345,43 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
       disposeThreeObject(existingCustom)
     }
     invalidateRenderRef.current()
-  }, [project, materialMap])
+  }, [project.assets, project.customVoxels, project.customColors, sceneGeometryRenderKey, materialMap])
+
+  useEffect(() => {
+    const group = groupRef.current
+    if (!group) return
+    const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
+    const existingAssetGroups = new Map<string, THREE.Group>()
+    group.children.filter((child): child is THREE.Group => child instanceof THREE.Group && typeof child.userData.instanceId === 'string')
+      .forEach((child) => existingAssetGroups.set(child.userData.instanceId as string, child))
+    project.instances.forEach((instance) => {
+      if (!instance.visible) return
+      const instanceGroup = existingAssetGroups.get(instance.id)
+      if (!instanceGroup) return
+      instanceGroup.position.copy(toSceneWorld(instance.x, instance.y ?? 0, instance.z))
+      updateAssetPartOffsets(instanceGroup, instance.partOffsets, instance.mirror)
+    })
+
+    const custom = group.children.find((child) => child.name === 'custom-voxels') as THREE.Group | undefined
+    if (custom) {
+      const existingComponents = new Map<string, THREE.Group>()
+      custom.children.filter((child): child is THREE.Group => child instanceof THREE.Group && typeof child.userData.scenePartId === 'string')
+        .forEach((child) => existingComponents.set(child.userData.scenePartId as string, child))
+      sceneParts.filter((part) => part.kind === 'custom').forEach((part) => {
+        const componentGroup = existingComponents.get(`custom:${part.partId}`)
+        if (!componentGroup) return
+        const origin = customComponentRenderOrigin(part.voxels)
+        const sceneOffset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
+        componentGroup.position.set(
+          voxelToWorld(origin.x + sceneOffset.x),
+          voxelToWorld(origin.z + sceneOffset.z),
+          voxelToWorld(origin.y + sceneOffset.y),
+        )
+        componentGroup.userData.renderOrigin = origin
+      })
+    }
+    invalidateRenderRef.current()
+  }, [project.instances, project.customEntityOffsets, sceneParts])
 
   useEffect(() => {
     const group = groupRef.current
@@ -6394,7 +6440,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
     return () => {
       cancelled = true
     }
-  }, [project, materialMap])
+  }, [project.assets, project.customVoxels, project.customColors, sceneGeometryRenderKey, materialMap])
 
   useEffect(() => {
     const group = groupRef.current
@@ -6438,7 +6484,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
       // entities to visibly brighten or darken during a stroke.
     })
     invalidateRenderRef.current()
-  }, [project, sceneParts, selectedPartIds, checkedPartIds, editEntityId])
+  }, [sceneGeometryRenderKey, project.assemblies, selectedPartIds, checkedPartIds, editEntityId])
 
   // HSL dragging is a render-only transaction. Instanced batches can update
   // their material color directly; worker-generated greedy meshes use the GPU
