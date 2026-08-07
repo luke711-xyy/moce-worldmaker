@@ -22,12 +22,12 @@ input, textarea, [contenteditable="true"] { user-select: text; -webkit-user-sele
 button, input { font: inherit; }
 button { border: 0; cursor: pointer; color: inherit; }
 .app-shell { width: 100%; height: 100dvh; min-height: 100svh; display: flex; flex-direction: column; background: #171a1d; }
-.topbar { height: calc(64px + var(--safe-top)); flex: 0 0 calc(64px + var(--safe-top)); display: flex; align-items: center; border-bottom: 1px solid #303638; padding: var(--safe-top) max(18px, calc(18px + var(--safe-right))) 0 max(22px, calc(22px + var(--safe-left))); background: #171a1d; }
-.brand-lockup { display: flex; align-items: center; gap: 10px; width: 260px; }
+.topbar { min-height: calc(64px + var(--safe-top)); height: auto; flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; align-content: center; row-gap: 5px; border-bottom: 1px solid #303638; padding: var(--safe-top) max(18px, calc(18px + var(--safe-right))) 0 max(22px, calc(22px + var(--safe-left))); background: #171a1d; }
+.brand-lockup { display: flex; align-items: center; gap: 10px; width: 260px; flex: 0 0 260px; }
 .brand-mark { width: 30px; height: 30px; display: grid; place-items: center; color: #f3caa1; border: 1px solid #6c4b38; background: #282323; }
 .brand-name { font-size: 18px; font-weight: 700; letter-spacing: .12em; line-height: 1.15; }
 .brand-subtitle { color: #92999a; font-size: 10px; letter-spacing: .08em; margin-top: 3px; }
-.top-actions { height: 100%; display: flex; align-items: center; gap: 4px; flex: 1; }
+.top-actions { min-width: 0; min-height: 34px; height: auto; display: flex; flex-wrap: wrap; align-items: center; align-content: center; gap: 4px; flex: 1 1 420px; }
 .action-button { height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 11px; border-radius: 3px; color: #c9cdcc; background: transparent; font-size: 12px; transition: background .16s, color .16s; }
 .action-button:hover { background: #2c3335; color: #fff4e5; }
 .export-menu { position: relative; display: flex; }
@@ -221,8 +221,8 @@ button { border: 0; cursor: pointer; color: inherit; }
 .scene-context-menu button:hover { color: #fff0df; background: #a9523c; }
 .scene-context-menu button.danger { color: #ffb3a5; border-top: 1px solid #3d4a4d; margin-top: 3px; }
 .scene-context-menu button.danger:hover { color: #fff; background: #9f392d; }
-.viewport-palette { position: absolute; left: 50%; bottom: max(16px, calc(16px + var(--safe-bottom))); z-index: 4; display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid #384346; background: rgba(23,29,31,.92); box-shadow: 0 8px 22px rgba(0,0,0,.24); transform: translateX(-50%); }
-.viewport-palette-swatches { display: grid; grid-template-columns: repeat(8, 20px); gap: 4px; }
+.viewport-palette { position: absolute; left: 50%; bottom: max(16px, calc(16px + var(--safe-bottom))); z-index: 4; display: flex; align-items: center; gap: 8px; width: min(244px, calc(100% - 24px - var(--safe-left) - var(--safe-right))); padding: 7px 8px; border: 1px solid #384346; background: rgba(23,29,31,.92); box-shadow: 0 8px 22px rgba(0,0,0,.24); transform: translateX(-50%); }
+.viewport-palette-swatches { display: grid; grid-template-columns: repeat(auto-fit, minmax(20px, 1fr)); grid-auto-rows: 20px; flex: 1 1 auto; min-width: 0; gap: 4px; }
 .viewport-swatch { width: 20px; height: 20px; padding: 0; border: 1px solid rgba(255,255,255,.14); box-shadow: inset 0 0 0 1px rgba(0,0,0,.18); cursor: pointer; }
 .viewport-swatch.active { outline: 2px solid #e7b28e; outline-offset: 2px; }
 .viewport-color-picker { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid #566265; color: #d7d0c8; background: #222a2d; cursor: pointer; }
@@ -521,13 +521,13 @@ button { border: 0; cursor: pointer; color: inherit; }
 .slicer-main-preview { min-width: 0; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; padding: 18px; background: radial-gradient(circle at 50% 40%, #293437 0, #171d1f 78%); overflow: auto; }
 .slicer-main-preview .slice-layer-canvas { width: auto; max-width: 100%; max-height: calc(100% - 26px); object-fit: contain; box-shadow: 0 10px 28px rgba(0,0,0,.28); }
 .slicer-layer-meta { color: #b9c4c0; font: 10px 'DM Mono', monospace; }
-@media (max-width: 1450px) { .workspace { grid-template-columns: minmax(190px, 244px) minmax(0, 1fr) minmax(230px, 280px); }.workspace.asset-sidebar-collapsed { grid-template-columns: 42px minmax(0, 1fr) minmax(230px, 280px); }.brand-lockup { width: 222px; }.action-button span { display: none; }.action-button { padding: 0 9px; } }
+@media (max-width: 1450px) { .workspace { grid-template-columns: minmax(190px, 244px) minmax(0, 1fr) minmax(230px, 280px); }.workspace.asset-sidebar-collapsed { grid-template-columns: 42px minmax(0, 1fr) minmax(230px, 280px); }.brand-lockup { width: 222px; flex-basis: 222px; }.action-button span { display: none; }.action-button { padding: 0 9px; } }
 
 /* Short viewports keep the editor usable without changing the desktop
    information architecture. The central canvas remains flexible while the
    chrome and floating controls consume less vertical space. */
 @media (max-height: 720px) {
-  .topbar { height: calc(54px + var(--safe-top)); flex-basis: calc(54px + var(--safe-top)); }
+  .topbar { min-height: calc(54px + var(--safe-top)); height: auto; flex-basis: auto; }
   .brand-mark { width: 27px; height: 27px; }
   .brand-name { font-size: 16px; }
   .viewport-toolbar { height: 40px; flex-basis: 40px; }
