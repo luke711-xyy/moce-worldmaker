@@ -3602,7 +3602,9 @@ function App() {
       return
     }
     const count = Math.max(1, Math.min(99, Math.round(requestedCount) || 1))
-    const preview = createCopyPreview(sourceProject, selectedEntityParts.map((part) => structuredClone(part)), count, 1, 'x', 1)
+    // Preview is read-only. Cloning every selected voxel part here made the
+    // first click scale with the entire selected model before any copy existed.
+    const preview = createCopyPreview(sourceProject, selectedEntityParts, count, 1, 'x', 1)
     setCopyPreview(preview)
     setNotice(preview?.valid ? '请选择复制方向，确认后生成实体' : preview?.invalidReason === 'collision' ? '默认复制方向会与已有实体重叠，请选择其他方向' : '默认复制方向超出场景边界，请选择其他方向')
   }
@@ -4181,7 +4183,9 @@ function App() {
       const instance = projectRef.current.instances.find((candidate) => candidate.id === part.instanceId)
       const asset = instance ? assetMap.get(instance.assetId) : undefined
       if (!instance || !asset) continue
-      const simulated = structuredClone(instance)
+      // Boundary validation only reads the instance. A shallow copy is enough
+      // and avoids cloning a large override list just to test one transform.
+      const simulated = { ...instance, overrides: instance.overrides, partOffsets: instance.partOffsets, mirror: instance.mirror ? { ...instance.mirror } : undefined }
       if (mode === 'mirror') simulated.mirror = { x: simulated.mirror?.x ?? false, y: simulated.mirror?.y ?? false, z: simulated.mirror?.z ?? false, [axis]: !(simulated.mirror?.[axis] ?? false) }
       else {
         const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationY' : 'rotationZ'
@@ -4192,23 +4196,57 @@ function App() {
     return true
   }
 
-  const applyCustomVoxelTransform = (parts: SceneEntityPart[], transform: (voxels: Voxel[]) => Voxel[]) => {
+  const commitSceneDiscreteTransform = (parts: SceneEntityPart[], mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90) => {
+    const sourceProject = projectRef.current
     const selectedCustomIds = new Set(parts.filter((part) => part.kind === 'custom').map((part) => part.partId))
-    if (!selectedCustomIds.size) return false
-    updateProject((draft) => {
-      const transformedByKey = new Map<string, Voxel>()
-      for (const entityId of selectedCustomIds) {
-        const part = parts.find((candidate) => candidate.kind === 'custom' && candidate.partId === entityId)
-        const source = part ? scenePartVoxels(part) : []
-        const transformed = transform(source)
-        source.forEach((voxel, index) => {
-          const storedSource = sceneToStoredCustomVoxel(draft, voxel, entityId)
-          const storedResult = sceneToStoredCustomVoxel(draft, { ...transformed[index], entityId }, entityId)
-          transformedByKey.set(`${entityId}:${sceneVoxelKey(storedSource)}`, storedResult)
-        })
-      }
-      draft.customVoxels = draft.customVoxels.map((voxel) => transformedByKey.get(`${voxelEntityId(voxel)}:${sceneVoxelKey(voxel)}`) ?? voxel)
+    const selectedInstanceIds = new Set(parts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
+    if (!selectedCustomIds.size && !selectedInstanceIds.size) return false
+    const voxelAxis = sceneAxisToVoxelAxis(axis)
+    const transformedByKey = new Map<string, Voxel>()
+    const changedOwnerIds = new Set<string>()
+    for (const entityId of selectedCustomIds) {
+      const part = parts.find((candidate) => candidate.kind === 'custom' && candidate.partId === entityId)
+      const source = part ? scenePartVoxels(part) : []
+      if (!source.length) continue
+      const transformed = mode === 'mirror' ? mirrorVoxels(source, voxelAxis) : rotateVoxels(source, voxelAxis, degrees)
+      source.forEach((voxel, index) => {
+        const storedSource = sceneToStoredCustomVoxel(sourceProject, voxel, entityId)
+        const storedResult = sceneToStoredCustomVoxel(sourceProject, { ...transformed[index], entityId }, entityId)
+        transformedByKey.set(`${entityId}:${sceneVoxelKey(storedSource)}`, storedResult)
+      })
+      changedOwnerIds.add(`custom:${entityId}`)
+    }
+    const nextCustomVoxels = transformedByKey.size
+      ? sourceProject.customVoxels.map((voxel) => transformedByKey.get(`${voxelEntityId(voxel)}:${sceneVoxelKey(voxel)}`) ?? voxel)
+      : sourceProject.customVoxels
+    const nextInstances = selectedInstanceIds.size
+      ? sourceProject.instances.map((instance) => {
+        if (!selectedInstanceIds.has(instance.id)) return instance
+        if (mode === 'mirror') {
+          return { ...instance, mirror: { x: instance.mirror?.x ?? false, y: instance.mirror?.y ?? false, z: instance.mirror?.z ?? false, [axis]: !(instance.mirror?.[axis] ?? false) } }
+        }
+        const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationY' : 'rotationZ'
+        return { ...instance, [key]: ((instance[key] ?? 0) + degrees) % 360 }
+      })
+      : sourceProject.instances
+    selectedInstanceIds.forEach((instanceId) => {
+      sceneParts.filter((part) => part.instanceId === instanceId).forEach((part) => changedOwnerIds.add(part.id))
     })
+    const nextProject: ProjectState = { ...sourceProject, customVoxels: nextCustomVoxels, instances: nextInstances }
+    historyRef.current.past = [...historyRef.current.past, {
+      project: sourceProject,
+      editEntityId,
+      selectedId,
+      checkedTreePartIds: [...checkedTreePartIds],
+    }].slice(-50)
+    historyRef.current.future = []
+    const nextParts = sceneEntityParts(nextProject)
+    sceneOccupancyRef.current?.syncOwnerParts(nextParts, changedOwnerIds)
+    skipSceneOccupancySyncRef.current = true
+    projectRef.current = nextProject
+    markSceneDirty()
+    setProject(nextProject)
+    setHistoryRevision((value) => value + 1)
     return true
   }
 
@@ -4227,17 +4265,8 @@ function App() {
       setNotice('当前操作会使实体超出场景范围，请先移动后再操作。')
       return
     }
-    const voxelAxis = sceneAxisToVoxelAxis(axis)
-    const customChanged = applyCustomVoxelTransform(selectedEntityParts, (voxels) => mirrorVoxels(voxels, voxelAxis))
+    const customChanged = commitSceneDiscreteTransform(selectedEntityParts, 'mirror', axis)
     const instanceIds = new Set(selectedEntityParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
-    if (instanceIds.size) {
-      updateProject((draft) => {
-        draft.instances.forEach((instance) => {
-          if (!instanceIds.has(instance.id)) return
-          instance.mirror = { x: instance.mirror?.x ?? false, y: instance.mirror?.y ?? false, z: instance.mirror?.z ?? false, [axis]: !(instance.mirror?.[axis] ?? false) }
-        })
-      })
-    }
     setNotice(`已镜像选中实体 · ${axis.toUpperCase()} 轴${customChanged && instanceIds.size ? ' · 资产实例同步镜像' : ''}`)
   }
 
@@ -4254,18 +4283,7 @@ function App() {
       setNotice('当前操作会使实体超出场景范围，请先移动后再操作。')
       return
     }
-    const voxelAxis = sceneAxisToVoxelAxis(axis)
-    applyCustomVoxelTransform(selectedEntityParts, (voxels) => rotateVoxels(voxels, voxelAxis, degrees))
-    const instanceIds = new Set(selectedEntityParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
-    if (instanceIds.size) {
-      updateProject((draft) => {
-        draft.instances.forEach((instance) => {
-          if (!instanceIds.has(instance.id)) return
-          const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationY' : 'rotationZ'
-          instance[key] = ((instance[key] ?? 0) + degrees) % 360
-        })
-      })
-    }
+    commitSceneDiscreteTransform(selectedEntityParts, 'rotate', axis, degrees)
     setNotice(`已旋转选中实体 · ${axis.toUpperCase()} 轴 ${degrees}°`)
   }
 
