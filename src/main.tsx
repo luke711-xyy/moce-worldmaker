@@ -5497,7 +5497,7 @@ function exposedVoxelFaces(voxel: Pick<Voxel, 'x' | 'y' | 'z'>, occupied: Set<st
   return voxelFaceDirections.filter(({ neighbor: [dx, dy, dz] }) => !occupied.has(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`)).map(({ key }) => key)
 }
 
-function configureGreedyPreviewMaterial(material: THREE.MeshStandardMaterial) {
+function configureHslPreviewMaterial(material: THREE.MeshStandardMaterial, cacheKey: string) {
   const state = { hueDelta: 0, saturationTarget: 100, enabled: false }
   material.userData.moceHslPreviewState = state
   material.onBeforeCompile = (shader) => {
@@ -5534,7 +5534,15 @@ function configureGreedyPreviewMaterial(material: THREE.MeshStandardMaterial) {
     shader.fragmentShader = shader.fragmentShader.replace('void main() {', `uniform float moceHueDelta;\n      uniform float moceSaturationTarget;\n      uniform float moceHslPreviewEnabled;\n      ${helpers}\nvoid main() {`)
       .replace('#include <color_fragment>', '#include <color_fragment>\n      if (moceHslPreviewEnabled > 0.5) {\n        vec3 moceSrgb = vec3(moceLinearToSrgb(diffuseColor.r), moceLinearToSrgb(diffuseColor.g), moceLinearToSrgb(diffuseColor.b));\n        vec3 moceHsl = moceRgbToHsl(moceSrgb);\n        moceHsl.x = fract(moceHsl.x + moceHueDelta);\n        moceHsl.y = clamp(moceSaturationTarget, 0.0, 1.0);\n        vec3 moceRgb = moceHslToRgb(moceHsl);\n        diffuseColor.rgb = vec3(moceSrgbToLinear(moceRgb.r), moceSrgbToLinear(moceRgb.g), moceSrgbToLinear(moceRgb.b));\n      }')
   }
-  material.customProgramCacheKey = () => 'moce-greedy-hsl-preview-v2'
+  material.customProgramCacheKey = () => cacheKey
+}
+
+function configureGreedyPreviewMaterial(material: THREE.MeshStandardMaterial) {
+  configureHslPreviewMaterial(material, 'moce-greedy-hsl-preview-v2')
+}
+
+function configureInstancedVoxelPreviewMaterial(material: THREE.MeshStandardMaterial) {
+  configureHslPreviewMaterial(material, 'moce-instanced-voxel-hsl-preview-v1')
 }
 
 function createVoxelOutlineGeometry() {
@@ -5556,6 +5564,10 @@ function createVoxelOutlineGeometry() {
 }
 
 function addVoxelHighlight(mesh: THREE.Mesh) {
+  // Deferred large cell meshes start with count=0 while their matrices and
+  // colors are uploaded over animation frames. Do not cache an empty outline
+  // here; the completion callback will create it after the instances exist.
+  if (mesh instanceof THREE.InstancedMesh && mesh.count === 0) return []
   const existing = mesh.userData.selectionGlowParts as THREE.Object3D[] | undefined
   if (existing) return existing
   let edgeGeometry: THREE.BufferGeometry
@@ -6614,6 +6626,16 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
           }
           custom.add(componentGroup)
         }
+        componentGroup.userData.onCellBuildComplete = () => {
+          const shouldHighlight = selectedPartIdsRef.current.includes(scenePartId)
+            || editRenderStateRef.current.partIds.has(scenePartId)
+          if (shouldHighlight) {
+            componentGroup.traverse((object) => {
+              if (object instanceof THREE.Mesh && !object.userData.selectionGlow) addVoxelHighlight(object)
+            })
+          }
+          invalidateRenderRef.current()
+        }
         const renderOrigin = customComponentRenderOrigin(component)
         const sceneOffset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
         componentGroup.position.set(
@@ -6792,7 +6814,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       const scenePartId = object.userData.scenePartId as string | undefined
       const isPreviewed = Boolean(colorPreview && scenePartId && selected.has(scenePartId))
       const meshMaterial = object.material as THREE.MeshStandardMaterial
-      if (object.userData.greedyMesh) {
+      if (object.userData.greedyMesh || object.userData.instancedVoxelColors) {
         const state = meshMaterial.userData.moceHslPreviewState as { hueDelta: number; saturationTarget: number; enabled: boolean } | undefined
         const uniforms = meshMaterial.userData.moceHslPreviewUniforms as { moceHueDelta?: { value: number }; moceSaturationTarget?: { value: number }; moceHslPreviewEnabled?: { value: number } } | undefined
         if (state) {
@@ -8230,12 +8252,14 @@ function scheduleInstancedVoxelMatrices(
   componentGroup: THREE.Group,
   batches: Array<{ mesh: THREE.InstancedMesh; voxels: Voxel[] }>,
   origin: { x: number; y: number; z: number },
+  resolveColor?: (voxel: Voxel, target: THREE.Color) => void,
 ): void {
   let batchIndex = 0
   let voxelIndex = 0
   let frameId: number | null = null
   let cancelled = false
   const matrix = new THREE.Matrix4()
+  const color = new THREE.Color()
   const fillFrame = () => {
     frameId = null
     if (cancelled) return
@@ -8253,11 +8277,16 @@ function scheduleInstancedVoxelMatrices(
           voxelCenterToWorld(voxel.y - origin.y),
         )
         batch.mesh.setMatrixAt(voxelIndex, matrix)
+        if (resolveColor) {
+          resolveColor(voxel, color)
+          batch.mesh.setColorAt(voxelIndex, color)
+        }
         voxelIndex += 1
         batch.mesh.count = voxelIndex
         budget -= 1
       }
       batch.mesh.instanceMatrix.needsUpdate = true
+      if (resolveColor && batch.mesh.instanceColor) batch.mesh.instanceColor.needsUpdate = true
       if (voxelIndex >= batch.voxels.length) {
         batchIndex += 1
         voxelIndex = 0
@@ -8268,6 +8297,8 @@ function scheduleInstancedVoxelMatrices(
       return
     }
     delete componentGroup.userData.cancelCellBuild
+    const onComplete = componentGroup.userData.onCellBuildComplete as (() => void) | undefined
+    onComplete?.()
   }
   const cancel = () => {
     cancelled = true
@@ -8298,6 +8329,18 @@ function renderAssetVoxelColor(
         : materialMap.get(voxel.materialId)?.color.getStyle()
           ?? (voxel.materialId.startsWith('#') ? voxel.materialId : asset.color)),
   )
+}
+
+function customVoxelRenderColorKey(
+  voxel: Voxel,
+  materialMap: Map<string, THREE.MeshStandardMaterial>,
+  componentColor?: string,
+): string {
+  const paintedMaterial = voxel.paintMaterialId ? materialMap.get(voxel.paintMaterialId) : undefined
+  if (paintedMaterial) return `#${paintedMaterial.color.getHexString()}`
+  if (componentColor) return componentColor
+  if (voxel.materialId.startsWith('#')) return voxel.materialId
+  return `#${(materialMap.get(voxel.materialId) ?? materialMap.get('terracotta')!).color.getHexString()}`
 }
 
 function buildCustomComponentGroup(component: Voxel[], entityId: string, materialMap: Map<string, THREE.MeshStandardMaterial>, componentColor?: string, forceCellRender = false) {
@@ -8348,7 +8391,43 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
   if (component.length > CUSTOM_INSTANCE_RENDER_LIMIT && !preserveVoxelCells) return componentGroup
 
   const deferCellBuild = preserveVoxelCells && component.length > CUSTOM_INSTANCE_RENDER_LIMIT
-  const occupied = deferCellBuild ? undefined : new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
+  if (deferCellBuild) {
+    // Enlarged geometry must remain a collection of unit cells. Previously we
+    // still synchronously walked the entire enlarged component here to group
+    // every voxel by color before scheduling the matrix writes. That made the
+    // geometry confirmation hitch scale with the final voxel count even though
+    // the expensive matrix upload was already deferred. A single instanced
+    // mesh with per-instance colors lets both the matrix and color upload use
+    // the same bounded animation-frame budget.
+    const meshMaterial = new THREE.MeshStandardMaterial({ color: '#ffffff', vertexColors: true, roughness: 0.72, metalness: 0.03 })
+    configureInstancedVoxelPreviewMaterial(meshMaterial)
+    const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, meshMaterial, component.length)
+    mesh.count = 0
+    mesh.userData.customVoxels = component
+    mesh.userData.customComponentId = voxelComponentId(component)
+    mesh.userData.scenePartId = componentScenePartId
+    mesh.userData.outerVoxel = true
+    mesh.userData.baseRenderColor = 0xffffff
+    mesh.userData.instancedVoxelColors = true
+    componentGroup.add(mesh)
+
+    const colorCache = new Map<string, THREE.Color>()
+    const resolveColor = (voxel: Voxel, target: THREE.Color) => {
+      const key = customVoxelRenderColorKey(voxel, materialMap, componentColor)
+      const cached = colorCache.get(key)
+      if (cached) {
+        target.copy(cached)
+        return
+      }
+      const next = new THREE.Color(key)
+      colorCache.set(key, next)
+      target.copy(next)
+    }
+    scheduleInstancedVoxelMatrices(componentGroup, [{ mesh, voxels: component }], origin, resolveColor)
+    return componentGroup
+  }
+
+  const occupied = new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
   const batches = new Map<string, { color: THREE.Color; voxels: Voxel[] }>()
   const batchColors = new Map<string, THREE.Color>()
   const stringColorKeys = new Map<string, string>()
@@ -8370,26 +8449,22 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
     batch.voxels.push(voxel)
     batches.set(key, batch)
   })
-  const deferredBatches: Array<{ mesh: THREE.InstancedMesh; voxels: Voxel[] }> = []
   batches.forEach(({ color, voxels }) => {
     const meshMaterial = new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03 })
     const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, meshMaterial, voxels.length)
     const matrix = new THREE.Matrix4()
-    if (!deferCellBuild) voxels.forEach((voxel, index) => {
+    voxels.forEach((voxel, index) => {
       matrix.makeTranslation(voxelCenterToWorld(voxel.x - origin.x), voxelCenterToWorld(voxel.z - origin.z), voxelCenterToWorld(voxel.y - origin.y))
       mesh.setMatrixAt(index, matrix)
     })
-    else mesh.count = 0
     mesh.instanceMatrix.needsUpdate = true
     mesh.userData.customVoxels = voxels
     mesh.userData.customComponentId = voxelComponentId(component)
     mesh.userData.scenePartId = componentScenePartId
-    mesh.userData.outerVoxel = deferCellBuild || voxels.some((voxel) => exposedVoxelFaces(voxel, occupied!).length > 0)
+    mesh.userData.outerVoxel = voxels.some((voxel) => exposedVoxelFaces(voxel, occupied).length > 0)
     mesh.userData.baseRenderColor = meshMaterial.color.getHex()
     componentGroup.add(mesh)
-    if (deferCellBuild) deferredBatches.push({ mesh, voxels })
   })
-  if (deferCellBuild) scheduleInstancedVoxelMatrices(componentGroup, deferredBatches, origin)
   return componentGroup
 }
 
