@@ -460,15 +460,19 @@ type GridVoxelBounds = {
   maxZ: number
 }
 
+const gridVoxelBoundsCache = new WeakMap<object, GridVoxelBounds | null>()
+
 function gridVoxelBounds(voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>): GridVoxelBounds | null {
   if (!voxels.length) return null
-  return voxels.reduce((bounds, voxel) => ({
-    minX: Math.min(bounds.minX, voxel.x),
-    maxX: Math.max(bounds.maxX, voxel.x),
-    minY: Math.min(bounds.minY, voxel.y),
-    maxY: Math.max(bounds.maxY, voxel.y),
-    minZ: Math.min(bounds.minZ, voxel.z),
-    maxZ: Math.max(bounds.maxZ, voxel.z),
+  const cacheKey = voxels as object
+  if (gridVoxelBoundsCache.has(cacheKey)) return gridVoxelBoundsCache.get(cacheKey) ?? null
+  const bounds = voxels.reduce((nextBounds, voxel) => ({
+    minX: Math.min(nextBounds.minX, voxel.x),
+    maxX: Math.max(nextBounds.maxX, voxel.x),
+    minY: Math.min(nextBounds.minY, voxel.y),
+    maxY: Math.max(nextBounds.maxY, voxel.y),
+    minZ: Math.min(nextBounds.minZ, voxel.z),
+    maxZ: Math.max(nextBounds.maxZ, voxel.z),
   }), {
     minX: voxels[0].x,
     maxX: voxels[0].x,
@@ -477,6 +481,44 @@ function gridVoxelBounds(voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>): G
     minZ: voxels[0].z,
     maxZ: voxels[0].z,
   })
+  gridVoxelBoundsCache.set(cacheKey, bounds)
+  return bounds
+}
+
+function scenePartGridOffset(part: Pick<SceneEntityPart, 'sceneOffset' | 'partSceneOffset'>): { x: number; y: number; z: number } {
+  return {
+    x: (part.sceneOffset?.x ?? 0) + (part.partSceneOffset?.x ?? 0),
+    y: (part.sceneOffset?.y ?? 0) + (part.partSceneOffset?.y ?? 0),
+    z: (part.sceneOffset?.z ?? 0) + (part.partSceneOffset?.z ?? 0),
+  }
+}
+
+function scenePartsGridBounds(parts: ReadonlyArray<SceneEntityPart>): GridVoxelBounds | null {
+  let combined: GridVoxelBounds | null = null
+  parts.forEach((part) => {
+    const local = gridVoxelBounds(part.voxels)
+    if (!local) return
+    const offset = scenePartGridOffset(part)
+    const translated = {
+      minX: local.minX + offset.x,
+      maxX: local.maxX + offset.x,
+      minY: local.minY + offset.y,
+      maxY: local.maxY + offset.y,
+      minZ: local.minZ + offset.z,
+      maxZ: local.maxZ + offset.z,
+    }
+    combined = combined
+      ? {
+          minX: Math.min(combined.minX, translated.minX),
+          maxX: Math.max(combined.maxX, translated.maxX),
+          minY: Math.min(combined.minY, translated.minY),
+          maxY: Math.max(combined.maxY, translated.maxY),
+          minZ: Math.min(combined.minZ, translated.minZ),
+          maxZ: Math.max(combined.maxZ, translated.maxZ),
+        }
+      : translated
+  })
+  return combined
 }
 
 function translatedVoxelBoundsWithinScene(bounds: GridVoxelBounds, sceneBounds: SceneBounds, deltaX: number, deltaY: number, deltaZ: number): boolean {
@@ -890,7 +932,7 @@ function App() {
   const voxelStrokePublishFrameRef = useRef<number | null>(null)
   const voxelStrokePartsRef = useRef<SceneEntityPart[] | null>(null)
   const voxelStrokeNoticeRef = useRef<string | null>(null)
-  const sceneMoveBoundsRef = useRef<{ parts: SceneEntityPart[]; voxels: Voxel[]; movingIds: string[]; bounds: GridVoxelBounds | null } | null>(null)
+  const sceneMoveBoundsRef = useRef<{ parts: SceneEntityPart[]; movingIds: string[]; bounds: GridVoxelBounds | null } | null>(null)
   const sceneMoveValidationRef = useRef<{ parts: SceneEntityPart[]; deltaX: number; deltaY: number; deltaZ: number; result: GridMoveResult } | null>(null)
   const sceneLibraryLoadRequestRef = useRef(0)
   const sceneLibraryAbortRef = useRef<AbortController | null>(null)
@@ -2237,11 +2279,10 @@ function App() {
       return result
     }
     const cachedMove = sceneMoveBoundsRef.current?.parts === parts ? sceneMoveBoundsRef.current : null
-    const movingVoxels = cachedMove?.voxels ?? movableParts.flatMap((part) => scenePartVoxels(part))
     const bounds = sceneBoundsForProject(projectRef.current)
-    const cachedBounds = cachedMove?.bounds ?? gridVoxelBounds(movingVoxels)
+    const cachedBounds = cachedMove?.bounds ?? scenePartsGridBounds(movableParts)
     const movingIds = cachedMove?.movingIds ?? movableParts.map((part) => part.id)
-    sceneMoveBoundsRef.current = { parts, voxels: movingVoxels, movingIds, bounds: cachedBounds }
+    sceneMoveBoundsRef.current = { parts, movingIds, bounds: cachedBounds }
     if (!cachedBounds) {
       const result = { moved: false, blocked: true, deltaX: 0, deltaY: 0, deltaZ: 0 }
       sceneMoveValidationRef.current = { parts, deltaX, deltaY, deltaZ, result }
@@ -2249,7 +2290,7 @@ function App() {
     }
     const result = resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => {
       return translatedVoxelBoundsWithinScene(cachedBounds, bounds, stepX, stepY, stepZ)
-        && !sceneOccupancyRef.current!.collidesTranslatedProjectVoxels(movingVoxels, { x: stepX, y: stepY, z: stepZ }, movingIds)
+        && !sceneOccupancyRef.current!.collidesTranslatedSceneParts(movableParts, { x: stepX, y: stepY, z: stepZ }, movingIds)
     })
     sceneMoveValidationRef.current = { parts, deltaX, deltaY, deltaZ, result }
     return result

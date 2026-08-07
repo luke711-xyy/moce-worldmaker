@@ -438,6 +438,28 @@ export class SceneOccupancyIndex {
     })
   }
 
+  /**
+   * Collision check for scene parts whose topology is stored in canonical
+   * coordinates and whose scene translation is kept on the part metadata.
+   * This avoids scenePartVoxels() allocating a second array for every cell of
+   * a large entity merely to test a drag preview.
+   */
+  collidesTranslatedSceneParts(
+    parts: ReadonlyArray<SceneEntityPart>,
+    delta: Pick<Voxel, 'x' | 'y' | 'z'>,
+    excludedOwnerIds: Iterable<string> = [],
+  ): boolean {
+    return parts.some((part) => {
+      const rootOffset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
+      const partOffset = part.partSceneOffset ?? { x: 0, y: 0, z: 0 }
+      return this.collidesTranslatedProjectVoxels(part.voxels, {
+        x: delta.x + rootOffset.x + partOffset.x,
+        y: delta.y + rootOffset.y + partOffset.y,
+        z: delta.z + rootOffset.z + partOffset.z,
+      }, excludedOwnerIds)
+    })
+  }
+
   private registerOwner(ownerId: string): number {
     const existing = this.ownerIdToHandle.get(ownerId)
     if (existing) return existing

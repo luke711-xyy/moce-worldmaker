@@ -59,6 +59,13 @@ describe('SceneOccupancyIndex', () => {
     expect(index.collidesTranslatedProjectVoxels(dense, { x: 1, y: 0, z: 0 }, ['dense'])).toBe(true)
   })
 
+  it('checks canonical scene parts with lazy scene offsets without remapping their voxels', () => {
+    const moving = { ...part('moving', [voxel(0, 0, 0)]), sceneOffset: { x: 10, y: 2, z: 3 } }
+    const index = SceneOccupancyIndex.fromParts([moving, part('stationary', [voxel(12, 2, 3)])])
+    expect(index.collidesTranslatedSceneParts([moving], { x: 2, y: 0, z: 0 }, ['moving'])).toBe(true)
+    expect(index.collidesTranslatedSceneParts([moving], { x: 1, y: 0, z: 0 }, ['moving'])).toBe(false)
+  })
+
   it('removes and replaces owners incrementally', () => {
     const index = SceneOccupancyIndex.fromParts([part('entity', [voxel(-1, 0, -1)])])
     index.replaceOwner('entity', [voxel(33, 2, 0)])
