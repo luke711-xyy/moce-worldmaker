@@ -1333,8 +1333,10 @@ function App() {
     skipSceneOccupancySyncRef.current = true
     projectRef.current = next
     markSceneDirty()
-    setProject(next)
-    setHistoryRevision((value) => value + 1)
+    startTransition(() => {
+      setProject(next)
+      setHistoryRevision((value) => value + 1)
+    })
   }
 
   const updateProject = (updater: (draft: ProjectState) => void, trackHistory = true) => {

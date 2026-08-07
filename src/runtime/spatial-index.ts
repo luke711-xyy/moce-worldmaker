@@ -174,17 +174,27 @@ export class SceneOccupancyIndex {
   ): void {
     if (this.ownerIdToHandle.has(ownerId)) this.removeOwner(ownerId)
     const ownerHandle = this.registerOwner(ownerId)
-    const runtimeVoxels = voxels.map(projectVoxelToRuntime)
+    const runtimeVoxels = new Array<RuntimeVoxelCoord>(voxels.length)
+    let bounds: RuntimeVoxelBounds | undefined
     this.ownerVoxels.set(ownerHandle, runtimeVoxels)
-    const bounds = runtimeVoxelBounds(runtimeVoxels)
-    if (bounds) this.ownerBounds.set(ownerHandle, bounds)
     this.ownerTranslations.delete(ownerHandle)
     this.ownerVoxelRefs.set(ownerId, voxels)
     if (voxels.length <= OWNER_KEY_CACHE_LIMIT) this.ownerVoxelKeys.set(ownerId, this.sortedVoxelKeys(voxels))
     this.ownerSourceRefs.set(ownerId, sourceVoxels)
     this.ownerBaseOffsets.set(ownerId, projectVoxelToRuntime(baseOffset))
     voxels.forEach((voxel, index) => {
-      const runtimeVoxel = runtimeVoxels[index]
+      const runtimeVoxel = projectVoxelToRuntime(voxel)
+      runtimeVoxels[index] = runtimeVoxel
+      if (!bounds) {
+        bounds = { minGx: runtimeVoxel.gx, minGy: runtimeVoxel.gy, minGz: runtimeVoxel.gz, maxGx: runtimeVoxel.gx, maxGy: runtimeVoxel.gy, maxGz: runtimeVoxel.gz }
+      } else {
+        bounds.minGx = Math.min(bounds.minGx, runtimeVoxel.gx)
+        bounds.minGy = Math.min(bounds.minGy, runtimeVoxel.gy)
+        bounds.minGz = Math.min(bounds.minGz, runtimeVoxel.gz)
+        bounds.maxGx = Math.max(bounds.maxGx, runtimeVoxel.gx)
+        bounds.maxGy = Math.max(bounds.maxGy, runtimeVoxel.gy)
+        bounds.maxGz = Math.max(bounds.maxGz, runtimeVoxel.gz)
+      }
       const { chunkKey, localIndex } = runtimeVoxelAddress(runtimeVoxel)
       const chunk = this.chunks.get(chunkKey) ?? createRuntimeChunk(chunkKey)
       if (!this.chunks.has(chunkKey)) this.chunks.set(chunkKey, chunk)
@@ -203,6 +213,7 @@ export class SceneOccupancyIndex {
       chunk.materialIds[localIndex] = this.materialIndex(voxel.materialId)
       chunk.dataRevision += 1
     })
+    if (bounds) this.ownerBounds.set(ownerHandle, bounds)
   }
 
   removeOwner(ownerId: string): void {
@@ -610,23 +621,4 @@ export class SceneOccupancyIndex {
 
 function runtimeVoxelKey(voxel: RuntimeVoxelCoord): string {
   return `${voxel.gx},${voxel.gy},${voxel.gz}`
-}
-
-function runtimeVoxelBounds(voxels: RuntimeVoxelCoord[]): RuntimeVoxelBounds | undefined {
-  if (!voxels.length) return undefined
-  return voxels.reduce((bounds, voxel) => ({
-    minGx: Math.min(bounds.minGx, voxel.gx),
-    minGy: Math.min(bounds.minGy, voxel.gy),
-    minGz: Math.min(bounds.minGz, voxel.gz),
-    maxGx: Math.max(bounds.maxGx, voxel.gx),
-    maxGy: Math.max(bounds.maxGy, voxel.gy),
-    maxGz: Math.max(bounds.maxGz, voxel.gz),
-  }), {
-    minGx: voxels[0].gx,
-    minGy: voxels[0].gy,
-    minGz: voxels[0].gz,
-    maxGx: voxels[0].gx,
-    maxGy: voxels[0].gy,
-    maxGz: voxels[0].gz,
-  })
 }
