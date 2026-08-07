@@ -6332,11 +6332,6 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
     group.traverse((object) => {
       if (!(object instanceof THREE.Mesh) || object.userData.selectionGlow) return
       const oldHighlights = object.userData.selectionGlowParts as THREE.Object3D[] | undefined
-      oldHighlights?.forEach((highlight) => {
-        object.remove(highlight)
-        disposeThreeObject(highlight)
-      })
-      delete object.userData.selectionGlowParts
       const scenePartId = object.userData.scenePartId as string | undefined
       const meshMaterial = object.material as THREE.MeshStandardMaterial
       const baseColor = object.userData.baseRenderColor as number | undefined
@@ -6345,7 +6340,20 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
       meshMaterial.opacity = 1
       meshMaterial.depthWrite = true
       if (!scenePartId) return
-      if (!object.userData.skipVoxelHighlight && (selectedScenePartIds.has(scenePartId) || editScenePartIds.has(scenePartId))) addVoxelHighlight(object)
+      const shouldHighlight = !object.userData.skipVoxelHighlight && (selectedScenePartIds.has(scenePartId) || editScenePartIds.has(scenePartId))
+      if (shouldHighlight) {
+        // A transform-only project update keeps the same mesh and its outline
+        // geometry. addVoxelHighlight() is intentionally idempotent here;
+        // rebuilding per-voxel line positions on every mouse release was the
+        // main source of the size-dependent post-drag hitch.
+        addVoxelHighlight(object)
+      } else if (oldHighlights) {
+        oldHighlights.forEach((highlight) => {
+          object.remove(highlight)
+          disposeThreeObject(highlight)
+        })
+        delete object.userData.selectionGlowParts
+      }
       // The edit-mode dimming is rendered once as a stable fullscreen pass
       // below. Do not mutate per-object colors here: doing so made every
       // React/Worker refresh compound the mask and caused non-current
