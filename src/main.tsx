@@ -1421,7 +1421,13 @@ function App() {
       historyRef.current.past = [...historyRef.current.past, makeHistoryEntry(projectRef.current)].slice(-50)
       historyRef.current.future = []
     }
-    sceneOccupancyRef.current?.syncParts(sceneEntityParts(normalizedNext))
+    const nextParts = sceneEntityParts(normalizedNext)
+    const changedOwnerIds = changedOccupancyOwnerIds(sceneParts, nextParts)
+    if (changedOwnerIds.size) sceneOccupancyRef.current?.syncOwnerParts(nextParts, changedOwnerIds)
+    // The index was updated above using the exact changed owner set. Prevent
+    // the sceneParts effect from repeating a full scene synchronization after
+    // React publishes the same project root.
+    skipSceneOccupancySyncRef.current = true
     projectRef.current = normalizedNext
     markSceneDirty()
     setProject(normalizedNext)
