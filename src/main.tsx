@@ -1256,6 +1256,10 @@ function App() {
   })))
   const geometryShellThicknessOptions = useMemo(() => validShellThicknesses(geometrySourceVoxels), [geometrySourceVoxels])
   const geometryScaleOptions = useMemo(() => validScaleFactors(geometrySourceVoxels), [geometrySourceVoxels])
+  // A transform-only move changes scene offsets, but never changes the file
+  // tree. Keep the tree calculation keyed to structural fields so releasing a
+  // large voxel entity does not rebuild every assembly row.
+  const sceneTreePartsKey = useMemo(() => sceneParts.map((part) => `${part.id}:${part.memberKey}:${part.assemblyIds?.join(',') ?? ''}`).join('|'), [sceneParts])
   const sceneTreeItems = useMemo<SceneTreeItem[]>(() => {
     const baseNameForPart = (part: SceneEntityPart) => sceneEntityTreeName(project, part)
     const assemblies = project.assemblies ?? []
@@ -1286,7 +1290,7 @@ function App() {
     const nestedPartIds = new Set(sceneParts.filter((part) => (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).length > 0).map((part) => part.id))
     sceneParts.filter((part) => !nestedPartIds.has(part.id)).forEach((part) => items.push(partItem(part)))
     return items
-  }, [project.assets, project.instances, sceneParts])
+  }, [project.assets, project.instances, project.entityNames, project.assemblies, sceneTreePartsKey])
   const canUndo = historyRevision >= 0 && historyRef.current.past.length > 0
   const canRedo = historyRevision >= 0 && historyRef.current.future.length > 0
   const recentMaterials = useMemo(() => {
@@ -2585,9 +2589,13 @@ function App() {
     // this is unnecessary for a move and becomes visible in scenes with many
     // instances. Only instances that actually receive a new transform are
     // cloned below.
-    const nextProject: ProjectState = {
-      ...projectRef.current,
-      instances: [...projectRef.current.instances],
+    const nextProject: ProjectState = { ...projectRef.current }
+    // Custom voxel offsets are stored separately and do not mutate any asset
+    // instance. Avoid copying the complete instances array for that common
+    // path; doing so needlessly invalidated file-tree and derived panel work
+    // on every large custom-entity release.
+    if (movableParts.some((part) => part.kind === 'asset' && part.instanceId)) {
+      nextProject.instances = [...projectRef.current.instances]
     }
     const mutableInstances = new Map<string, SceneInstance>()
     const mutableInstance = (instanceId: string): SceneInstance | undefined => {
