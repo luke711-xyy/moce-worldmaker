@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceRenderSignature, scenePartVoxels, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxels, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
@@ -102,6 +102,14 @@ describe('莫测造境体素核心数据', () => {
     const moved = { ...original, x: original.x + 1, y: (original.y ?? 0) + 1, z: original.z + 1 }
     expect(sceneInstanceRenderSignature(moved)).toBe(sceneInstanceRenderSignature(original))
     expect(sceneInstanceRenderSignature({ ...original, rotation: original.rotation + 90 })).not.toBe(sceneInstanceRenderSignature(original))
+  })
+
+  it('keeps a partial asset move out of the geometry signature', () => {
+    const project = makeDefaultProject()
+    const original = project.instances[0]
+    const movedPart = { ...original, partOffsets: { ...(original.partOffsets ?? {}), '主体': { x: 0.1, y: 0, z: 0 } } }
+    expect(sceneInstanceGeometrySignature(movedPart)).toBe(sceneInstanceGeometrySignature(original))
+    expect(sceneInstanceRenderSignature(movedPart)).not.toBe(sceneInstanceRenderSignature(original))
   })
 
   it('uses one shared viewport conversion for every 1mm voxel', () => {

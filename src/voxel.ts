@@ -624,8 +624,16 @@ function sceneAssemblySignature(assemblies: SceneAssembly[]): string {
  * Three.js group and must not invalidate the voxel mesh cache.
  */
 export function sceneInstanceRenderSignature(instance: SceneInstance): string {
+  return `${sceneInstanceGeometrySignature(instance)}|${Object.entries(instance.partOffsets ?? {}).sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => `${key}:${value.x},${value.y},${value.z}`).join(';')}`
+}
+
+/**
+ * Signature for the asset geometry and materials, excluding per-part offsets.
+ * A partial asset move changes only these offsets and can therefore be
+ * applied to the existing Three.js part groups without rebuilding every voxel.
+ */
+export function sceneInstanceGeometrySignature(instance: SceneInstance): string {
   const overrides = (instance.overrides ?? []).map((voxel) => `${voxel.x},${voxel.y},${voxel.z},${voxel.materialId},${voxel.paintMaterialId ?? ''},${voxel.mode ?? 'add'}`).join(';')
-  const offsets = Object.entries(instance.partOffsets ?? {}).sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => `${key}:${value.x},${value.y},${value.z}`).join(';')
   const mirror = instance.mirror ? `${instance.mirror.x ? 1 : 0}${instance.mirror.y ? 1 : 0}${instance.mirror.z ? 1 : 0}` : ''
   return [
     instance.assetId,
@@ -637,7 +645,6 @@ export function sceneInstanceRenderSignature(instance: SceneInstance): string {
     instance.style,
     instance.colorOverride ?? '',
     mirror,
-    offsets,
     overrides,
   ].join('|')
 }

@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, loadScenePreview, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
@@ -6241,10 +6241,16 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
       const variant = asset.templateColor ? undefined : styleMaterialVariants[instance.style]
       const renderAsset = variant ? { ...asset, color: variant.color, accent: variant.accent } : asset
       const renderSignature = sceneInstanceRenderSignature(instance)
+      const geometrySignature = sceneInstanceGeometrySignature(instance)
       const existing = existingAssetGroups.get(instance.id)
-      const instanceGroup = existing && existing.userData.renderSignature === renderSignature && existing.userData.assetRef === asset
+      const canReuseGeometry = existing
+        && existing.userData.assetRef === asset
+        && existing.userData.geometrySignature === geometrySignature
+      const instanceGroup = canReuseGeometry
         ? existing
-        : buildAssetGroup(renderAsset, materialMap, instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ)
+        : existing && existing.userData.renderSignature === renderSignature && existing.userData.assetRef === asset
+          ? existing
+          : buildAssetGroup(renderAsset, materialMap, instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ)
       if (instanceGroup !== existing) {
         if (existing) {
           group.remove(existing)
@@ -6256,7 +6262,9 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
       instanceGroup.position.copy(toSceneWorld(instance.x, instance.y ?? 0, instance.z))
       instanceGroup.userData.instanceId = instance.id
       instanceGroup.userData.renderSignature = renderSignature
+      instanceGroup.userData.geometrySignature = geometrySignature
       instanceGroup.userData.assetRef = asset
+      if (canReuseGeometry) updateAssetPartOffsets(instanceGroup, instance.partOffsets, instance.mirror)
       instanceGroup.traverse((object) => {
         object.userData.instanceId = instance.id
         if (object.userData.instancePartId) object.userData.scenePartId = `asset:${instance.id}:${object.userData.instancePartId}`
@@ -7891,6 +7899,18 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
     componentGroup.add(mesh)
   })
   return componentGroup
+}
+
+function updateAssetPartOffsets(group: THREE.Group, partOffsets: SceneInstance['partOffsets'], mirror: SceneInstance['mirror']): void {
+  group.children.forEach((child) => {
+    if (!(child instanceof THREE.Group) || typeof child.userData.instancePartId !== 'string') return
+    const offset = partOffsets?.[child.userData.instancePartId as string] ?? { x: 0, y: 0, z: 0 }
+    child.position.set(
+      mirror?.x ? -offset.x : offset.x,
+      mirror?.y ? -offset.z : offset.z,
+      mirror?.z ? -offset.y : offset.y,
+    )
+  })
 }
 
 function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0, colorOverride?: string, mirror: SceneInstance['mirror'] = undefined, rotationX = 0, rotationY = 0, rotationZ = 0) {
