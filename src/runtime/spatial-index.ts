@@ -47,6 +47,12 @@ type RuntimeVoxelBounds = {
   maxGz: number
 }
 
+// Sorted coordinate keys are only a fallback for comparing a newly allocated
+// snapshot with a small existing owner. Large owners normally preserve their
+// source array reference across transforms; sorting hundreds of thousands of
+// keys during insertion only duplicates work that the chunk index already did.
+const OWNER_KEY_CACHE_LIMIT = 4096
+
 function projectVoxelBounds(voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>): RuntimeVoxelBounds | undefined {
   if (!voxels.length) return undefined
   const first = voxels[0]
@@ -168,12 +174,11 @@ export class SceneOccupancyIndex {
     const ownerHandle = this.registerOwner(ownerId)
     const runtimeVoxels = voxels.map(projectVoxelToRuntime)
     this.ownerVoxels.set(ownerHandle, runtimeVoxels)
-    this.ownerVoxelSets.set(ownerHandle, new Set(runtimeVoxels.map(runtimeVoxelKey)))
     const bounds = runtimeVoxelBounds(runtimeVoxels)
     if (bounds) this.ownerBounds.set(ownerHandle, bounds)
     this.ownerTranslations.delete(ownerHandle)
     this.ownerVoxelRefs.set(ownerId, voxels)
-    this.ownerVoxelKeys.set(ownerId, this.sortedVoxelKeys(voxels))
+    if (voxels.length <= OWNER_KEY_CACHE_LIMIT) this.ownerVoxelKeys.set(ownerId, this.sortedVoxelKeys(voxels))
     this.ownerSourceRefs.set(ownerId, sourceVoxels)
     this.ownerBaseOffsets.set(ownerId, projectVoxelToRuntime(baseOffset))
     voxels.forEach((voxel, index) => {
@@ -258,6 +263,10 @@ export class SceneOccupancyIndex {
   translateOwner(ownerId: string, delta: Pick<Voxel, 'x' | 'y' | 'z'>): void {
     const ownerHandle = this.ownerIdToHandle.get(ownerId)
     if (!ownerHandle || (!delta.x && !delta.y && !delta.z)) return
+    // The lookup Set is only needed once an owner enters the lazy-translation
+    // path. Deferring it keeps initial insertion and bulk geometry commits
+    // linear in chunk writes instead of allocating a second full voxel index.
+    this.ensureOwnerVoxelSet(ownerHandle)
     const runtimeDelta = projectVoxelToRuntime(delta)
     const current = this.ownerTranslations.get(ownerHandle) ?? { gx: 0, gy: 0, gz: 0 }
     this.ownerTranslations.set(ownerHandle, {
@@ -278,12 +287,12 @@ export class SceneOccupancyIndex {
     parts.forEach((part) => {
       const ownerId = part.id
       const existingKeys = this.ownerVoxelKeys.get(ownerId)
-      if (!existingKeys) {
+      const ownerHandle = this.ownerIdToHandle.get(ownerId)
+      if (ownerHandle === undefined) {
         this.insertPart(part)
         result.inserted += 1
         return
       }
-      const ownerHandle = this.ownerIdToHandle.get(ownerId)
       const sourceVoxels = this.ownerSourceRefs.get(ownerId)
       if (ownerHandle !== undefined && sourceVoxels === part.voxels) {
         // Project updates preserve the canonical voxel array for pure moves
@@ -298,9 +307,20 @@ export class SceneOccupancyIndex {
           gy: currentOffset.gy - baseOffset.gy,
           gz: currentOffset.gz - baseOffset.gz,
         }
-        if (translation.gx || translation.gy || translation.gz) this.ownerTranslations.set(ownerHandle, translation)
-        else this.ownerTranslations.delete(ownerHandle)
+        if (translation.gx || translation.gy || translation.gz) {
+          this.ownerTranslations.set(ownerHandle, translation)
+          this.ensureOwnerVoxelSet(ownerHandle)
+        } else this.ownerTranslations.delete(ownerHandle)
         result.unchanged += 1
+        return
+      }
+      // New owners deliberately do not build sorted key arrays on insertion.
+      // If their source reference changes before a translation comparison is
+      // needed, replacing them is both safe and cheaper than sorting a large
+      // voxel payload just to discover that it must be replaced.
+      if (!existingKeys) {
+        this.replaceOwner(ownerId, scenePartVoxels(part), part.voxels, scenePartOffset(part))
+        result.updated += 1
         return
       }
       const voxels = scenePartVoxels(part)
@@ -558,6 +578,11 @@ export class SceneOccupancyIndex {
     this.ownerIdToHandle.set(ownerId, handle)
     this.handleToOwnerId.push(ownerId)
     return handle
+  }
+
+  private ensureOwnerVoxelSet(ownerHandle: number): void {
+    if (this.ownerVoxelSets.has(ownerHandle)) return
+    this.ownerVoxelSets.set(ownerHandle, new Set((this.ownerVoxels.get(ownerHandle) ?? []).map(runtimeVoxelKey)))
   }
 
   private sortedVoxelKeys(voxels: Array<Pick<Voxel, 'x' | 'y' | 'z'>>): string[] {
