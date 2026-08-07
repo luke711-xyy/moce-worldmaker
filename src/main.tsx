@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceRenderSignature, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, loadScenePreview, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
@@ -1185,6 +1185,34 @@ function App() {
     setHistoryRevision((value) => value + 1)
   }
 
+  const commitScenePartsMoveFast = (nextProject: ProjectState, movableParts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => {
+    historyRef.current.past = [...historyRef.current.past, {
+      // This path creates new instance/custom voxel arrays and leaves the
+      // previous project tree untouched, so the old root is a safe immutable
+      // history snapshot without cloning every asset voxel for undo.
+      project: projectRef.current,
+      editEntityId,
+      selectedId,
+      checkedTreePartIds: [...checkedTreePartIds],
+    }].slice(-50)
+    historyRef.current.future = []
+    movableParts.forEach((part) => {
+      sceneOccupancyRef.current?.removeOwner(part.id)
+      sceneOccupancyRef.current?.insertOwner(part.id, part.voxels.map((voxel) => ({
+        ...voxel,
+        x: voxel.x + deltaX,
+        y: voxel.y + deltaY,
+        z: voxel.z + deltaZ,
+      })))
+    })
+    // We already updated only the moved owners above. Avoid a second full
+    // scene synchronization when the new React project reaches the effect.
+    skipSceneOccupancySyncRef.current = true
+    projectRef.current = nextProject
+    setProject(nextProject)
+    setHistoryRevision((value) => value + 1)
+  }
+
   const commitGeometryProject = (next: ProjectState, removedPartIds: string[], resultGroups: Array<{ entityId: string; voxels: Voxel[] }>) => {
     // Geometry confirmation is already a validated, integer-grid batch. Do
     // not send it through updateProject(): that path deep-clones the whole
@@ -2139,7 +2167,7 @@ function App() {
       return result
     }
     const movableParts = parts.filter((part) => !scenePartIsLocked(projectRef.current, part))
-    const currentParts = sceneEntityParts(projectRef.current)
+    const currentParts = sceneParts
     const movingIds = new Set(movableParts.map((part) => part.id))
     const movingCustomIds = new Set(movableParts.filter((part) => part.kind === 'custom').flatMap((part) => part.voxels.map(voxelEntityId)))
     const assetPartsByInstance = new Map<string, SceneEntityPart[]>()
@@ -2154,7 +2182,16 @@ function App() {
       list.push(part)
       currentPartsByInstance.set(part.instanceId!, list)
     })
-    const nextProject = structuredClone(projectRef.current)
+    // A move changes transforms, not the asset/material catalogs. Keep those
+    // large immutable collections shared instead of cloning every voxel in
+    // the project on pointer release.
+    const nextProject: ProjectState = {
+      ...projectRef.current,
+      instances: projectRef.current.instances.map((instance) => ({
+        ...instance,
+        partOffsets: instance.partOffsets ? { ...instance.partOffsets } : undefined,
+      })),
+    }
     if (movingCustomIds.size) {
       nextProject.customVoxels = nextProject.customVoxels.map((voxel) => movingCustomIds.has(voxelEntityId(voxel))
           ? { ...voxel, x: voxel.x + result.deltaX, y: voxel.y + result.deltaY, z: voxel.z + result.deltaZ }
@@ -2183,7 +2220,7 @@ function App() {
       })
       instance.partOffsets = offsets
     })
-    commitProject(nextProject, true)
+    commitScenePartsMoveFast(nextProject, movableParts, result.deltaX, result.deltaY, result.deltaZ)
     if (result.blocked) setNotice('已抵达碰撞边界 · 该方向无法继续')
     return result
   }
@@ -6031,7 +6068,7 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
       if (!asset) continue
       const variant = asset.templateColor ? undefined : styleMaterialVariants[instance.style]
       const renderAsset = variant ? { ...asset, color: variant.color, accent: variant.accent } : asset
-      const renderSignature = JSON.stringify(instance)
+      const renderSignature = sceneInstanceRenderSignature(instance)
       const existing = existingAssetGroups.get(instance.id)
       const instanceGroup = existing && existing.userData.renderSignature === renderSignature && existing.userData.assetRef === asset
         ? existing
@@ -6096,6 +6133,9 @@ function VoxelViewport({ project, sceneParts, selectedId, selectedPartIds, check
           }
           custom.add(componentGroup)
         }
+        const renderOrigin = customComponentRenderOrigin(component)
+        componentGroup.position.set(voxelToWorld(renderOrigin.x), voxelToWorld(renderOrigin.z), voxelToWorld(renderOrigin.y))
+        componentGroup.userData.renderOrigin = renderOrigin
         componentGroup.userData.renderSignature = renderSignature
         retainedComponents.add(scenePartId)
       }
@@ -7489,6 +7529,7 @@ function voxelRenderSignature(component: Voxel[], componentColor?: string): stri
   // enlargement because it temporarily duplicated hundreds of MB of text on
   // the main thread before Three.js could start the greedy-mesh worker.
   let hash = 2166136261
+  const origin = customComponentRenderOrigin(component)
   const addNumber = (value: number) => {
     hash ^= value | 0
     hash = Math.imul(hash, 16777619)
@@ -7504,13 +7545,25 @@ function voxelRenderSignature(component: Voxel[], componentColor?: string): stri
   addNumber(component.length)
   addText(componentColor ?? '')
   component.forEach((voxel) => {
-    addNumber(voxel.x)
-    addNumber(voxel.y)
-    addNumber(voxel.z)
+    // Translation is represented by the component group position. Hash the
+    // local shape so moving a large custom entity does not invalidate its
+    // already-built mesh.
+    addNumber(voxel.x - origin.x)
+    addNumber(voxel.y - origin.y)
+    addNumber(voxel.z - origin.z)
     addText(voxel.materialId)
     addText(voxel.paintMaterialId ?? '')
   })
   return `${component.length}|${hash >>> 0}`
+}
+
+function customComponentRenderOrigin(component: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>): { x: number; y: number; z: number } {
+  if (!component.length) return { x: 0, y: 0, z: 0 }
+  return component.reduce((origin, voxel) => ({
+    x: Math.min(origin.x, voxel.x),
+    y: Math.min(origin.y, voxel.y),
+    z: Math.min(origin.z, voxel.z),
+  }), { x: component[0].x, y: component[0].y, z: component[0].z })
 }
 
 const CUSTOM_INSTANCE_RENDER_LIMIT = 16_384
@@ -7518,6 +7571,12 @@ const CUSTOM_INSTANCE_RENDER_LIMIT = 16_384
 function buildCustomComponentGroup(component: Voxel[], entityId: string, materialMap: Map<string, THREE.MeshStandardMaterial>, componentColor?: string) {
   const componentGroup = new THREE.Group()
   const componentScenePartId = `custom:${entityId}`
+  const origin = customComponentRenderOrigin(component)
+  // Greedy mesh vertices are cell boundaries, so the component origin is the
+  // lower corner of the minimum voxel. Instanced voxel centers add their own
+  // half-cell offset below.
+  componentGroup.position.set(voxelToWorld(origin.x), voxelToWorld(origin.z), voxelToWorld(origin.y))
+  componentGroup.userData.renderOrigin = origin
   componentGroup.userData.scenePartId = componentScenePartId
   const greedyColorIds = new Map<string, number>()
   const greedyColors: string[] = ['#ffffff']
@@ -7536,7 +7595,7 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
       greedyColorIds.set(colorKey, materialId)
       greedyColors.push(colorKey)
     }
-    return { gx: voxel.x, gy: voxel.z, gz: voxel.y, materialId }
+    return { gx: voxel.x - origin.x, gy: voxel.z - origin.z, gz: voxel.y - origin.y, materialId }
   })
   componentGroup.userData.greedyVoxels = greedyVoxels
   componentGroup.userData.greedyColors = greedyColors
@@ -7566,7 +7625,7 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
     const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, meshMaterial, voxels.length)
     const matrix = new THREE.Matrix4()
     voxels.forEach((voxel, index) => {
-      matrix.makeTranslation(voxelCenterToWorld(voxel.x), voxelCenterToWorld(voxel.z), voxelCenterToWorld(voxel.y))
+      matrix.makeTranslation(voxelCenterToWorld(voxel.x - origin.x), voxelCenterToWorld(voxel.z - origin.z), voxelCenterToWorld(voxel.y - origin.y))
       mesh.setMatrixAt(index, matrix)
     })
     mesh.instanceMatrix.needsUpdate = true

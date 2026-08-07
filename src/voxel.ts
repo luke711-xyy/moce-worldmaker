@@ -547,11 +547,18 @@ type SceneEntityPartsCache = {
 }
 
 // sceneEntityParts() is used by rendering, hit testing, selection and the
-// occupancy index. During a brush stroke the project root changes every
-// published frame, while its instance/assets arrays remain stable. Keying the
-// cache by the instances array lets us reuse resolved asset topology and only
-// rebuild the entity whose voxel array actually changed.
-const sceneEntityPartsCaches = new WeakMap<SceneInstance[], SceneEntityPartsCache>()
+// occupancy index. Keep the cache independent from the project root and the
+// instances array: a transform-only commit creates a new instances array, but
+// all unaffected instance resolutions remain valid and can be reused.
+const sceneEntityPartsCache: SceneEntityPartsCache = {
+  assetsRef: null,
+  assembliesRef: null,
+  assemblySignature: '',
+  assetParts: new Map(),
+  customVoxelsRef: null,
+  customVoxelLength: 0,
+  customGroups: new Map(),
+}
 
 function sceneAssemblySignature(assemblies: SceneAssembly[]): string {
   return assemblies.map((assembly) => `${assembly.id}:${assembly.memberKeys.join(',')}`).join('|')
@@ -579,21 +586,32 @@ function sceneInstanceSignature(instance: SceneInstance): string {
   ].join('|')
 }
 
+/**
+ * Signature for render geometry only. Instance position is applied to the
+ * Three.js group and must not invalidate the voxel mesh cache.
+ */
+export function sceneInstanceRenderSignature(instance: SceneInstance): string {
+  const overrides = (instance.overrides ?? []).map((voxel) => `${voxel.x},${voxel.y},${voxel.z},${voxel.materialId},${voxel.paintMaterialId ?? ''},${voxel.mode ?? 'add'}`).join(';')
+  const offsets = Object.entries(instance.partOffsets ?? {}).sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => `${key}:${value.x},${value.y},${value.z}`).join(';')
+  const mirror = instance.mirror ? `${instance.mirror.x ? 1 : 0}${instance.mirror.y ? 1 : 0}${instance.mirror.z ? 1 : 0}` : ''
+  return [
+    instance.assetId,
+    instance.visible ? '1' : '0',
+    instance.rotation,
+    instance.rotationX ?? 0,
+    instance.rotationY ?? 0,
+    instance.rotationZ ?? 0,
+    instance.style,
+    instance.colorOverride ?? '',
+    mirror,
+    offsets,
+    overrides,
+  ].join('|')
+}
+
 export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
   const instances = project.instances
-  let cache = sceneEntityPartsCaches.get(instances)
-  if (!cache) {
-    cache = {
-      assetsRef: null,
-      assembliesRef: null,
-      assemblySignature: '',
-      assetParts: new Map(),
-      customVoxelsRef: null,
-      customVoxelLength: 0,
-      customGroups: new Map(),
-    }
-    sceneEntityPartsCaches.set(instances, cache)
-  }
+  const cache = sceneEntityPartsCache
 
   const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
   const assemblies = project.assemblies ?? []
