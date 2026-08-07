@@ -4583,6 +4583,40 @@ function App() {
   const stableTreeRename = useStableEvent(renameSceneEntity)
   const stableTreeDelete = useStableEvent(deleteSceneTreeEntity)
   const stableTreeToggleLock = useStableEvent(toggleTreeLock)
+  const stableViewportZoomChange = useStableEvent((value: number) => setZoomLevel(clampZoomLevel(value)))
+  const stableViewportInteractionChange = useStableEvent((active: boolean) => {
+    interactionActiveRef.current = active
+    if (active && tool !== 'select') beginVoxelStroke()
+    if (!active) {
+      commitVoxelStroke()
+      voxelStrokeEntityRef.current = null
+    }
+  })
+  const stableViewportRaycast = useStableEvent(raycastSceneVoxel)
+  const stableViewportSelect = useStableEvent(selectScenePart)
+  const stableViewportSelectMultiple = useStableEvent(updateSceneCheckedSelection)
+  const stableViewportCancelPending = useStableEvent(() => {
+    setCopyPreview(null)
+    cancelGeometryPreview()
+  })
+  const stableViewportSelectMaterial = useStableEvent(useMaterial)
+  const stableViewportReplaceMaterial = useStableEvent(replaceMaterialColor)
+  const stableViewportAddVoxel = useStableEvent(addVoxel)
+  const stableViewportRemoveVoxel = useStableEvent(removeVoxel)
+  const stableViewportRemoveVoxels = useStableEvent(removeVoxels)
+  const stableViewportEditInstanceVoxel = useStableEvent(editInstanceVoxel)
+  const stableViewportEditInstanceVoxels = useStableEvent(editInstanceVoxels)
+  const stableViewportApplyVoxelBatch = useStableEvent(applyVoxelBatch)
+  const stableViewportPreviewMove = useStableEvent(previewScenePartsMove)
+  const stableViewportCommitMove = useStableEvent(commitScenePartsMove)
+  const stableViewportPreviewPlacement = useStableEvent(previewPlacementAt)
+  const stableViewportPlaceAsset = useStableEvent(placeAssetAt)
+  const stableViewportNotice = useStableEvent(notifyEditor)
+  const stableViewportExitEdit = useStableEvent(exitEditMode)
+  const stableViewportEnterEdit = useStableEvent(enterEditMode)
+  const stableViewportRename = useStableEvent(renameSceneEntity)
+  const stableViewportBatchOperation = useStableEvent(operateOnSceneSelection)
+  const sceneTreeOverlay = useMemo(() => <MemoizedSceneTreePanel items={sceneTreeItems} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} expandedAssemblies={expandedAssemblies} contextMenu={treeContextMenu} onToggleExpanded={treeToggleExpanded} onSelect={stableTreeSelect} onToggleChecked={stableTreeToggleChecked} onAssemble={stableTreeAssemble} onDissolve={stableTreeDissolve} onEnterEdit={stableTreeEnterEdit} onRename={stableTreeRename} onDelete={stableTreeDelete} onToggleLock={stableTreeToggleLock} onContextMenu={treeContextMenuHandler} />, [sceneTreeItems, selectedId, selectedEntityPartIds, checkedTreePartIds, lockedPartIds, expandedAssemblies, treeContextMenu, treeToggleExpanded, stableTreeSelect, stableTreeToggleChecked, stableTreeAssemble, stableTreeDissolve, stableTreeEnterEdit, stableTreeRename, stableTreeDelete, stableTreeToggleLock, treeContextMenuHandler])
 
   return (
     <div className="app-shell">
@@ -4642,9 +4676,7 @@ function App() {
               </div>}
             </div>
           </div>
-          <VoxelViewport project={project} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={(value) => setZoomLevel(clampZoomLevel(value))} onCameraApiChange={setCameraControlApi} onInteractionChange={(active) => { interactionActiveRef.current = active; if (active && tool !== 'select') beginVoxelStroke(); if (!active) { commitVoxelStroke(); voxelStrokeEntityRef.current = null } }} onRaycastVoxel={raycastSceneVoxel} onSelect={selectScenePart} onSelectMultiple={updateSceneCheckedSelection} onCancelPendingEntityOperation={() => { setCopyPreview(null); cancelGeometryPreview() }} onSelectMaterial={useMaterial} onReplaceMaterial={replaceMaterialColor} onAddVoxel={addVoxel} onRemoveVoxel={removeVoxel} onRemoveVoxels={removeVoxels} onEditInstanceVoxel={editInstanceVoxel} onEditInstanceVoxels={editInstanceVoxels} onApplyVoxelBatch={applyVoxelBatch} onPreviewScenePartsMove={previewScenePartsMove} onCommitScenePartsMove={commitScenePartsMove} onPreviewPlacement={previewPlacementAt} onPlaceAsset={placeAssetAt} onNotice={notifyEditor} onExitEditMode={exitEditMode} onEnterEditMode={enterEditMode} onRename={renameSceneEntity} onBatchOperation={operateOnSceneSelection}>
-            <MemoizedSceneTreePanel items={sceneTreeItems} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} expandedAssemblies={expandedAssemblies} contextMenu={treeContextMenu} onToggleExpanded={treeToggleExpanded} onSelect={stableTreeSelect} onToggleChecked={stableTreeToggleChecked} onAssemble={stableTreeAssemble} onDissolve={stableTreeDissolve} onEnterEdit={stableTreeEnterEdit} onRename={stableTreeRename} onDelete={stableTreeDelete} onToggleLock={stableTreeToggleLock} onContextMenu={treeContextMenuHandler} />
-          </VoxelViewport>
+          <MemoizedVoxelViewport project={project} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
           <ToolboxPopover open={toolboxOpen} onClose={() => setToolboxOpen(false)} tool={tool} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} onToolChange={changeTool} onPlaneChange={setDrawingPlane} onOperationChange={setDrawOperation} onBrushSizeChange={setBrushSize} />
           <div className="viewport-footer">
             <div className="tool-group">
@@ -8543,6 +8575,12 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   const sceneContextRenameTargetId = sceneContextMenu?.partIds.length === 1 ? sceneContextMenu.partIds[0] : ''
   return <div className={`viewport-canvas ${ready ? 'ready' : ''}`} ref={mountRef} onPointerDown={handleEditPointerDown} onPointerMove={handleEditPointerMove} onPointerUp={handleEditPointerUp} onPointerCancel={handleEditPointerCancel} onContextMenu={(event) => event.preventDefault()} onDragOver={handlePlacementDragOver} onDrop={handlePlacementDrop}><div className="viewport-scene-tree-overlay" onPointerDown={(event) => event.stopPropagation()} onPointerMove={(event) => event.stopPropagation()} onPointerUp={(event) => event.stopPropagation()}>{children}</div>{sceneSelectionBox && <div className="scene-selection-box" style={sceneSelectionBox} />}{sceneContextMenu && <div className="scene-context-menu" style={{ left: sceneContextMenu.x, top: sceneContextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>{sceneContextRenameTargetId && <button onClick={() => { onRename(sceneContextRenameTargetId); setSceneContextMenu(null) }}>重命名</button>}{sceneContextEditTargetId && <button onClick={() => { onEnterEditMode(sceneContextEditTargetId); setSceneContextMenu(null) }}>进入编辑修改模式</button>}{sceneContextMenu.partIds.length >= 2 && <button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'assemble'); setSceneContextMenu(null) }}>组装所选实体</button>}<button onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'lock'); setSceneContextMenu(null) }}>{sceneContextLocked ? '取消固定所选实体' : '固定所选实体'}</button><button className="danger" onClick={() => { onBatchOperation(sceneContextMenu.partIds, 'delete'); setSceneContextMenu(null) }}>删除所选实体</button></div>}<svg ref={axisGizmoRef} className="axis-gizmo" viewBox="0 0 64 64" aria-label="当前视图坐标系"><line data-axis-line="x" x1="32" y1="32" x2="56" y2="32" /><line data-axis-line="y" x1="32" y1="32" x2="32" y2="8" /><line data-axis-line="z" x1="32" y1="32" x2="32" y2="8" /><text data-axis-label="x" x="56" y="32">X</text><text data-axis-label="y" x="32" y="8">Y</text><text data-axis-label="z" x="32" y="8">Z</text></svg>{editEntityId && <button className="viewport-edit-exit" aria-label="退出编辑修改模式" title="退出编辑修改模式" onPointerDown={(event) => event.stopPropagation()} onClick={onExitEditMode}><X size={16} /></button>}<ViewportPalette materials={materials} activeMaterial={activeMaterial} onSelectMaterial={onSelectMaterial} onReplaceMaterial={onReplaceMaterial} /><ViewportCameraControls showActions={false} onRotate={rotateCameraByInput} onView={(view) => { applyCameraView(view); onNotice(`已切换视角 · ${cameraViewLabel(view)}`) }} onReset={() => { applyCameraView('default', 100); onZoomChange(100); onNotice('视角已回中 · 缩放已恢复 100%') }} /></div>
 }
+
+// The canvas scene is driven imperatively after mount. Stable event wrappers
+// and the memoized tree child allow unrelated App updates (notices, library
+// state, or other sidebar changes) to skip re-running the large viewport
+// component body and its effect dependency checks.
+const MemoizedVoxelViewport = React.memo(VoxelViewport)
 
 const voxelRenderSignatureCache = new WeakMap<Voxel[], Map<string, string>>()
 const voxelRenderOriginCache = new WeakMap<ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>, { x: number; y: number; z: number }>()
