@@ -4065,10 +4065,13 @@ function App() {
         return { ...assembly, memberKeys: [...new Set(memberKeys)] }
       }).filter((assembly) => assembly.memberKeys.length >= 2),
     }
-    // Keep the established persistent naming rules, but run them in-place on
-    // this structurally shared project rather than paying for a second deep
-    // clone of the large voxel payload.
-    const namedNextProject = normalizeProjectNaming(nextProject, { clone: false })
+    // A single custom entity keeps its stable entity id and tree membership;
+    // running the full naming pass here would rescan the entire enlarged voxel
+    // array even though no name or parent can change. Multi-part and asset
+    // replacements still use the complete naming normalization path.
+    const namedNextProject = singleCustomEntityId
+      ? nextProject
+      : normalizeProjectNaming(nextProject, { clone: false })
     if (geometryPreview.operation === 'scale' && geometryPreview.scaleMode === 'up') {
       const renderModes = { ...(namedNextProject.customVoxelRenderModes ?? {}) }
       selectedResultEntityIds.forEach((entityId) => { renderModes[entityId] = 'cells' })
