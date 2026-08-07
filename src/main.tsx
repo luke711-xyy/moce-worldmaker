@@ -541,6 +541,8 @@ const sharedVoxelBoxGeometry = new THREE.BoxGeometry(VOXEL_WORLD_SIZE, VOXEL_WOR
 sharedVoxelBoxGeometry.userData.sharedRuntimeGeometry = true
 
 function disposeThreeObject(object: THREE.Object3D) {
+  const cancelCellBuild = object.userData.cancelCellBuild as (() => void) | undefined
+  cancelCellBuild?.()
   object.traverse((child) => {
     if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
       if (!child.geometry.userData.sharedRuntimeGeometry) child.geometry.dispose()
@@ -8145,6 +8147,58 @@ function customComponentRenderOrigin(component: ReadonlyArray<Pick<Voxel, 'x' | 
 const CUSTOM_INSTANCE_RENDER_LIMIT = 16_384
 const assetBaseComponentsCache = new WeakMap<VoxelAsset, Array<{ partId: string; voxels: Voxel[] }>>()
 
+function scheduleInstancedVoxelMatrices(
+  componentGroup: THREE.Group,
+  batches: Array<{ mesh: THREE.InstancedMesh; voxels: Voxel[] }>,
+  origin: { x: number; y: number; z: number },
+): void {
+  let batchIndex = 0
+  let voxelIndex = 0
+  let frameId: number | null = null
+  let cancelled = false
+  const matrix = new THREE.Matrix4()
+  const fillFrame = () => {
+    frameId = null
+    if (cancelled) return
+    // Keep each frame bounded. A large enlarged entity can contain hundreds
+    // of thousands of unit cells; spreading matrix writes over frames keeps
+    // confirmation responsive while preserving the exact unit-cell render.
+    let budget = 1200
+    while (budget > 0 && batchIndex < batches.length) {
+      const batch = batches[batchIndex]
+      while (budget > 0 && voxelIndex < batch.voxels.length) {
+        const voxel = batch.voxels[voxelIndex]
+        matrix.makeTranslation(
+          voxelCenterToWorld(voxel.x - origin.x),
+          voxelCenterToWorld(voxel.z - origin.z),
+          voxelCenterToWorld(voxel.y - origin.y),
+        )
+        batch.mesh.setMatrixAt(voxelIndex, matrix)
+        voxelIndex += 1
+        batch.mesh.count = voxelIndex
+        budget -= 1
+      }
+      batch.mesh.instanceMatrix.needsUpdate = true
+      if (voxelIndex >= batch.voxels.length) {
+        batchIndex += 1
+        voxelIndex = 0
+      }
+    }
+    if (batchIndex < batches.length) {
+      frameId = requestAnimationFrame(fillFrame)
+      return
+    }
+    delete componentGroup.userData.cancelCellBuild
+  }
+  const cancel = () => {
+    cancelled = true
+    if (frameId !== null) cancelAnimationFrame(frameId)
+    frameId = null
+  }
+  componentGroup.userData.cancelCellBuild = cancel
+  frameId = requestAnimationFrame(fillFrame)
+}
+
 function renderAssetVoxelColor(
   voxel: Voxel,
   asset: VoxelAsset,
@@ -8209,7 +8263,8 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
   // small cubes with merged coplanar faces and the model appears block-scaled.
   if (component.length > CUSTOM_INSTANCE_RENDER_LIMIT && !preserveVoxelCells) return componentGroup
 
-  const occupied = new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
+  const deferCellBuild = preserveVoxelCells && component.length > CUSTOM_INSTANCE_RENDER_LIMIT
+  const occupied = deferCellBuild ? undefined : new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
   const batches = new Map<string, { color: THREE.Color; voxels: Voxel[] }>()
   component.forEach((voxel) => {
     const material = voxel.paintMaterialId ? materialMap.get(voxel.paintMaterialId) : undefined
@@ -8225,22 +8280,26 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
     batch.voxels.push(voxel)
     batches.set(key, batch)
   })
+  const deferredBatches: Array<{ mesh: THREE.InstancedMesh; voxels: Voxel[] }> = []
   batches.forEach(({ color, voxels }) => {
     const meshMaterial = new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03 })
     const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, meshMaterial, voxels.length)
     const matrix = new THREE.Matrix4()
-    voxels.forEach((voxel, index) => {
+    if (!deferCellBuild) voxels.forEach((voxel, index) => {
       matrix.makeTranslation(voxelCenterToWorld(voxel.x - origin.x), voxelCenterToWorld(voxel.z - origin.z), voxelCenterToWorld(voxel.y - origin.y))
       mesh.setMatrixAt(index, matrix)
     })
+    else mesh.count = 0
     mesh.instanceMatrix.needsUpdate = true
     mesh.userData.customVoxels = voxels
     mesh.userData.customComponentId = voxelComponentId(component)
     mesh.userData.scenePartId = componentScenePartId
-    mesh.userData.outerVoxel = voxels.some((voxel) => exposedVoxelFaces(voxel, occupied).length > 0)
+    mesh.userData.outerVoxel = deferCellBuild || voxels.some((voxel) => exposedVoxelFaces(voxel, occupied!).length > 0)
     mesh.userData.baseRenderColor = meshMaterial.color.getHex()
     componentGroup.add(mesh)
+    if (deferCellBuild) deferredBatches.push({ mesh, voxels })
   })
+  if (deferCellBuild) scheduleInstancedVoxelMatrices(componentGroup, deferredBatches, origin)
   return componentGroup
 }
 
