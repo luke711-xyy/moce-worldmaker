@@ -1400,10 +1400,9 @@ function App() {
   }
 
   const saveProjectToLibrary = async (forceSaveAs = false): Promise<boolean> => {
-    const snapshot = structuredClone(projectRef.current)
     let sceneFile: MoceSceneFile
     try {
-      sceneFile = createSceneFile(snapshot)
+      sceneFile = createSceneFile(projectRef.current)
     } catch (error) {
       setNotice(error instanceof Error ? `保存失败 · ${error.message}` : '保存失败 · 场景文件生成失败')
       return false
@@ -1419,7 +1418,7 @@ function App() {
       // Keep the last known list; the save request below will still report a
       // useful error if the service is unavailable.
     }
-    let savedName = snapshot.name?.trim() || '未命名场景'
+    let savedName = sceneFile.scene.name?.trim() || '未命名场景'
     const requestedName = window.prompt(
       forceSaveAs ? '请输入另存后的场景名称' : '请输入保存后的场景名称',
       savedName,
@@ -1451,7 +1450,17 @@ function App() {
       return false
     }
 
-    const savedSnapshot = { ...snapshot, name: savedName }
+    // createSceneFile already produced an isolated snapshot of the scene. For
+    // the saved baseline, retain the current assets' template metadata (the
+    // portable scene intentionally marks embedded assets as non-template), but
+    // only keep the assets actually referenced by this scene. This avoids a
+    // second full-project clone without changing dirty-state semantics.
+    sceneFile.scene.name = savedName
+    const savedAssetIds = new Set(sceneFile.scene.instances.map((instance) => instance.assetId))
+    const savedSnapshot = {
+      ...sceneFile.scene,
+      assets: projectRef.current.assets.filter((asset) => savedAssetIds.has(asset.id)),
+    } as ProjectState
     if (projectRef.current.name !== savedName) {
       projectRef.current = { ...projectRef.current, name: savedName }
       setProject(projectRef.current)

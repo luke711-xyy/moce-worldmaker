@@ -146,10 +146,20 @@ function isLegacyProject(value: unknown): value is ProjectState {
 
 export function createSceneFile(project: ProjectState): MoceSceneFile {
   const usedAssetIds = new Set(project.instances.map((instance) => instance.assetId))
-  const sceneAssets = project.assets.filter((asset) => usedAssetIds.has(asset.id)).map((asset) => ({ ...structuredClone(asset), isTemplate: false }))
-  const missingAssetId = project.instances.find((instance) => !project.assets.some((asset) => asset.id === instance.assetId))?.assetId
+  const assetsById = new Map(project.assets.map((asset) => [asset.id, asset]))
+  const missingAssetId = project.instances.find((instance) => !assetsById.has(instance.assetId))?.assetId
   if (missingAssetId) throw new SceneFileError(`当前场景引用了不存在的资产：${missingAssetId}`)
-  const { assets: _assets, ...scene } = structuredClone(project)
+  // Do not clone the global asset library as part of the scene snapshot. A
+  // library can contain several large imported models that are not used by
+  // this scene; cloning them here only to discard them below made Save and
+  // page-exit recovery scale with the whole library instead of this scene.
+  const { assets: _assets, ...sceneSource } = project
+  const scene = structuredClone(sceneSource) as PortableSceneState
+  // Keep the historical asset-library order so exported scene files remain
+  // stable for callers that display or diff their embedded dependencies.
+  const sceneAssets = project.assets
+    .filter((asset) => usedAssetIds.has(asset.id))
+    .map((asset) => ({ ...structuredClone(asset), isTemplate: false }))
   scene.voxelSizeMm = normalizeVoxelSizeMm(scene.voxelSizeMm ?? DEFAULT_VOXEL_SIZE_MM)
   scene.sceneBounds = scene.sceneBounds ?? sceneBoundsForProject(project)
   scene.materials = scene.materials ?? []
