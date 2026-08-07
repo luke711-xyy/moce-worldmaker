@@ -944,6 +944,7 @@ function App() {
   const sceneLibraryLoadRequestRef = useRef(0)
   const sceneLibraryAbortRef = useRef<AbortController | null>(null)
   const sceneLibraryProjectCacheRef = useRef(new Map<string, ProjectState>())
+  const geometrySourceCacheRef = useRef<{ selectionKey: string; voxels: GeometryVoxel[] } | null>(null)
   const sceneDirtyRef = useRef(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const sceneLibraryImportInputRef = useRef<HTMLInputElement>(null)
@@ -1098,14 +1099,24 @@ function App() {
   // every move-release made large entities stall the UI even though the user
   // had not started a geometry operation. The actual preview path below still
   // builds a fresh absolute-coordinate batch from projectRef at click time.
-  const geometrySourceVoxels = useMemo<GeometryVoxel[]>(() => selectedEntityParts.flatMap((part) => scenePartVoxels(part).map((voxel) => ({
-    ...voxel,
-    // Geometry operations write back as editable scene voxels. Resolve the
-    // display color here so an asset's primary/accent palette cannot collapse
-    // to the generic custom-entity material during the replacement.
-    materialId: scenePartVoxelDisplayColor(project, part, voxel),
-    sourcePartId: part.id,
-  }))), [selectedEntityPartsKey, project.assets, project.customVoxels, project.customColors, project.materials])
+  const geometrySourceVoxels = useMemo<GeometryVoxel[]>(() => {
+    const cached = geometrySourceCacheRef.current
+    // Geometry availability is not needed while a brush transaction is being
+    // published. Reusing the last committed source prevents every animation
+    // frame from remapping and recoloring a large selected model merely to
+    // recompute shell/scale choices that the user did not request.
+    if (voxelStrokeTransactionRef.current && cached?.selectionKey === selectedEntityPartsKey) return cached.voxels
+    const next = selectedEntityParts.flatMap((part) => scenePartVoxels(part).map((voxel) => ({
+      ...voxel,
+      // Geometry operations write back as editable scene voxels. Resolve the
+      // display color here so an asset's primary/accent palette cannot collapse
+      // to the generic custom-entity material during the replacement.
+      materialId: scenePartVoxelDisplayColor(project, part, voxel),
+      sourcePartId: part.id,
+    })))
+    geometrySourceCacheRef.current = { selectionKey: selectedEntityPartsKey, voxels: next }
+    return next
+  }, [selectedEntityPartsKey, selectedEntityParts, project.assets, project.customVoxels, project.customColors, project.materials])
   const currentGeometrySourceVoxels = () => selectedEntityParts.flatMap((part) => scenePartVoxels(part).map((voxel) => ({
     ...voxel,
     materialId: scenePartVoxelDisplayColor(projectRef.current, part, voxel),
