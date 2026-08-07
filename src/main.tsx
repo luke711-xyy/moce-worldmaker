@@ -2334,12 +2334,26 @@ function App() {
     // A move changes transforms, not the asset/material catalogs. Keep those
     // large immutable collections shared instead of cloning every voxel in
     // the project on pointer release.
+    // Keep the immutable catalogs and untouched instances shared. The old
+    // path cloned every instance (including every part-offset map) on release;
+    // this is unnecessary for a move and becomes visible in scenes with many
+    // instances. Only instances that actually receive a new transform are
+    // cloned below.
     const nextProject: ProjectState = {
       ...projectRef.current,
-      instances: projectRef.current.instances.map((instance) => ({
-        ...instance,
-        partOffsets: instance.partOffsets ? { ...instance.partOffsets } : undefined,
-      })),
+      instances: [...projectRef.current.instances],
+    }
+    const mutableInstances = new Map<string, SceneInstance>()
+    const mutableInstance = (instanceId: string): SceneInstance | undefined => {
+      const cached = mutableInstances.get(instanceId)
+      if (cached) return cached
+      const index = nextProject.instances.findIndex((instance) => instance.id === instanceId)
+      const source = index >= 0 ? nextProject.instances[index] : undefined
+      if (!source || index < 0) return undefined
+      const clone = { ...source, partOffsets: source.partOffsets ? { ...source.partOffsets } : undefined }
+      nextProject.instances[index] = clone
+      mutableInstances.set(instanceId, clone)
+      return clone
     }
     if (movingCustomIds.size) {
       const nextOffsets = { ...(nextProject.customEntityOffsets ?? {}) }
@@ -2354,7 +2368,7 @@ function App() {
       nextProject.customEntityOffsets = nextOffsets
     }
     assetPartsByInstance.forEach((selectedParts, instanceId) => {
-      const instance = nextProject.instances.find((item) => item.id === instanceId)
+      const instance = mutableInstance(instanceId)
       if (!instance) return
       const allParts = currentPartsByInstance.get(instanceId) ?? []
       const movesWholeInstance = allParts.length > 0 && selectedParts.length === allParts.length && allParts.every((part) => movingIds.has(part.id))
@@ -4533,7 +4547,10 @@ function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSce
     const entityPartIds = new Set(entity.partIds)
     const entityParts = sceneEntityParts(selectedSceneProject).filter((part) => entityPartIds.has(part.id) || (part.instanceId && entity.instanceIds.includes(part.instanceId)))
     if (!entityParts.length) return null
-    const firstVoxel = scenePartVoxels(entityParts[0])[0]
+    // Only the first voxel is needed to choose the fallback preview color.
+    // Avoid materializing the complete scene-coordinate voxel array here;
+    // imported models can contain hundreds of thousands of voxels.
+    const firstVoxel = scenePartVoxelAt(entityParts[0], 0)
     const color = entityParts.map((part) => part.colorOverride).find(Boolean)
       ?? (firstVoxel ? materialColorForVoxel(selectedSceneProject, firstVoxel) : '#6c827d')
     const asset = makeAssetFromSceneParts(
@@ -7483,7 +7500,10 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
           onNotice('当前实体已固定 · 请先在右键菜单中取消固定')
           return
         }
-        const anchorVoxel = scenePartVoxels(hitPart)[0]
+        // Dragging needs only an anchor point. Do not expand the whole part
+        // into scene coordinates on pointer-down, otherwise large imported
+        // models stall before the gesture even begins.
+        const anchorVoxel = scenePartVoxelAt(hitPart, 0)
         const anchor = instance
           ? toSceneWorld(instance.x, instance.y ?? 0, instance.z)
           : toSceneWorld(voxelCenterToWorld(anchorVoxel?.x ?? 0), voxelCenterToWorld(anchorVoxel?.y ?? 0), voxelCenterToWorld(anchorVoxel?.z ?? 0))
