@@ -6336,6 +6336,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   // transform effect still reconciles state, but its extra render is
   // redundant for this path and can make a large model pause after mouse-up.
   const skipNextTransformRenderRef = useRef(false)
+  const finishDragRenderBurstRef = useRef<() => void>(() => {})
   const previewTouchPointersRef = useRef(new Set<number>())
   const previewTouchGestureRef = useRef<{ pointerId: number; startX: number; startY: number; moved: boolean } | null>(null)
   const previewMultiTouchRef = useRef(false)
@@ -6741,6 +6742,13 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       if (!frame) frame = requestAnimationFrame(animate)
     }
     invalidateRenderRef.current = invalidateRender
+    const finishDragRenderBurst = () => {
+      // Keep the already queued frame so the committed transform is visible,
+      // but discard the render tail accumulated by pointer-move invalidations.
+      renderUntil = performance.now()
+      if (!frame) frame = requestAnimationFrame(animate)
+    }
+    finishDragRenderBurstRef.current = finishDragRenderBurst
     const cancelShadowRestore = () => {
       if (restoreShadowTimer === null) return
       window.clearTimeout(restoreShadowTimer)
@@ -6933,6 +6941,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       if (zoomReportTimerRef.current !== null) window.clearTimeout(zoomReportTimerRef.current)
       cancelShadowRestore()
       invalidateRenderRef.current = () => {}
+      finishDragRenderBurstRef.current = () => {}
       interactionQualityRef.current = () => {}
       observer.disconnect()
       renderer.domElement.removeEventListener('wheel', applyWheelZoom)
@@ -7971,6 +7980,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     const result = onCommitScenePartsMove(gesture.parts, gesture.lastDeltaX, gesture.lastDeltaY, gesture.lastDeltaZ)
     if (!result.moved) resetDragVisuals(gesture)
     else skipNextTransformRenderRef.current = true
+    finishDragRenderBurstRef.current()
   }
 
   const partBelongsToEditEntity = (part: SceneEntityPart | undefined) => {
