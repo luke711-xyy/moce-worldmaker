@@ -3643,42 +3643,73 @@ function App() {
     rootAssemblyIds.forEach(collectAssemblyTree)
     const copyBatchId = Date.now()
     let firstSelection = ''
-    updateProject((draft) => {
-      for (let copyIndex = 0; copyIndex < currentPreview.count; copyIndex += 1) {
-        const offset = currentPreview.offsets[copyIndex]
-        const instanceMap = new Map<string, string>()
-        const customMap = new Map<string, string>()
-        const clonedInstanceIds: string[] = []
+    const nextInstances = [...sourceProject.instances]
+    const nextCustomVoxels = [...sourceProject.customVoxels]
+    const nextCustomColors = { ...(sourceProject.customColors ?? {}) }
+    const nextCustomVoxelRenderModes = { ...(sourceProject.customVoxelRenderModes ?? {}) }
+    const nextAssemblies = [...(sourceProject.assemblies ?? [])]
+    let nextAssemblySequence = sourceProject.assemblySequence ?? 1
+    const createdInstanceIds = new Set<string>()
+    const createdCustomIds = new Set<string>()
+    const translateWorld = (value: number, delta: number) => Number((value + voxelToWorld(delta)).toFixed(3))
+    // Build a structurally shared project. The generic updateProject path
+    // cloned every asset and voxel before appending copies, so confirming a
+    // large copy stalled even though only the selected owners changed.
+    for (let copyIndex = 0; copyIndex < currentPreview.count; copyIndex += 1) {
+      const offset = currentPreview.offsets[copyIndex]
+      const instanceMap = new Map<string, string>()
+      const customMap = new Map<string, string>()
+      const clonedInstanceIds: string[] = []
         currentPreview.sourceInstanceIds.forEach((oldId) => {
-          const current = draft.instances.find((instance) => instance.id === oldId)
+          const current = sourceProject.instances.find((instance) => instance.id === oldId)
           if (!current) return
           const newId = `${oldId}-copy-${copyBatchId}-${copyIndex + 1}`
           instanceMap.set(oldId, newId); clonedInstanceIds.push(newId)
-          const translateWorld = (value: number, delta: number) => Number((value + voxelToWorld(delta)).toFixed(3))
-          const clonedInstance = { ...structuredClone(current), id: newId, overrides: structuredClone(current.overrides ?? []), partOffsets: structuredClone(current.partOffsets ?? {}) }
+          createdInstanceIds.add(newId)
+          const clonedInstance: SceneInstance = {
+            ...current,
+            id: newId,
+            overrides: (current.overrides ?? []).map((override) => ({ ...override })),
+            partOffsets: Object.fromEntries(Object.entries(current.partOffsets ?? {}).map(([partId, partOffset]) => [partId, { ...partOffset }])),
+            mirror: current.mirror ? { ...current.mirror } : undefined,
+          }
           // Horizontal copies must preserve the source elevation exactly. Only
           // a user-selected editor Z offset is allowed to change instance.y.
           clonedInstance.x = translateWorld(current.x, offset.x)
           clonedInstance.z = translateWorld(current.z, offset.z)
           if (offset.y !== 0) clonedInstance.y = translateWorld(current.y ?? 0, offset.y)
-          draft.instances.push(clonedInstance)
+          nextInstances.push(clonedInstance)
         })
         currentPreview.sourceCustomIds.forEach((oldId) => {
           const newId = `${oldId}-copy-${copyBatchId}-${copyIndex + 1}`
           customMap.set(oldId, newId)
+          createdCustomIds.add(newId)
           const sourcePart = sourceParts.find((part) => part.kind === 'custom' && part.partId === oldId)
-          scenePartVoxels(sourcePart ?? { id: `custom:${oldId}`, kind: 'custom', partId: oldId, memberKey: `voxel:${oldId}`, voxels: draft.customVoxels.filter((voxel) => voxelEntityId(voxel) === oldId) })
-            .forEach((voxel) => draft.customVoxels.push({ ...structuredClone(voxel), x: voxel.x + offset.x, y: voxel.y + offset.y, z: voxel.z + offset.z, entityId: newId }))
-          if (draft.customColors?.[oldId]) draft.customColors = { ...(draft.customColors ?? {}), [newId]: draft.customColors[oldId] }
-          const renderMode = draft.customVoxelRenderModes?.[oldId]
-          if (renderMode) draft.customVoxelRenderModes = { ...(draft.customVoxelRenderModes ?? {}), [newId]: renderMode }
+          scenePartVoxels(sourcePart ?? { id: `custom:${oldId}`, kind: 'custom', partId: oldId, memberKey: `voxel:${oldId}`, voxels: sourceProject.customVoxels.filter((voxel) => voxelEntityId(voxel) === oldId) })
+            .forEach((voxel) => nextCustomVoxels.push({ ...voxel, x: voxel.x + offset.x, y: voxel.y + offset.y, z: voxel.z + offset.z, entityId: newId }))
+          if (sourceProject.customColors?.[oldId]) nextCustomColors[newId] = sourceProject.customColors[oldId]
+          const renderMode = sourceProject.customVoxelRenderModes?.[oldId]
+          if (renderMode) nextCustomVoxelRenderModes[newId] = renderMode
         })
         const assemblyMapForCopy = new Map<string, string>(); [...assemblyTreeIds].forEach((oldId) => assemblyMapForCopy.set(oldId, `assembly-${copyBatchId}-${copyIndex + 1}-${oldId}`))
         const mapLeafKey = (memberKey: string) => { for (const [oldId, newId] of instanceMap) if (memberKey === `asset:${oldId}` || memberKey.startsWith(`asset:${oldId}:`)) return memberKey.replace(`asset:${oldId}`, `asset:${newId}`); for (const [oldId, newId] of customMap) if (memberKey === `voxel:${oldId}`) return `voxel:${newId}`; return memberKey }
         const mapMemberKey = (memberKey: string) => memberKey.startsWith('assembly:') ? `assembly:${assemblyMapForCopy.get(memberKey.slice('assembly:'.length)) ?? memberKey.slice('assembly:'.length)}` : mapLeafKey(memberKey)
-        ;[...assemblyTreeIds].forEach((oldId) => { const sourceAssembly = assemblyMap.get(oldId); if (!sourceAssembly) return; draft.assemblies = [...(draft.assemblies ?? []), { ...structuredClone(sourceAssembly), id: assemblyMapForCopy.get(oldId)!, nameMode: 'auto', sequence: undefined, parentAssemblyId: undefined, name: (() => { const number = Math.max(1, draft.assemblySequence ?? 1); draft.assemblySequence = number + 1; return `装配体 ${number}` })(), memberKeys: sourceAssembly.memberKeys.map(mapMemberKey) }] })
+        ;[...assemblyTreeIds].forEach((oldId) => { const sourceAssembly = assemblyMap.get(oldId); if (!sourceAssembly) return; const number = Math.max(1, nextAssemblySequence++); nextAssemblies.push({ ...sourceAssembly, id: assemblyMapForCopy.get(oldId)!, nameMode: 'auto', sequence: undefined, parentAssemblyId: undefined, name: `装配体 ${number}`, memberKeys: sourceAssembly.memberKeys.map(mapMemberKey) }) })
         if (!firstSelection) firstSelection = rootAssemblyIds[0] ? `assembly:${assemblyMapForCopy.get(rootAssemblyIds[0])}` : clonedInstanceIds[0] ? clonedInstanceIds[0] : currentPreview.sourceCustomIds[0] ? `custom:${customMap.get(currentPreview.sourceCustomIds[0])}` : ''
-      }
+    }
+    const unnormalizedNext: ProjectState = { ...sourceProject, instances: nextInstances, customVoxels: nextCustomVoxels, customColors: nextCustomColors, customVoxelRenderModes: nextCustomVoxelRenderModes, assemblies: nextAssemblies, assemblySequence: nextAssemblySequence }
+    const normalizedNext = normalizeProjectNaming(normalizeStoredProject(unnormalizedNext, { normalizeNaming: false }), { clone: false })
+    const newOwnerIds = new Set<string>([...createdCustomIds].map((entityId) => `custom:${entityId}`))
+    sceneEntityParts(normalizedNext).filter((part) => part.instanceId && createdInstanceIds.has(part.instanceId)).forEach((part) => newOwnerIds.add(part.id))
+    historyRef.current.past = [...historyRef.current.past, { project: sourceProject, editEntityId, selectedId, checkedTreePartIds: [...checkedTreePartIds] }].slice(-50)
+    historyRef.current.future = []
+    sceneOccupancyRef.current?.syncOwnerParts(sceneEntityParts(normalizedNext), newOwnerIds)
+    skipSceneOccupancySyncRef.current = true
+    projectRef.current = normalizedNext
+    markSceneDirty()
+    startTransition(() => {
+      setProject(normalizedNext)
+      setHistoryRevision((value) => value + 1)
     })
     setCopyPreview(null); setCheckedTreePartIds([]); setSelectedId(firstSelection); setNotice(`已复制 ${sourceParts.length} 个选中实体 × ${currentPreview.count} · 装配体结构已保留`)
   }
