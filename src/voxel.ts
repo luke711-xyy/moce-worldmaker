@@ -152,10 +152,16 @@ export type SceneEntityPart = {
    * actual scene coordinates are required.
    */
   sceneOffset?: { x: number; y: number; z: number }
+  /** Scene-grid translation for a moved asset sub-part, kept out of voxels. */
+  partSceneOffset?: { x: number; y: number; z: number }
   voxels: Voxel[]
 }
 
-const scenePartVoxelCache = new WeakMap<ReadonlyArray<Voxel>, Map<string, Voxel[]>>()
+// Keep only the latest scene-coordinate variant for each canonical voxel
+// array. A per-offset Map looks convenient, but a large entity dragged across
+// many cells would retain one full mapped array per historical position and
+// create a steadily growing GC backlog.
+const scenePartVoxelCache = new WeakMap<ReadonlyArray<Voxel>, { key: string; voxels: Voxel[] }>()
 
 export function customEntityOffset(project: Pick<ProjectState, 'customEntityOffsets'>, entityId: string): { x: number; y: number; z: number } {
   return project.customEntityOffsets?.[entityId] ?? { x: 0, y: 0, z: 0 }
@@ -168,23 +174,25 @@ export function sceneToStoredCustomVoxel(project: Pick<ProjectState, 'customEnti
 }
 
 export function scenePartVoxels(part: SceneEntityPart): Voxel[] {
-  const offset = part.sceneOffset
-  if (!offset || (!offset.x && !offset.y && !offset.z)) return part.voxels
-  const key = `${offset.x},${offset.y},${offset.z}`
-  let variants = scenePartVoxelCache.get(part.voxels)
-  if (!variants) {
-    variants = new Map()
-    scenePartVoxelCache.set(part.voxels, variants)
+  const rootOffset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
+  const partOffset = part.partSceneOffset ?? { x: 0, y: 0, z: 0 }
+  const offset = {
+    x: rootOffset.x + partOffset.x,
+    y: rootOffset.y + partOffset.y,
+    z: rootOffset.z + partOffset.z,
   }
-  const cached = variants.get(`${key}:${part.voxels.length}`)
-  if (cached) return cached
+  if (!offset.x && !offset.y && !offset.z) return part.voxels
+  const key = `${offset.x},${offset.y},${offset.z}`
+  const cacheKey = `${key}:${part.voxels.length}`
+  const cached = scenePartVoxelCache.get(part.voxels)
+  if (cached?.key === cacheKey) return cached.voxels
   const voxels = part.voxels.map((voxel) => ({
     ...voxel,
     x: voxel.x + offset.x,
     y: voxel.y + offset.y,
     z: voxel.z + offset.z,
   }))
-  variants.set(`${key}:${part.voxels.length}`, voxels)
+  scenePartVoxelCache.set(part.voxels, { key: cacheKey, voxels })
   return voxels
 }
 
@@ -659,8 +667,34 @@ function sceneInstanceVoxelOffset(instance: SceneInstance, asset: VoxelAsset): {
   }
 }
 
+/**
+ * Resolve a part-level transform into an integer scene-grid delta. Asset
+ * partOffsets are stored in local asset axes and are affected by the same
+ * mirror/rotation as the part voxels. One probe voxel is enough because this
+ * transform is translational; the whole component never needs remapping.
+ */
+function sceneInstancePartVoxelOffset(instance: SceneInstance, asset: VoxelAsset, partId: string): { x: number; y: number; z: number } {
+  const partOffset = instance.partOffsets?.[partId]
+  if (!partOffset || (!partOffset.x && !partOffset.y && !partOffset.z)) return { x: 0, y: 0, z: 0 }
+  const canonicalInstance = {
+    ...instance,
+    x: snapAssetOrigin(0, asset.width),
+    y: 0,
+    z: snapAssetOrigin(0, asset.depth),
+  }
+  const withoutPartOffset = { ...canonicalInstance, partOffsets: undefined }
+  const probe: Voxel = { x: 0, y: 0, z: 0, materialId: 'primary' }
+  const translated = resolveInstanceComponentSceneVoxels(canonicalInstance, asset, [probe], partId)[0]
+  const canonical = resolveInstanceComponentSceneVoxels(withoutPartOffset, asset, [probe], partId)[0]
+  return {
+    x: translated.x - canonical.x,
+    y: translated.y - canonical.y,
+    z: translated.z - canonical.z,
+  }
+}
+
 function sameSceneOffset(left: { x: number; y: number; z: number } | undefined, right: { x: number; y: number; z: number }): boolean {
-  return Boolean(left && left.x === right.x && left.y === right.y && left.z === right.z)
+  return (left?.x ?? 0) === right.x && (left?.y ?? 0) === right.y && (left?.z ?? 0) === right.z
 }
 
 export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
@@ -709,28 +743,34 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
     const asset = assetMap.get(instance.assetId)
     if (!asset) continue
     retainedInstanceIds.add(instance.id)
-    const signature = sceneInstanceRenderSignature(instance)
+    // Root and part transforms are applied lazily by scenePartVoxels(). The
+    // cached topology only needs invalidation when geometry/material content
+    // changes, not when a user moves an instance or sub-part.
+    const signature = sceneInstanceGeometrySignature(instance)
     const cached = cache.assetParts.get(instance.id)
     const sceneOffset = sceneInstanceVoxelOffset(instance, asset)
     if (!cached || cached.asset !== asset || cached.signature !== signature) {
       const nextParts: SceneEntityPart[] = []
       const canonicalX = snapAssetOrigin(0, asset.width)
       const canonicalZ = snapAssetOrigin(0, asset.depth)
-      const canonicalInstance = { ...instance, x: canonicalX, y: 0, z: canonicalZ }
+      const canonicalInstance = { ...instance, x: canonicalX, y: 0, z: canonicalZ, partOffsets: undefined }
       for (const { partId, voxels: component } of resolveInstanceComponents(asset, canonicalInstance.overrides ?? [])) {
         const sceneVoxels = resolveInstanceComponentSceneVoxels(canonicalInstance, asset, component, partId)
+        const partSceneOffset = sceneInstancePartVoxelOffset(instance, asset, partId)
         const label = partId.split('#')[0]
         const memberKey = `asset:${instance.id}:${partId}`
         const assemblyIds = assemblyPathForMemberKey(memberKey)
-        nextParts.push({ id: `asset:${instance.id}:${partId}`, kind: 'asset', instanceId: instance.id, partId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label, colorOverride: instance.colorOverride, sceneOffset, voxels: sceneVoxels })
+        nextParts.push({ id: `asset:${instance.id}:${partId}`, kind: 'asset', instanceId: instance.id, partId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label, colorOverride: instance.colorOverride, sceneOffset, partSceneOffset, voxels: sceneVoxels })
       }
       cache.assetParts.set(instance.id, { asset, signature, parts: nextParts })
     } else {
-      // Keep the canonical voxel topology and refresh only the small offset
-      // object when the instance position changes.
-      if (!cached.parts.every((part) => sameSceneOffset(part.sceneOffset, sceneOffset))) {
-        cached.parts = cached.parts.map((part) => ({ ...part, sceneOffset }))
-      }
+      // Keep the canonical voxel topology and refresh only small transform
+      // objects when the instance root or one of its parts moves.
+      cached.parts = cached.parts.map((part) => {
+        const partSceneOffset = sceneInstancePartVoxelOffset(instance, asset, part.partId)
+        if (sameSceneOffset(part.sceneOffset, sceneOffset) && sameSceneOffset(part.partSceneOffset, partSceneOffset)) return part
+        return { ...part, sceneOffset, partSceneOffset }
+      })
     }
     parts.push(...(cache.assetParts.get(instance.id)?.parts ?? []))
   }

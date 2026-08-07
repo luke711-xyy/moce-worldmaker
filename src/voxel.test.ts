@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxels, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxels, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
@@ -78,6 +78,47 @@ describe('莫测造境体素核心数据', () => {
     expect(movedSceneVoxels[0].y - originalSceneVoxels[0].y).toBe(4)
     expect(movedSceneVoxels[0].z - originalSceneVoxels[0].z).toBe(-7)
     expect(movedSceneVoxels).not.toEqual(originalSceneVoxels)
+  })
+
+  it('keeps asset topology canonical when only one part moves', () => {
+    const project = makeDefaultProject()
+    const originalPart = sceneEntityParts(project).find((part) => part.kind === 'asset')!
+    const movedProject = {
+      ...project,
+      instances: project.instances.map((instance) => instance.id === originalPart.instanceId
+        ? { ...instance, partOffsets: { ...(instance.partOffsets ?? {}), [originalPart.partId]: { x: 0.1, y: 0, z: 0 } } }
+        : instance),
+    }
+    const movedPart = sceneEntityParts(movedProject).find((part) => part.id === originalPart.id)!
+    expect(movedPart.voxels).toBe(originalPart.voxels)
+    expect(movedPart.partSceneOffset).toBeDefined()
+    const movedSceneVoxels = scenePartVoxels(movedPart)
+    const rootOffset = movedPart.sceneOffset ?? { x: 0, y: 0, z: 0 }
+    const offset = movedPart.partSceneOffset!
+    expect(movedSceneVoxels[0]).toEqual({
+      ...movedPart.voxels[0],
+      x: movedPart.voxels[0].x + rootOffset.x + offset.x,
+      y: movedPart.voxels[0].y + rootOffset.y + offset.y,
+      z: movedPart.voxels[0].z + rootOffset.z + offset.z,
+    })
+  })
+
+  it('preserves exact scene coordinates for rotated and mirrored part offsets', () => {
+    const project = makeDefaultProject()
+    const originalInstance = project.instances[0]
+    const asset = project.assets.find((item) => item.id === originalInstance.assetId)!
+    const firstPart = sceneEntityParts(project).find((part) => part.instanceId === originalInstance.id)!
+    const movedInstance = {
+      ...originalInstance,
+      rotation: 90,
+      mirror: { x: true, y: false, z: true },
+      partOffsets: { ...(originalInstance.partOffsets ?? {}), [firstPart.partId]: { x: 0.1, y: 0.2, z: -0.1 } },
+    }
+    const movedProject = { ...project, instances: project.instances.map((instance) => instance.id === movedInstance.id ? movedInstance : instance) }
+    const movedParts = sceneEntityParts(movedProject).filter((part) => part.instanceId === movedInstance.id)
+    const cachedKeys = movedParts.flatMap((part) => scenePartVoxels(part)).map(({ x, y, z, materialId }) => `${x},${y},${z},${materialId}`).sort()
+    const directKeys = resolveInstanceSceneVoxels(movedInstance, asset).map(({ x, y, z, materialId }) => `${x},${y},${z},${materialId}`).sort()
+    expect(cachedKeys).toEqual(directKeys)
   })
 
   it('keeps manually authored topology canonical while moving through a lazy entity offset', () => {
