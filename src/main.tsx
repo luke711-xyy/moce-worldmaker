@@ -1390,7 +1390,10 @@ function App() {
     const normalizedNext = normalizeProjectNaming(normalizedBase, { clone: false })
     if (trackHistory) {
       historyRef.current.past = [...historyRef.current.past, {
-        project: structuredClone(projectRef.current),
+        // `next` is structurally cloned before this commit, so the current
+        // root remains immutable and can be retained as the history snapshot.
+        // Cloning it here duplicated every asset voxel on every edit.
+        project: projectRef.current,
         editEntityId,
         selectedId,
         checkedTreePartIds: [...checkedTreePartIds],
@@ -1794,7 +1797,9 @@ function App() {
       return
     }
     historyRef.current.future.push({
-      project: structuredClone(projectRef.current),
+      // Committed project roots are immutable; retain the current root instead
+      // of cloning the complete scene before every undo.
+      project: projectRef.current,
       editEntityId,
       selectedId,
       checkedTreePartIds: [...checkedTreePartIds],
@@ -1817,7 +1822,9 @@ function App() {
       return
     }
     historyRef.current.past.push({
-      project: structuredClone(projectRef.current),
+      // Committed project roots are immutable; retain the current root instead
+      // of cloning the complete scene before every redo.
+      project: projectRef.current,
       editEntityId,
       selectedId,
       checkedTreePartIds: [...checkedTreePartIds],
