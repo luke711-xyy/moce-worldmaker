@@ -6734,27 +6734,45 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     controlsRef.current = controls
     let frame = 0
     let renderUntil = 0
+    let restoreShadowTimer: number | null = null
     let animate = () => {}
     const invalidateRender = (durationMs = 0) => {
       renderUntil = Math.max(renderUntil, performance.now() + durationMs)
       if (!frame) frame = requestAnimationFrame(animate)
     }
     invalidateRenderRef.current = invalidateRender
+    const cancelShadowRestore = () => {
+      if (restoreShadowTimer === null) return
+      window.clearTimeout(restoreShadowTimer)
+      restoreShadowTimer = null
+    }
+    const restoreShadows = () => {
+      restoreShadowTimer = null
+      renderer.shadowMap.enabled = true
+      renderer.shadowMap.autoUpdate = true
+      renderer.shadowMap.needsUpdate = true
+      key.castShadow = true
+      floor.receiveShadow = true
+      invalidateRender()
+    }
     const setInteractionQuality = (active: boolean) => {
       // Do not pay the toggle cost for small scenes. The quality fallback is
       // only useful once the current frame is large enough to be GPU-bound.
       if (active && renderer.info.render.triangles < 100_000) return
-      const shouldRenderShadows = !active
-      if (renderer.shadowMap.enabled === shouldRenderShadows && key.castShadow === shouldRenderShadows && floor.receiveShadow === shouldRenderShadows) return
+      if (active) cancelShadowRestore()
+      const shouldRenderShadows = !active && restoreShadowTimer === null
+      if (!active && renderer.shadowMap.enabled && key.castShadow && floor.receiveShadow) return
+      if (active && !renderer.shadowMap.enabled && !key.castShadow && !floor.receiveShadow) return
       // Voxel meshes do not cast shadows; the expensive shadow pass only
       // exists for the key light/floor pair. Disable that pass while the user
       // is dragging, drawing, or placing, then rebuild it once on release.
-      renderer.shadowMap.enabled = shouldRenderShadows
-      renderer.shadowMap.autoUpdate = shouldRenderShadows
-      renderer.shadowMap.needsUpdate = shouldRenderShadows
-      key.castShadow = shouldRenderShadows
-      floor.receiveShadow = shouldRenderShadows
-      invalidateRender(active ? 0 : 120)
+      renderer.shadowMap.enabled = false
+      renderer.shadowMap.autoUpdate = false
+      renderer.shadowMap.needsUpdate = false
+      key.castShadow = false
+      floor.receiveShadow = false
+      invalidateRender()
+      if (!active && shouldRenderShadows) restoreShadowTimer = window.setTimeout(restoreShadows, 120)
     }
     interactionQualityRef.current = setInteractionQuality
     const handleControlsStart = () => interactionQualityRef.current(true)
@@ -6913,6 +6931,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     return () => {
       cancelAnimationFrame(frame)
       if (zoomReportTimerRef.current !== null) window.clearTimeout(zoomReportTimerRef.current)
+      cancelShadowRestore()
       invalidateRenderRef.current = () => {}
       interactionQualityRef.current = () => {}
       observer.disconnect()
