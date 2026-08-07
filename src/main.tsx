@@ -1016,6 +1016,15 @@ function App() {
     : selectedTemplateSource
     ? `资产库 · ${normalizeAssetCategoryPath(selectedTemplateSource.categoryPath).join(' / ')}`
     : '还未保存到资产库'
+  // Position-only changes do not affect geometry-operation choices. Keep this
+  // prepared source stable across entity drags; requestGeometryPreview() will
+  // still build a fresh, absolute-coordinate batch at the moment the user
+  // explicitly starts a preview.
+  const selectedGeometryStateKey = selectedEntityParts.map((part) => {
+    if (!part.instanceId) return part.id
+    const instance = project.instances.find((candidate) => candidate.id === part.instanceId)
+    return `${part.id}:${instance ? sceneInstanceRenderSignature(instance) : ''}`
+  }).join('|')
   const geometrySourceVoxels = useMemo<GeometryVoxel[]>(() => selectedEntityParts.flatMap((part) => part.voxels.map((voxel) => ({
     ...voxel,
     // Geometry operations write back as editable scene voxels. Resolve the
@@ -1023,8 +1032,12 @@ function App() {
     // to the generic custom-entity material during the replacement.
     materialId: scenePartVoxelDisplayColor(project, part, voxel),
     sourcePartId: part.id,
-  }))), [project, selectedEntityParts])
-  const geometrySourceKey = `${selectedEntityPartsKey}:${geometrySourceVoxels.length}:${geometrySourceVoxels.slice(0, 3).map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`).join('|')}`
+  }))), [selectedEntityPartsKey, selectedGeometryStateKey, project.assets, project.customVoxels, project.customColors, project.materials])
+  const currentGeometrySourceVoxels = () => selectedEntityParts.flatMap((part) => part.voxels.map((voxel) => ({
+    ...voxel,
+    materialId: scenePartVoxelDisplayColor(projectRef.current, part, voxel),
+    sourcePartId: part.id,
+  })))
   const geometryShellThicknessOptions = useMemo(() => validShellThicknesses(geometrySourceVoxels), [geometrySourceVoxels])
   const geometryScaleOptions = useMemo(() => validScaleFactors(geometrySourceVoxels), [geometrySourceVoxels])
   const sceneTreeItems = useMemo<SceneTreeItem[]>(() => {
@@ -3426,21 +3439,21 @@ function App() {
   const requestGeometryPreview = (operation: GeometryOperation, shellThickness: number, scaleMode: GeometryScaleMode, scaleFactor: number) => {
     if (!selectedEntityParts.length) { setNotice('请先选择要处理的实体'); return }
     if (selectedContainsLockedEntity()) { setNotice('选中的实体中包含已固定实体 · 请先取消固定'); return }
-    const requestKey = geometrySourceKey
+    const sourceVoxels = currentGeometrySourceVoxels()
     const requestRevision = ++geometryRequestRevisionRef.current
     setGeometryPreview({ operation, shellThickness, scaleMode, scaleFactor, result: null, valid: false, invalidReason: '正在生成预览…' })
     const client = geometryWorkerRef.current
     const task = operation === 'shell'
-      ? client?.computeGeometryLatest({ kind: 'shell', voxels: geometrySourceVoxels, thickness: shellThickness }) ?? Promise.resolve<VoxelToolsGeometryResult>({ geometry: computeShell(geometrySourceVoxels, shellThickness), mesh: null })
-      : client?.computeGeometryLatest({ kind: 'scale', voxels: geometrySourceVoxels, mode: scaleMode, factor: scaleFactor }) ?? Promise.resolve<VoxelToolsGeometryResult>({ geometry: computeScale(geometrySourceVoxels, scaleMode, scaleFactor), mesh: null })
+      ? client?.computeGeometryLatest({ kind: 'shell', voxels: sourceVoxels, thickness: shellThickness }) ?? Promise.resolve<VoxelToolsGeometryResult>({ geometry: computeShell(sourceVoxels, shellThickness), mesh: null })
+      : client?.computeGeometryLatest({ kind: 'scale', voxels: sourceVoxels, mode: scaleMode, factor: scaleFactor }) ?? Promise.resolve<VoxelToolsGeometryResult>({ geometry: computeScale(sourceVoxels, scaleMode, scaleFactor), mesh: null })
     void task.then((payload) => {
       if (!payload) return
       const candidate = payload.geometry
-      if (requestRevision !== geometryRequestRevisionRef.current || requestKey !== geometrySourceKey) return
+      if (requestRevision !== geometryRequestRevisionRef.current) return
       const validation = validateGeometryResult(candidate)
       setGeometryPreview({ operation, shellThickness, scaleMode, scaleFactor, result: candidate, mesh: payload.mesh, valid: validation.valid && candidate.valid, invalidReason: validation.reason ?? candidate.warnings[0] })
     }).catch((error) => {
-      if (requestRevision !== geometryRequestRevisionRef.current || requestKey !== geometrySourceKey) return
+      if (requestRevision !== geometryRequestRevisionRef.current) return
       setGeometryPreview({ operation, shellThickness, scaleMode, scaleFactor, result: null, valid: false, invalidReason: error instanceof Error ? error.message : '预览生成失败' })
     })
   }

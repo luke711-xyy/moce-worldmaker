@@ -206,6 +206,23 @@ export class SceneOccupancyIndex {
         result.inserted += 1
         return
       }
+      const ownerHandle = this.ownerIdToHandle.get(ownerId)
+      const lazyTranslation = ownerHandle ? this.ownerTranslations.get(ownerHandle) : undefined
+      if (ownerHandle !== undefined && lazyTranslation) {
+        const nextKeys = this.sortedVoxelKeys(voxels)
+        // Undo/redo can present the original absolute coordinates while the
+        // index still contains a lazy transform. The chunk data is already at
+        // those original coordinates, so only clear the transform and refresh
+        // the source reference instead of rebuilding the owner.
+        const isOriginalTopology = existingKeys.length === nextKeys.length && existingKeys.every((key, index) => key === nextKeys[index])
+        if (isOriginalTopology) {
+          this.ownerTranslations.delete(ownerHandle)
+          this.ownerVoxelRefs.set(ownerId, voxels)
+          this.ownerVoxelKeys.set(ownerId, nextKeys)
+          result.unchanged += 1
+          return
+        }
+      }
       if (this.ownerVoxelRefs.get(ownerId) === voxels) {
         result.unchanged += 1
         return

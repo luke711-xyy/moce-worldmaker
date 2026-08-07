@@ -79,6 +79,16 @@ describe('SceneOccupancyIndex', () => {
     expect(index.queryProjectVoxel(voxel(41, 7, 1)).occupied).toBe(false)
   })
 
+  it('clears a lazy translation when synchronization restores the original snapshot', () => {
+    const original = [voxel(1, 2, 3)]
+    const index = SceneOccupancyIndex.fromParts([part('entity', original)])
+    index.translateOwner('entity', { x: 40, y: 5, z: -2 })
+    const result = index.syncParts([part('entity', [voxel(1, 2, 3)])])
+    expect(result.unchanged).toBe(1)
+    expect(index.queryProjectVoxel(voxel(1, 2, 3)).ownerIds).toEqual(['entity'])
+    expect(index.queryProjectVoxel(voxel(41, 7, 1)).occupied).toBe(false)
+  })
+
   it('tracks overlapping legacy occupants without hiding non-excluded owners', () => {
     const index = SceneOccupancyIndex.fromParts([
       part('first', [voxel(4, 1, 2)]),
