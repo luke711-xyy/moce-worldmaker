@@ -885,7 +885,14 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
     const memberKey = `voxel:${entityId}`
     const assemblyIds = assemblyPathForMemberKey(memberKey)
     const sceneOffset = project.customEntityOffsets?.[entityId]
-    parts.push({ id: `custom:${entityId}`, kind: 'custom', partId: entityId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label: '手动体素实体', colorOverride: project.customColors?.[entityId], renderMode: project.customVoxelRenderModes?.[entityId] ?? 'greedy', sceneOffset, voxels })
+    // Expanded geometry is stored as ordinary unit voxels. Keep the render
+    // mode explicit in the project map, but also infer it from the voxel
+    // marker so older scenes created before customVoxelRenderModes was
+    // persisted cannot silently fall back to greedy meshing and appear as
+    // oversized blocks after reload.
+    const renderMode = project.customVoxelRenderModes?.[entityId]
+      ?? (voxels.some((voxel) => voxel.preserveVoxelCells) ? 'cells' : 'greedy')
+    parts.push({ id: `custom:${entityId}`, kind: 'custom', partId: entityId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label: '手动体素实体', colorOverride: project.customColors?.[entityId], renderMode, sceneOffset, voxels })
   })
   return parts
 }

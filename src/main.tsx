@@ -383,7 +383,18 @@ function normalizeStoredProject(loaded: ProjectState, options: NormalizeStoredPr
       isTemplate: asset.isTemplate ?? (!asset.source || asset.source === '场景实体保存' || (asset.kind !== 'imported' && !asset.source.includes('拆分子实体'))),
     })),
     customVoxels: (migrated.customVoxels ?? []).map((voxel, index) => ({ ...voxel, entityId: voxel.entityId ?? `legacy-${voxel.x}-${voxel.y}-${voxel.z}-${index}` })),
-    customVoxelRenderModes: { ...(migrated.customVoxelRenderModes ?? {}) },
+    customVoxelRenderModes: (() => {
+      const renderModes = { ...(migrated.customVoxelRenderModes ?? {}) }
+      const migratedCustomVoxels = migrated.customVoxels ?? []
+      // Repair projects written by versions that persisted the enlarged
+      // voxel payload but not its cell-preserving render mode. The marker is
+      // intentionally per voxel, so this remains safe for mixed scenes.
+      migratedCustomVoxels.forEach((voxel) => {
+        if (!voxel.preserveVoxelCells || !voxel.entityId) return
+        renderModes[voxel.entityId] = 'cells'
+      })
+      return renderModes
+    })(),
     customColors: { ...(migrated.customColors ?? {}) },
     customEntityOffsets: Object.fromEntries(Object.entries(migrated.customEntityOffsets ?? {}).map(([entityId, offset]) => [entityId, {
       x: Math.round(offset.x),
