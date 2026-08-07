@@ -450,6 +450,45 @@ function finalizeVoxelStrokeProject(project: ProjectState): ProjectState {
   return normalizeProjectNaming(next, { clone: false })
 }
 
+/**
+ * Copy the mutable project shell without cloning the potentially huge voxel
+ * arrays inside assets and custom voxels. Current mutation handlers replace
+ * voxel objects/arrays rather than editing an existing voxel object in place;
+ * instances, materials, asset records, assemblies and lookup maps are copied
+ * because those are the fields the handlers may mutate directly.
+ */
+function cloneProjectForMutation(source: ProjectState, options: { shareCatalogs?: boolean } = {}): ProjectState {
+  const shareCatalogs = options.shareCatalogs === true
+  return {
+    ...source,
+    assets: shareCatalogs ? source.assets : source.assets.map((asset) => ({ ...asset })),
+    materials: shareCatalogs ? source.materials : source.materials.map((material) => ({ ...material })),
+    instances: source.instances.map((instance) => ({
+      ...instance,
+      overrides: instance.overrides?.map((override) => ({ ...override })),
+      partOffsets: instance.partOffsets
+        ? Object.fromEntries(Object.entries(instance.partOffsets).map(([partId, offset]) => [partId, { ...offset }]))
+        : undefined,
+      mirror: instance.mirror ? { ...instance.mirror } : undefined,
+    })),
+    customVoxels: [...source.customVoxels],
+    customVoxelRenderModes: source.customVoxelRenderModes ? { ...source.customVoxelRenderModes } : undefined,
+    customColors: source.customColors ? { ...source.customColors } : undefined,
+    customEntityOffsets: source.customEntityOffsets
+      ? Object.fromEntries(Object.entries(source.customEntityOffsets).map(([entityId, offset]) => [entityId, { ...offset }]))
+      : undefined,
+    entityNames: source.entityNames ? { ...source.entityNames } : undefined,
+    entityNameModes: source.entityNameModes ? { ...source.entityNameModes } : undefined,
+    entityNameSequences: source.entityNameSequences ? { ...source.entityNameSequences } : undefined,
+    entityNameParents: source.entityNameParents ? { ...source.entityNameParents } : undefined,
+    entitySequenceCounters: source.entitySequenceCounters ? { ...source.entitySequenceCounters } : undefined,
+    assemblyChildSequence: source.assemblyChildSequence ? { ...source.assemblyChildSequence } : undefined,
+    childSequenceCounters: source.childSequenceCounters ? { ...source.childSequenceCounters } : undefined,
+    assemblies: source.assemblies?.map((assembly) => ({ ...assembly, memberKeys: [...assembly.memberKeys] })),
+    lockedMemberKeys: source.lockedMemberKeys ? [...source.lockedMemberKeys] : undefined,
+  }
+}
+
 function scenePartIsLocked(project: ProjectState, part: SceneEntityPart): boolean {
   const lockedKeys = new Set(project.lockedMemberKeys ?? [])
   if (lockedKeys.has(part.memberKey)) return true
@@ -1259,32 +1298,7 @@ function App() {
     // and structurally share the read-only catalogs; clone only collections
     // that the stroke handlers can replace or mutate.
     const original = projectRef.current
-    const draft: ProjectState = {
-      ...original,
-      assets: original.assets,
-      materials: original.materials,
-      instances: original.instances.map((instance) => ({
-        ...instance,
-        overrides: instance.overrides?.map((override) => ({ ...override })),
-        partOffsets: instance.partOffsets
-          ? Object.fromEntries(Object.entries(instance.partOffsets).map(([partId, offset]) => [partId, { ...offset }]))
-          : undefined,
-        mirror: instance.mirror ? { ...instance.mirror } : undefined,
-      })),
-      customVoxels: [...original.customVoxels],
-      customVoxelRenderModes: original.customVoxelRenderModes ? { ...original.customVoxelRenderModes } : undefined,
-      customColors: original.customColors ? { ...original.customColors } : undefined,
-      customEntityOffsets: original.customEntityOffsets ? Object.fromEntries(Object.entries(original.customEntityOffsets).map(([entityId, offset]) => [entityId, { ...offset }])) : undefined,
-      entityNames: original.entityNames ? { ...original.entityNames } : undefined,
-      entityNameModes: original.entityNameModes ? { ...original.entityNameModes } : undefined,
-      entityNameSequences: original.entityNameSequences ? { ...original.entityNameSequences } : undefined,
-      entityNameParents: original.entityNameParents ? { ...original.entityNameParents } : undefined,
-      entitySequenceCounters: original.entitySequenceCounters ? { ...original.entitySequenceCounters } : undefined,
-      assemblyChildSequence: original.assemblyChildSequence ? { ...original.assemblyChildSequence } : undefined,
-      childSequenceCounters: original.childSequenceCounters ? { ...original.childSequenceCounters } : undefined,
-      assemblies: original.assemblies?.map((assembly) => ({ ...assembly, memberKeys: [...assembly.memberKeys] })),
-      lockedMemberKeys: original.lockedMemberKeys ? [...original.lockedMemberKeys] : undefined,
-    }
+    const draft = cloneProjectForMutation(original, { shareCatalogs: true })
     const initialParts = sceneEntityParts(projectRef.current)
     voxelStrokeTransactionRef.current = {
       draft,
@@ -1459,7 +1473,7 @@ function App() {
       scheduleVoxelStrokePublish()
       return
     }
-    const next = structuredClone(projectRef.current)
+    const next = cloneProjectForMutation(projectRef.current)
     updater(next)
     commitProject(next, trackHistory)
   }
