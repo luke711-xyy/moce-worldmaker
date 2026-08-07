@@ -96,6 +96,18 @@ describe('SceneOccupancyIndex', () => {
     ]))
   })
 
+  it('finds the highest custom cell in a column without flattening the scene', () => {
+    const index = SceneOccupancyIndex.fromParts([
+      { ...part('custom:low', [voxel(2, 1, 3)]), partId: 'low' },
+      { ...part('custom:high', [voxel(2, 5, 3)]), partId: 'high' },
+      { ...part('asset:asset-instance:main', [voxel(2, 9, 3)]), kind: 'asset', instanceId: 'asset-instance' },
+    ])
+    expect(index.highestProjectVoxelAt(2, 3, 0, 10, 'custom:')).toEqual({
+      voxel: { x: 2, y: 5, z: 3 },
+      ownerId: 'custom:high',
+    })
+  })
+
   it('clears a lazy translation when synchronization restores the original snapshot', () => {
     const original = [voxel(1, 2, 3)]
     const index = SceneOccupancyIndex.fromParts([part('entity', original)])

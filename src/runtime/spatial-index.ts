@@ -374,6 +374,27 @@ export class SceneOccupancyIndex {
     return result
   }
 
+  /**
+   * Find the highest occupied cell in one ground column without flattening
+   * every custom entity. This is used by the fallback erase hit path when a
+   * pointer lands on the floor beside a voxel model.
+   */
+  highestProjectVoxelAt(
+    x: number,
+    z: number,
+    minY: number,
+    maxY: number,
+    ownerPrefix?: string,
+  ): { voxel: Pick<Voxel, 'x' | 'y' | 'z'>; ownerId: string } | undefined {
+    const start = Math.floor(Math.max(minY, maxY))
+    const end = Math.ceil(Math.min(minY, maxY))
+    for (let y = start; y >= end; y -= 1) {
+      const ownerId = this.queryProjectVoxel({ x, y, z }).ownerIds.find((candidate) => !ownerPrefix || candidate.startsWith(ownerPrefix))
+      if (ownerId) return { voxel: { x, y, z }, ownerId }
+    }
+    return undefined
+  }
+
   queryRuntimeVoxel(voxel: RuntimeVoxelCoord): OccupancyHit {
     const { chunkKey, localIndex } = runtimeVoxelAddress(voxel)
     const chunk = this.chunks.get(chunkKey)
