@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceLocalVoxelToSceneVoxelFast, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxels, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceLocalVoxelToSceneVoxelFast, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
@@ -142,6 +142,20 @@ describe('莫测造境体素核心数据', () => {
     }
     expect(scenePartVoxelAt(part, 0)).toEqual({ x: 13, y: 25, z: 37, materialId: 'primary' })
     expect(scenePartVoxelAt(part, 1)).toBeUndefined()
+  })
+
+  it('looks up a large moved scene voxel by coordinate without a linear scan', () => {
+    const voxels = Array.from({ length: 300 }, (_, index) => ({ x: index, y: 2, z: 4, materialId: 'primary' }))
+    const part = {
+      id: 'custom:lookup',
+      kind: 'custom' as const,
+      partId: 'lookup',
+      memberKey: 'voxel:lookup',
+      sceneOffset: { x: 10, y: 20, z: 30 },
+      voxels,
+    }
+    expect(scenePartVoxelAtCoordinate(part, 10 + 299, 22, 34)).toEqual({ x: 309, y: 22, z: 34, materialId: 'primary' })
+    expect(scenePartVoxelAtCoordinate(part, 999, 22, 34)).toBeUndefined()
   })
 
   it('preserves exact scene coordinates for rotated and mirrored part offsets', () => {

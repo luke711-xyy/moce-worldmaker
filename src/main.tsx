@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, instanceLocalVoxelToSceneVoxelFast, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, findInstanceVoxelAtSceneVoxel, highestVoxelAt, instanceLocalVoxelToSceneVoxel, instanceLocalVoxelToSceneVoxelFast, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, loadScenePreview, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
@@ -7161,7 +7161,53 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
     const minY = Math.min(startY, endY)
     const maxY = Math.max(startY, endY)
     const selected = new Set<string>()
+    // For large imported parts, projecting every voxel on mouse-up creates a
+    // noticeable release hitch. A projected voxel AABB is conservative and
+    // gives the same entity-level selection behavior while reducing the work
+    // to eight projections. Keep exact voxel-center testing for small parts so
+    // narrow, sparse hand-authored entities retain the previous precision.
+    const LARGE_PART_BOX_SELECTION_LIMIT = 4096
+    const projectGridBounds = (bounds: GridVoxelBounds) => {
+      const points: Array<[number, number, number]> = [
+        [bounds.minX, bounds.minY, bounds.minZ], [bounds.minX, bounds.minY, bounds.maxZ],
+        [bounds.minX, bounds.maxY, bounds.minZ], [bounds.minX, bounds.maxY, bounds.maxZ],
+        [bounds.maxX, bounds.minY, bounds.minZ], [bounds.maxX, bounds.minY, bounds.maxZ],
+        [bounds.maxX, bounds.maxY, bounds.minZ], [bounds.maxX, bounds.maxY, bounds.maxZ],
+      ]
+      const projected = points.map(([x, y, z]) => {
+        const point = toSceneWorld(voxelCenterToWorld(x), voxelCenterToWorld(y), voxelCenterToWorld(z)).project(camera)
+        return {
+          x: rect.left + (point.x + 1) * 0.5 * rect.width,
+          y: rect.top + (1 - point.y) * 0.5 * rect.height,
+        }
+      })
+      return projected.reduce((result, point) => ({
+        minX: Math.min(result.minX, point.x),
+        maxX: Math.max(result.maxX, point.x),
+        minY: Math.min(result.minY, point.y),
+        maxY: Math.max(result.maxY, point.y),
+      }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity })
+    }
     for (const part of sceneEntityParts(project)) {
+      const bounds = gridVoxelBounds(part.voxels)
+      if (!bounds) continue
+      const offset = scenePartGridOffset(part)
+      const sceneBounds = {
+        minX: bounds.minX + offset.x,
+        maxX: bounds.maxX + offset.x,
+        minY: bounds.minY + offset.y,
+        maxY: bounds.maxY + offset.y,
+        minZ: bounds.minZ + offset.z,
+        maxZ: bounds.maxZ + offset.z,
+      }
+      const projectedBounds = projectGridBounds(sceneBounds)
+      const boundsOverlap = projectedBounds.maxX >= minX && projectedBounds.minX <= maxX
+        && projectedBounds.maxY >= minY && projectedBounds.minY <= maxY
+      if (!boundsOverlap) continue
+      if (part.voxels.length > LARGE_PART_BOX_SELECTION_LIMIT) {
+        selected.add(part.id)
+        continue
+      }
       if (scenePartVoxels(part).some((voxel) => {
         const point = toSceneWorld(voxelCenterToWorld(voxel.x), voxelCenterToWorld(voxel.y), voxelCenterToWorld(voxel.z)).project(camera)
         const screenX = rect.left + (point.x + 1) * 0.5 * rect.width
@@ -7329,7 +7375,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, selectedId, select
     if (ddaCustomOwner && (!editEntityId || ddaCustomOwner === editEntityId)) {
       const ownerId = ddaCustomOwner.slice('custom:'.length)
       const part = scenePartsRef.current.find((candidate) => candidate.kind === 'custom' && candidate.partId === ownerId)
-      const hitVoxel = part ? scenePartVoxels(part).find((voxel) => voxel.x === context.voxelHit!.voxel.x && voxel.y === context.voxelHit!.voxel.y && voxel.z === context.voxelHit!.voxel.z) : undefined
+      const hitVoxel = part ? scenePartVoxelAtCoordinate(part, context.voxelHit!.voxel.x, context.voxelHit!.voxel.y, context.voxelHit!.voxel.z) : undefined
       if (hitVoxel) {
         if (tool === 'brush') applyStrokeAdd(adjacentVoxel(hitVoxel, context.voxelHit!.normal, activeMaterial))
         else applyStrokeRemove(hitVoxel)

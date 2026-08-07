@@ -174,6 +174,14 @@ export type SceneEntityPart = {
 // many cells would retain one full mapped array per historical position and
 // create a steadily growing GC backlog.
 const scenePartVoxelCache = new WeakMap<ReadonlyArray<Voxel>, { key: string; voxels: Voxel[] }>()
+// Coordinate lookup is intentionally separate from the mapped-array cache. A
+// DDA hit on a large imported/custom part used to call Array.find(), turning a
+// single click into an O(n) scan of the whole model. Keep one lazy lookup per
+// effective voxel array so repeated clicks stay O(1), while WeakMap ownership
+// lets old arrays be collected after a geometry edit or move.
+const scenePartVoxelIndexCache = new WeakMap<ReadonlyArray<Voxel>, Map<string, Voxel>>()
+
+const sceneVoxelCoordinateKey = (x: number, y: number, z: number) => `${x},${y},${z}`
 
 export function customEntityOffset(project: Pick<ProjectState, 'customEntityOffsets'>, entityId: string): { x: number; y: number; z: number } {
   return project.customEntityOffsets?.[entityId] ?? { x: 0, y: 0, z: 0 }
@@ -221,6 +229,19 @@ export function scenePartVoxelAt(part: SceneEntityPart, index: number): Voxel | 
   }
   if (!offset.x && !offset.y && !offset.z) return voxel
   return { ...voxel, x: voxel.x + offset.x, y: voxel.y + offset.y, z: voxel.z + offset.z }
+}
+
+/** Read one effective scene-space voxel by coordinate without scanning a part. */
+export function scenePartVoxelAtCoordinate(part: SceneEntityPart, x: number, y: number, z: number): Voxel | undefined {
+  const voxels = scenePartVoxels(part)
+  // Tiny parts are faster without allocating a Map for a one-off lookup.
+  if (voxels.length < 256) return voxels.find((voxel) => voxel.x === x && voxel.y === y && voxel.z === z)
+  let index = scenePartVoxelIndexCache.get(voxels)
+  if (!index) {
+    index = new Map(voxels.map((voxel) => [sceneVoxelCoordinateKey(voxel.x, voxel.y, voxel.z), voxel]))
+    scenePartVoxelIndexCache.set(voxels, index)
+  }
+  return index.get(sceneVoxelCoordinateKey(x, y, z))
 }
 
 export function uniqueAssetName(assets: VoxelAsset[], requestedName: string): string {
