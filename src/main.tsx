@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceLocalVoxelToSceneVoxel, instanceLocalVoxelToSceneVoxelFast, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, loadScenePreview, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
@@ -5910,29 +5910,23 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
   // Deferred large cell meshes start with count=0 while their matrices and
   // colors are uploaded over animation frames. Do not cache an empty outline
   // here; the completion callback will create it after the instances exist.
-  if (mesh instanceof THREE.InstancedMesh && mesh.count === 0) return []
+  if (mesh instanceof THREE.InstancedMesh && mesh.count === 0) {
+    return []
+  }
   const existing = mesh.userData.selectionGlowParts as THREE.Object3D[] | undefined
-  if (existing) return existing
+  if (existing) {
+    return existing
+  }
   let edgeGeometry: THREE.BufferGeometry
   if (mesh instanceof THREE.InstancedMesh) {
-    const baseGeometry = createVoxelOutlineGeometry()
-    const sourcePositions = baseGeometry.getAttribute('position')
-    const positions = new Float32Array(sourcePositions.count * 3 * mesh.count)
-    const matrix = new THREE.Matrix4()
-    const point = new THREE.Vector3()
-    for (let instanceIndex = 0; instanceIndex < mesh.count; instanceIndex += 1) {
-      mesh.getMatrixAt(instanceIndex, matrix)
-      for (let vertexIndex = 0; vertexIndex < sourcePositions.count; vertexIndex += 1) {
-        point.fromBufferAttribute(sourcePositions, vertexIndex).applyMatrix4(matrix)
-        const offset = (instanceIndex * sourcePositions.count + vertexIndex) * 3
-        positions[offset] = point.x
-        positions[offset + 1] = point.y
-        positions[offset + 2] = point.z
-      }
-    }
-    baseGeometry.dispose()
-    edgeGeometry = new THREE.BufferGeometry()
-    edgeGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    // Instanced meshes used to expand every cell into 24 transformed line
+    // vertices here. That is needlessly expensive for large imported models:
+    // most cells are internal and cannot contribute a visible outer frame.
+    // Build only the exposed cells in local coordinates instead. The complete
+    // component occupancy is shared on the parent part group, so different
+    // material batches do not create outlines along their internal color
+    // boundaries.
+    edgeGeometry = createInstancedVoxelOutlineGeometry(mesh)
   } else if (mesh.userData.greedyMesh) {
     const greedyVoxels = mesh.userData.greedyVoxels as Array<{ gx: number; gy: number; gz: number }> | undefined
     // A per-voxel outline is useful for small editable entities, but becomes
@@ -5960,6 +5954,68 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
   const parts = [glow, edge]
   mesh.userData.selectionGlowParts = parts
   return parts
+}
+
+function createInstancedVoxelOutlineGeometry(mesh: THREE.InstancedMesh): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry()
+  const voxels = mesh.userData.instanceVoxels as Array<{ x: number; y: number; z: number }> | undefined
+  if (!voxels?.length) return geometry
+  const partGroup = mesh.parent
+  const occupied = partGroup?.userData.instanceVoxelOccupancy as Set<string> | undefined
+  const dimensions = partGroup?.userData.instanceVoxelDimensions as { width: number; depth: number; height: number } | undefined
+  const mirror = partGroup?.userData.instanceVoxelMirror as { x?: boolean; y?: boolean; z?: boolean } | undefined
+  if (!occupied || !dimensions) return createInstancedVoxelOutlineGeometryFallback(mesh)
+
+  const scale = VOXEL_WORLD_SIZE
+  const half = scale / 2
+  const edgePairs: Array<[number, number]> = [
+    [0, 1], [1, 2], [2, 3], [3, 0],
+    [4, 5], [5, 6], [6, 7], [7, 4],
+    [0, 4], [1, 5], [2, 6], [3, 7],
+  ]
+  const neighbors = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
+  const positions: number[] = []
+  for (const voxel of voxels) {
+    const isOuter = neighbors.some(([dx, dy, dz]) => !occupied.has(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`))
+    if (!isOuter) continue
+    const localX = mirror?.x ? dimensions.width - 1 - voxel.x : voxel.x
+    const localY = mirror?.z ? dimensions.height - 1 - voxel.y : voxel.y
+    const localZ = mirror?.y ? dimensions.depth - 1 - voxel.z : voxel.z
+    const cx = (localX + 0.5 - dimensions.width / 2) * scale
+    const cy = (localZ + 0.5 - dimensions.depth / 2) * scale
+    const cz = (localY + 0.5) * scale
+    const corners: Array<[number, number, number]> = [
+      [cx - half, cy - half, cz - half], [cx + half, cy - half, cz - half],
+      [cx + half, cy + half, cz - half], [cx - half, cy + half, cz - half],
+      [cx - half, cy - half, cz + half], [cx + half, cy - half, cz + half],
+      [cx + half, cy + half, cz + half], [cx - half, cy + half, cz + half],
+    ]
+    edgePairs.forEach(([start, end]) => positions.push(...corners[start], ...corners[end]))
+  }
+  if (positions.length) geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  return geometry
+}
+
+function createInstancedVoxelOutlineGeometryFallback(mesh: THREE.InstancedMesh): THREE.BufferGeometry {
+  const baseGeometry = createVoxelOutlineGeometry()
+  const sourcePositions = baseGeometry.getAttribute('position')
+  const positions = new Float32Array(sourcePositions.count * 3 * mesh.count)
+  const matrix = new THREE.Matrix4()
+  const point = new THREE.Vector3()
+  for (let instanceIndex = 0; instanceIndex < mesh.count; instanceIndex += 1) {
+    mesh.getMatrixAt(instanceIndex, matrix)
+    for (let vertexIndex = 0; vertexIndex < sourcePositions.count; vertexIndex += 1) {
+      point.fromBufferAttribute(sourcePositions, vertexIndex).applyMatrix4(matrix)
+      const offset = (instanceIndex * sourcePositions.count + vertexIndex) * 3
+      positions[offset] = point.x
+      positions[offset + 1] = point.y
+      positions[offset + 2] = point.z
+    }
+  }
+  baseGeometry.dispose()
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  return geometry
 }
 
 /**
@@ -7287,12 +7343,15 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     const camera = cameraRef.current
     const mount = mountRef.current
     if (!scene || !camera || !mount || !setPointerRay(event)) return null
-    const rawHits = !placementAsset && groupRef.current ? raycasterRef.current.intersectObject(groupRef.current, true) : []
-    const hits = editEntityId ? rawHits.filter((item) => belongsToEditEntity(item.object)) : rawHits
+    // The occupancy DDA is the authoritative voxel hit test. Raycasting an
+    // InstancedMesh here makes Three.js iterate every instance at pointer-down
+    // time; for a 100k+ voxel model that turns a simple click into a long task.
+    // Keep the scene graph raycaster out of the interaction path and derive the
+    // owning part from the spatial index instead.
     const voxelHit = onRaycastVoxel(raycasterRef.current.ray.origin, raycasterRef.current.ray.direction)
     const floor = scene.getObjectByName('editing-floor')
     const floorHit = floor ? raycasterRef.current.intersectObject(floor, false)[0] : undefined
-    return { rawHits, hits, voxelHit, floorPoint: floorHit?.point ?? null }
+    return { voxelHit, floorPoint: floorHit?.point ?? null }
   }
 
   const drawingToolIds = new Set<Tool>(['brush', 'erase', 'line', 'cuboid', 'sphere', 'extrude'])
@@ -7629,8 +7688,8 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   const handleEntityDoubleClick = (event: { clientX: number; clientY: number }) => {
     if (tool !== 'select' || placementAsset || editEntityId) return
     const context = getPointerContext(event)
-    const hit = context?.hits.find((item) => item.object.userData.scenePartId)
-    const hitPart = hit?.object.userData.scenePartId ? sceneParts.find((part) => part.id === hit.object.userData.scenePartId) : undefined
+    const hitPartId = context?.voxelHit?.ownerIds[0]
+    const hitPart = hitPartId ? sceneParts.find((part) => part.id === hitPartId) : undefined
     if (!hitPart) return
     onEnterEditMode(hitPart.id)
   }
@@ -7752,40 +7811,12 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     if (!result.moved) resetDragVisuals(gesture)
   }
 
-  const belongsToEditEntity = (object: THREE.Object3D) => {
-    if (!editEntityId) return true
-    const scenePartId = object.userData.scenePartId as string | undefined
-    if (!scenePartId) return false
-    if (scenePartId === editEntityId) return true
+  const partBelongsToEditEntity = (part: SceneEntityPart | undefined) => {
+    if (!part || !editEntityId) return Boolean(part)
+    if (part.id === editEntityId) return true
     if (!editEntityId.startsWith('assembly:')) return false
     const assemblyId = editEntityId.slice('assembly:'.length)
-    return scenePartsRef.current.some((part) => part.id === scenePartId && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(assemblyId))
-  }
-
-  const intersectionVoxel = (hit: THREE.Intersection<THREE.Object3D>, collectionKey: 'instanceVoxels' | 'customVoxels', legacyKey: 'instanceVoxel' | 'customVoxel'): Voxel | undefined => {
-    const voxels = hit.object.userData[collectionKey] as Voxel[] | undefined
-    if (voxels && typeof hit.instanceId === 'number') return voxels[hit.instanceId]
-    return hit.object.userData[legacyKey] as Voxel | undefined
-  }
-
-  const sceneVoxelFromHit = (hit: THREE.Intersection<THREE.Object3D>): Voxel | undefined => {
-    const localVoxel = intersectionVoxel(hit, 'instanceVoxels', 'instanceVoxel')
-    const instanceId = hit.object.userData.instanceId as string | undefined
-    if (!localVoxel || !instanceId) {
-      const customVoxel = intersectionVoxel(hit, 'customVoxels', 'customVoxel')
-      if (!customVoxel) return undefined
-      const scenePartId = hit.object.userData.scenePartId as string | undefined
-      const part = scenePartId ? scenePartsRef.current.find((candidate) => candidate.id === scenePartId) : undefined
-      const offset = part?.sceneOffset
-      return offset && (offset.x || offset.y || offset.z)
-        ? { ...customVoxel, x: customVoxel.x + offset.x, y: customVoxel.y + offset.y, z: customVoxel.z + offset.z }
-        : customVoxel
-    }
-    const instance = project.instances.find((candidate) => candidate.id === instanceId)
-    const asset = instance ? project.assets.find((candidate) => candidate.id === instance.assetId) : undefined
-    const componentId = hit.object.userData.instancePartId as string | undefined
-    if (instance && asset && componentId) return instanceLocalVoxelToSceneVoxelFast(instance, asset, localVoxel, componentId)
-    return instance && asset ? instanceLocalVoxelToSceneVoxel(instance, asset, localVoxel) : undefined
+    return (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(assemblyId)
   }
 
   const strokeVoxelKey = (voxel: Pick<Voxel, 'x' | 'y' | 'z'>) => `${voxel.x},${voxel.y},${voxel.z}`
@@ -7811,78 +7842,49 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   const applyEditAtPointer = (event: { clientX: number; clientY: number }) => {
     const context = getPointerContext(event)
     if (!context) return
-    const { rawHits, hits, floorPoint } = context
-    const hit = hits[0]
+    const { voxelHit, floorPoint } = context
+    const hitPartId = voxelHit?.ownerIds[0]
+    const hitPart = hitPartId ? scenePartsRef.current.find((part) => part.id === hitPartId) : undefined
     if (tool === 'select' && editEntityId) return
-    if (tool === 'select' && hit?.object.userData.scenePartId && belongsToEditEntity(hit.object)) {
-      onSelect(hit.object.userData.scenePartId)
+    if (tool === 'select' && partBelongsToEditEntity(hitPart)) {
+      onSelect(hitPart!.id)
       return
     }
     if (tool !== 'brush' && tool !== 'erase') return
-    // Edit mode changes rendering emphasis, not physical occupancy. If a
-    // different entity is the first visible voxel hit, use that entity only as
-    // a collision surface. The new voxel is still handed to the current edit
-    // target, so editing can build against another entity without modifying
-    // the entity that was clicked.
-    if (editEntityId) {
-      const firstVoxelHit = rawHits.find((item) => {
-        const hasVoxel = Boolean(intersectionVoxel(item, 'instanceVoxels', 'instanceVoxel') || intersectionVoxel(item, 'customVoxels', 'customVoxel'))
-        return hasVoxel
-      })
-      if (firstVoxelHit && !belongsToEditEntity(firstVoxelHit.object)) {
-        const hitVoxel = sceneVoxelFromHit(firstVoxelHit)
-        if (tool === 'brush' && hitVoxel && firstVoxelHit.face) {
-          const displayNormal = firstVoxelHit.face.normal.clone().transformDirection(firstVoxelHit.object.matrixWorld)
-          applyStrokeAdd(adjacentVoxel(hitVoxel, { x: displayNormal.x, y: displayNormal.z, z: displayNormal.y }, activeMaterial))
+    // DDA gives the nearest occupied cell and its project-space surface
+    // normal. It replaces the old Three.js intersection path, which had to
+    // test every instance in a large InstancedMesh and could block for seconds.
+    if (voxelHit && hitPart) {
+      const hitVoxel = scenePartVoxelAtCoordinate(hitPart, voxelHit.voxel.x, voxelHit.voxel.y, voxelHit.voxel.z)
+      if (!hitVoxel) return
+      if (!partBelongsToEditEntity(hitPart)) {
+        if (tool === 'brush') applyStrokeAdd(adjacentVoxel(voxelHit.voxel, voxelHit.normal, activeMaterial))
+        else onNotice('擦除模式只能作用于当前编辑实体 · 其他实体仍会阻挡穿透')
+        return
+      }
+      if (hitPart.kind === 'asset' && hitPart.instanceId) {
+        const instance = project.instances.find((candidate) => candidate.id === hitPart.instanceId)
+        const asset = instance ? project.assets.find((candidate) => candidate.id === instance.assetId) : undefined
+        if (!instance || !asset) return
+        const localHitVoxel = assetTransformCache.localVoxelAtSceneVoxel(instance, asset, hitVoxel)
+        if (!localHitVoxel) return
+        if (!editEntityId) {
+          if (tool === 'brush') applyStrokeAdd(adjacentVoxel(voxelHit.voxel, voxelHit.normal, activeMaterial))
+          else onNotice('非编辑模式下不能擦除资产实体 · 请先进入编辑模式')
+        } else if (tool === 'brush') {
+          const targetSceneVoxel = adjacentVoxel(voxelHit.voxel, voxelHit.normal, activeMaterial)
+          const localTarget = assetTransformCache.localVoxelAtSceneVoxel(instance, asset, targetSceneVoxel)
+          if (localTarget) applyStrokeInstance(instance.id, { ...localTarget, materialId: activeMaterial }, 'add')
         } else {
-          onNotice('擦除模式只能作用于当前编辑实体 · 其他实体仍会阻挡穿透')
+          applyStrokeInstance(instance.id, localHitVoxel, 'remove')
         }
         return
       }
-    }
-    const instanceHit = hits.find((item) => item.object.userData.instanceId && intersectionVoxel(item, 'instanceVoxels', 'instanceVoxel') && belongsToEditEntity(item.object))
-    if (instanceHit?.object.userData.instanceId) {
-      const instanceId = instanceHit.object.userData.instanceId as string
-      const localHitVoxel = intersectionVoxel(instanceHit, 'instanceVoxels', 'instanceVoxel')
-      if (!localHitVoxel) return
-      if (!editEntityId) {
-        const hitVoxel = sceneVoxelFromHit(instanceHit)
-        if (!hitVoxel) return
-        if (tool === 'brush' && instanceHit.face) {
-          const displayNormal = instanceHit.face.normal.clone().transformDirection(instanceHit.object.matrixWorld)
-          applyStrokeAdd(adjacentVoxel(hitVoxel, { x: displayNormal.x, y: displayNormal.z, z: displayNormal.y }, activeMaterial))
-        } else {
-          onNotice('非编辑模式下不能擦除资产实体 · 请先进入编辑模式')
-        }
-      } else if (tool === 'brush') {
-        if (!instanceHit.face) return
-        const displayNormal = instanceHit.face.normal.clone().transformDirection(instanceHit.object.matrixWorld)
-        applyStrokeInstance(instanceId, adjacentVoxel(localHitVoxel, { x: displayNormal.x, y: displayNormal.z, z: displayNormal.y }, activeMaterial), 'add')
-      } else {
-        applyStrokeInstance(instanceId, localHitVoxel, 'remove')
-      }
-      return
-    }
-    const ddaCustomOwner = context.voxelHit?.ownerIds.find((ownerId) => ownerId.startsWith('custom:'))
-    if (ddaCustomOwner && (!editEntityId || ddaCustomOwner === editEntityId)) {
-      const ownerId = ddaCustomOwner.slice('custom:'.length)
-      const part = scenePartsRef.current.find((candidate) => candidate.kind === 'custom' && candidate.partId === ownerId)
-      const hitVoxel = part ? scenePartVoxelAtCoordinate(part, context.voxelHit!.voxel.x, context.voxelHit!.voxel.y, context.voxelHit!.voxel.z) : undefined
-      if (hitVoxel) {
-        if (tool === 'brush') applyStrokeAdd(adjacentVoxel(hitVoxel, context.voxelHit!.normal, activeMaterial))
+      if (hitPart.kind === 'custom') {
+        if (tool === 'brush') applyStrokeAdd(adjacentVoxel(hitVoxel, voxelHit.normal, activeMaterial))
         else applyStrokeRemove(hitVoxel)
         return
       }
-    }
-    const customHit = hits.find((item) => intersectionVoxel(item, 'customVoxels', 'customVoxel') && belongsToEditEntity(item.object))
-    if (customHit) {
-      const hitVoxel = sceneVoxelFromHit(customHit)
-      if (!hitVoxel) return
-      if (tool === 'brush') {
-        if (!customHit.face) return
-        const displayNormal = customHit.face.normal.clone().transformDirection(customHit.object.matrixWorld)
-        applyStrokeAdd(adjacentVoxel(hitVoxel, { x: displayNormal.x, y: displayNormal.z, z: displayNormal.y }, activeMaterial))
-      } else applyStrokeRemove(hitVoxel)
       return
     }
     if (!floorPoint) return
@@ -7923,8 +7925,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   const applyQuickEraseAtPointer = (point: { clientX: number; clientY: number }) => {
     const context = getPointerContext(point)
     if (!context) return
-    const firstVoxelHit = context.rawHits.find((item) => Boolean(intersectionVoxel(item, 'instanceVoxels', 'instanceVoxel') || intersectionVoxel(item, 'customVoxels', 'customVoxel')))
-    const hitVoxel = firstVoxelHit ? sceneVoxelFromHit(firstVoxelHit) : undefined
+    const hitVoxel = context.voxelHit?.voxel
     const center = hitVoxel ?? (context.floorPoint
       ? { x: worldToVoxelCell(context.floorPoint.x), y: 0, z: worldToVoxelCell(context.floorPoint.y), materialId: activeMaterial }
       : undefined)
@@ -8074,8 +8075,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       if (placementAsset) return
       if (tool === 'select') onCancelPendingEntityOperation()
       const context = getPointerContext(event)
-      const hit = context?.hits.find((item) => item.object.userData.scenePartId)
-      const hitPartId = context?.voxelHit?.ownerIds[0] ?? hit?.object.userData.scenePartId
+      const hitPartId = context?.voxelHit?.ownerIds[0]
       const hitPart = hitPartId ? sceneParts.find((part) => part.id === hitPartId) : undefined
       const explicitMultiSelection = selectedPartIds.length > 1 && (checkedPartIds.length > 1 || (checkedPartIds.length === 1 && !checkedPartIds[0].startsWith('assembly:')))
       const targetPartIds = !editEntityId && hitPart
@@ -8093,10 +8093,8 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     if (editEntityId && tool === 'select') return
     if (tool === 'select') {
       const context = getPointerContext(event)
-      const customHit = context?.hits.find((item) => intersectionVoxel(item, 'customVoxels', 'customVoxel'))
-      const hit = customHit ?? context?.hits.find((item) => item.object.userData.scenePartId)
       const floorPoint = context?.floorPoint
-      const hitPartId = context?.voxelHit?.ownerIds[0] ?? hit?.object.userData.scenePartId
+      const hitPartId = context?.voxelHit?.ownerIds[0]
       const hitPart = hitPartId ? sceneParts.find((part) => part.id === hitPartId) : undefined
       if (hitPart) {
         const explicitMultiSelection = selectedPartIds.length > 1 && (checkedPartIds.length > 1 || (checkedPartIds.length === 1 && !checkedPartIds[0].startsWith('assembly:')))
@@ -8893,6 +8891,9 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
       continue
     }
     const occupied = new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
+    partGroup.userData.instanceVoxelOccupancy = occupied
+    partGroup.userData.instanceVoxelDimensions = { width: asset.width, depth: asset.depth, height: asset.height }
+    partGroup.userData.instanceVoxelMirror = mirror
     const batches = new Map<string, { color: THREE.Color; voxels: Voxel[] }>()
     component.forEach((voxel) => {
       const color = renderAssetVoxelColor(voxel, asset, materialMap, colorOverride)
