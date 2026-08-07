@@ -2396,7 +2396,11 @@ function App() {
       const index = nextProject.instances.findIndex((instance) => instance.id === instanceId)
       const source = index >= 0 ? nextProject.instances[index] : undefined
       if (!source || index < 0) return undefined
-      const clone = { ...source, partOffsets: source.partOffsets ? { ...source.partOffsets } : undefined }
+      // Keep partOffsets shared for a root-instance move. Partial part moves
+      // replace this field below, so the transform effect can distinguish a
+      // root translation from a real child-offset change and skip walking a
+      // large imported asset's part tree on every release.
+      const clone = { ...source }
       nextProject.instances[index] = clone
       mutableInstances.set(instanceId, clone)
       return clone
@@ -2425,7 +2429,7 @@ function App() {
         instance.z = snapAssetOrigin(instance.z + voxelToWorld(result.deltaZ), asset?.depth ?? 1)
         return
       }
-      const offsets = instance.partOffsets ?? {}
+      const offsets = { ...(instance.partOffsets ?? {}) }
       selectedParts.forEach((part) => {
         const current = offsets[part.partId] ?? { x: 0, y: 0, z: 0 }
         offsets[part.partId] = {
@@ -6471,7 +6475,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       instanceGroup.userData.renderSignature = renderSignature
       instanceGroup.userData.geometrySignature = geometrySignature
       instanceGroup.userData.assetRef = asset
-      if (canReuseGeometry) updateAssetPartOffsets(instanceGroup, instance.partOffsets, instance.mirror)
+      syncAssetPartOffsets(instanceGroup, instance.partOffsets, instance.mirror)
       instanceGroup.traverse((object) => {
         object.userData.instanceId = instance.id
         if (object.userData.instancePartId) object.userData.scenePartId = `asset:${instance.id}:${object.userData.instancePartId}`
@@ -6564,7 +6568,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       const instanceGroup = existingAssetGroups.get(instance.id)
       if (!instanceGroup) return
       instanceGroup.position.copy(toSceneWorld(instance.x, instance.y ?? 0, instance.z))
-      updateAssetPartOffsets(instanceGroup, instance.partOffsets, instance.mirror)
+      syncAssetPartOffsets(instanceGroup, instance.partOffsets, instance.mirror)
     })
 
     const custom = group.children.find((child) => child.name === 'custom-voxels') as THREE.Group | undefined
@@ -8225,6 +8229,16 @@ function updateAssetPartOffsets(group: THREE.Group, partOffsets: SceneInstance['
       mirror?.z ? -offset.y : offset.y,
     )
   })
+}
+
+function syncAssetPartOffsets(group: THREE.Group, partOffsets: SceneInstance['partOffsets'], mirror: SceneInstance['mirror']): void {
+  // Root instance movement changes only group.position. Avoid traversing every
+  // component group unless the child-offset or mirror object was replaced by
+  // an actual partial transform operation.
+  if (group.userData.partOffsetsRef === partOffsets && group.userData.mirrorRef === mirror) return
+  updateAssetPartOffsets(group, partOffsets, mirror)
+  group.userData.partOffsetsRef = partOffsets
+  group.userData.mirrorRef = mirror
 }
 
 function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0, colorOverride?: string, mirror: SceneInstance['mirror'] = undefined, rotationX = 0, rotationY = 0, rotationZ = 0) {
