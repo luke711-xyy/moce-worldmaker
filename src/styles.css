@@ -222,7 +222,7 @@ button { border: 0; cursor: pointer; color: inherit; }
 .scene-context-menu button:hover { color: #fff0df; background: #a9523c; }
 .scene-context-menu button.danger { color: #ffb3a5; border-top: 1px solid #3d4a4d; margin-top: 3px; }
 .scene-context-menu button.danger:hover { color: #fff; background: #9f392d; }
-.viewport-palette { position: absolute; left: 50%; bottom: max(16px, calc(16px + var(--safe-bottom))); z-index: 4; display: flex; align-items: center; gap: 8px; width: min(244px, calc(100% - 24px - var(--safe-left) - var(--safe-right))); padding: 7px 8px; border: 1px solid #384346; background: rgba(23,29,31,.92); box-shadow: 0 8px 22px rgba(0,0,0,.24); transform: translateX(-50%); }
+.viewport-palette { position: absolute; left: 50%; bottom: max(16px, calc(16px + var(--safe-bottom))); z-index: 4; display: flex; align-items: center; gap: 8px; width: min(208px, calc(100% - 24px - var(--safe-left) - var(--safe-right))); padding: 7px 8px; border: 1px solid #384346; background: rgba(23,29,31,.92); box-shadow: 0 8px 22px rgba(0,0,0,.24); transform: translateX(-50%); }
 .viewport-palette-swatches { display: grid; grid-template-columns: repeat(auto-fit, minmax(20px, 1fr)); grid-auto-rows: 20px; flex: 1 1 auto; min-width: 0; gap: 4px; }
 .viewport-swatch { width: 20px; height: 20px; padding: 0; border: 1px solid rgba(255,255,255,.14); box-shadow: inset 0 0 0 1px rgba(0,0,0,.18); cursor: pointer; }
 .viewport-swatch.active { outline: 2px solid #e7b28e; outline-offset: 2px; }
