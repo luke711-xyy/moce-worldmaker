@@ -6977,7 +6977,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         ? existing
         : existing && existing.userData.renderSignature === renderSignature && existing.userData.assetRef === asset
           ? existing
-          : buildAssetGroup(renderAsset, materialMap, instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ, true)
+          : buildAssetGroup(renderAsset, materialMap, instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ, true, `asset:${assetGreedyCacheToken(asset)}:${renderSignature}`)
       if (instanceGroup !== existing) {
         if (existing) {
           group.remove(existing)
@@ -7068,6 +7068,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         )
         componentGroup.userData.renderOrigin = renderOrigin
         componentGroup.userData.renderSignature = renderSignature
+        componentGroup.userData.greedyMeshCacheKey = `custom:${renderSignature}`
         retainedComponents.add(scenePartId)
       }
       existingComponents.forEach((existingComponent, scenePartId) => {
@@ -7132,7 +7133,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       if (object.userData.greedyDisabled || !voxels || voxels.length < 64 || !colors || !scenePartId) return
       const renderSignature = object.userData.renderSignature as string | undefined
       if (renderSignature && object.userData.greedyMeshBuiltSignature === renderSignature) return
-      void client.build(scenePartId, revision, voxels).then((payload) => {
+      void client.build(scenePartId, revision, voxels, object.userData.greedyMeshCacheKey as string | undefined).then((payload) => {
         if (cancelled || !payload || !object.parent) return
         const positions = payload.positions.slice()
         for (let index = 0; index < positions.length; index += 1) positions[index] *= VOXEL_WORLD_SIZE
@@ -8611,6 +8612,16 @@ function customComponentRenderOrigin(component: ReadonlyArray<Pick<Voxel, 'x' | 
 
 const CUSTOM_INSTANCE_RENDER_LIMIT = 16_384
 const assetBaseComponentsCache = new WeakMap<VoxelAsset, Array<{ partId: string; voxels: Voxel[] }>>()
+const assetGreedyCacheTokens = new WeakMap<VoxelAsset, number>()
+let nextAssetGreedyCacheToken = 1
+
+function assetGreedyCacheToken(asset: VoxelAsset): number {
+  const cached = assetGreedyCacheTokens.get(asset)
+  if (cached !== undefined) return cached
+  const next = nextAssetGreedyCacheToken++
+  assetGreedyCacheTokens.set(asset, next)
+  return next
+}
 
 function scheduleInstancedVoxelMatrices(
   componentGroup: THREE.Group,
@@ -8855,7 +8866,7 @@ function syncAssetPartOffsets(group: THREE.Group, partOffsets: SceneInstance['pa
   group.userData.mirrorRef = mirror
 }
 
-function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0, colorOverride?: string, mirror: SceneInstance['mirror'] = undefined, rotationX = 0, rotationY = 0, rotationZ = 0, allowGreedyMesh = false) {
+function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0, colorOverride?: string, mirror: SceneInstance['mirror'] = undefined, rotationX = 0, rotationY = 0, rotationZ = 0, allowGreedyMesh = false, greedyCacheKey?: string) {
   const group = new THREE.Group()
   const scale = VOXEL_WORLD_SIZE
   const resolvedComponents = overrides.length
@@ -8905,6 +8916,7 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
       )
       partGroup.userData.greedyVoxels = greedyVoxels
       partGroup.userData.greedyColors = greedyColors
+      partGroup.userData.greedyMeshCacheKey = greedyCacheKey ? `${greedyCacheKey}:${partId}` : undefined
       partGroup.userData.greedyDisabled = false
       partGroup.userData.baseRenderOffset = {
         x: -(asset.width / 2) * scale,
