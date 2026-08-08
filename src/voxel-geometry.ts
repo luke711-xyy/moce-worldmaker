@@ -31,6 +31,7 @@ export type VoxelGeometryMesh = {
   normals: Int8Array
   materialIds: Uint8Array
   indices: Uint32Array
+  outlinePositions?: Float32Array
   materialKeys: string[]
   minX: number
   minY: number

@@ -4065,6 +4065,17 @@ function App() {
         z: geometryPreview.result.bounds.minZ,
       })
     }
+    // A single custom entity is the only geometry-operation path where the
+    // Worker mesh and the committed voxel result have exactly the same owner
+    // and coordinates. Keep that mesh for the next render pass so confirming
+    // a large shell/reduction operation does not immediately rebuild the same
+    // greedy surface on the main thread/mesh worker a second time.
+    if (singleCustomEntityId && geometryPreview.mesh && transformed.length === geometryPreview.result.voxelCount) {
+      pendingGeometryMeshCache.set(singleCustomEntityId, {
+        mesh: geometryPreview.mesh,
+        voxelCount: transformed.length,
+      })
+    }
     const selectedReplacementKeys = new Map<string, string[]>()
     groupEntries.forEach(({ sourcePartId, entityId, sourcePart }) => {
       if (!sourcePart) return
@@ -7301,8 +7312,72 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     if (!group || !client) return
     const revision = ++chunkMeshRevisionRef.current
     let cancelled = false
+    const attachGreedyMesh = (
+      object: THREE.Group,
+      payload: GreedyRenderMeshPayload,
+      materialKeys: string[],
+      scenePartId: string,
+      renderSignature?: string,
+      materialIdsAreOneBased = false,
+    ) => {
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.BufferAttribute(payload.positions, 3))
+      geometry.setAttribute('normal', new THREE.BufferAttribute(payload.normals, 3, true))
+      const hasMultipleColors = materialIdsAreOneBased ? materialKeys.length > 2 : materialKeys.length > 1
+      if (hasMultipleColors) {
+        const parsedColors = materialKeys.map((key) => {
+          if (key.startsWith('#')) return cachedGreedyColor(key)
+          return materialMap.get(key)?.color ?? materialMap.get('terracotta')?.color ?? cachedGreedyColor('#d16a4c')
+        })
+        const vertexColors = new Float32Array(payload.materialIds.length * 3)
+        payload.materialIds.forEach((materialId, index) => {
+          const color = parsedColors[materialId] ?? parsedColors[materialIdsAreOneBased ? 1 : 0]
+          vertexColors[index * 3] = color.r
+          vertexColors[index * 3 + 1] = color.g
+          vertexColors[index * 3 + 2] = color.b
+        })
+        geometry.setAttribute('color', new THREE.BufferAttribute(vertexColors, 3))
+      }
+      geometry.setIndex(new THREE.BufferAttribute(payload.indices, 1))
+      geometry.computeBoundingSphere()
+      const solidColorKey = materialKeys[materialIdsAreOneBased ? 1 : 0]
+      const material = new THREE.MeshStandardMaterial({
+        color: hasMultipleColors ? '#ffffff' : (solidColorKey?.startsWith('#') ? solidColorKey : (materialMap.get(solidColorKey)?.color ?? materialMap.get('terracotta')?.color ?? '#6c827d')),
+        vertexColors: hasMultipleColors,
+        roughness: 0.72,
+        metalness: 0.03,
+      })
+      configureGreedyPreviewMaterial(material)
+      const greedyMesh = new THREE.Mesh(geometry, material)
+      greedyMesh.scale.setScalar(VOXEL_WORLD_SIZE)
+      greedyMesh.userData.scenePartId = scenePartId
+      greedyMesh.userData.greedyOutlinePositions = payload.outlinePositions
+      greedyMesh.userData.baseRenderColor = 0xffffff
+      greedyMesh.userData.greedyMesh = true
+      object.children.forEach((child) => {
+        if (child instanceof THREE.InstancedMesh) {
+          child.userData.renderInstanceCount = child.count
+          child.count = 0
+        }
+      })
+      object.add(greedyMesh)
+      if (selectedPartIdsRef.current.includes(scenePartId) || editRenderStateRef.current.partIds.has(scenePartId)) {
+        addVoxelHighlight(greedyMesh)
+      }
+      if (renderSignature) object.userData.greedyMeshBuiltSignature = renderSignature
+      invalidateRenderRef.current()
+    }
     group.traverse((object) => {
       if (!(object instanceof THREE.Group)) return
+      const prebuilt = object.userData.prebuiltGreedyMesh as VoxelGeometryMesh | undefined
+      const prebuiltColors = object.userData.prebuiltGreedyColors as string[] | undefined
+      const prebuiltScenePartId = object.userData.scenePartId as string | undefined
+      if (prebuilt && prebuiltColors && prebuiltScenePartId) {
+        delete object.userData.prebuiltGreedyMesh
+        delete object.userData.prebuiltGreedyColors
+        attachGreedyMesh(object, prebuilt, prebuiltColors, prebuiltScenePartId, object.userData.renderSignature as string | undefined)
+        return
+      }
       const voxels = object.userData.greedyVoxels as Array<{ gx: number; gy: number; gz: number; materialId: number }> | undefined
       const colors = object.userData.greedyColors as string[] | undefined
       const scenePartId = object.userData.scenePartId as string | undefined
@@ -7311,62 +7386,9 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       if (renderSignature && object.userData.greedyMeshBuiltSignature === renderSignature) return
       void client.build(scenePartId, revision, voxels, object.userData.greedyMeshCacheKey as string | undefined).then((payload) => {
         if (cancelled || !payload || !object.parent) return
-        const geometry = new THREE.BufferGeometry()
-        // The worker emits coordinates in voxel units. Keep that transferable
-        // buffer intact so cache hits can reuse it without a full copy and a
-        // per-vertex scale loop on the main thread. The mesh transform carries
-        // the mm/world-unit conversion, and also scales attached selection
-        // outlines consistently.
-        geometry.setAttribute('position', new THREE.BufferAttribute(payload.positions, 3))
-        geometry.setAttribute('normal', new THREE.BufferAttribute(payload.normals, 3, true))
-        const hasMultipleColors = colors.length > 2
-        if (hasMultipleColors) {
-          // Parse each palette entry once. The previous loop constructed a
-          // THREE.Color for every vertex, which is particularly expensive for
-          // high-resolution imported meshes with hundreds of thousands of
-          // greedy vertices.
-          const parsedColors = colors.map(cachedGreedyColor)
-          const vertexColors = new Float32Array(payload.materialIds.length * 3)
-          payload.materialIds.forEach((materialId, index) => {
-            const color = parsedColors[materialId] ?? parsedColors[0]
-            vertexColors[index * 3] = color.r
-            vertexColors[index * 3 + 1] = color.g
-            vertexColors[index * 3 + 2] = color.b
-          })
-          geometry.setAttribute('color', new THREE.BufferAttribute(vertexColors, 3))
-        }
-        geometry.setIndex(new THREE.BufferAttribute(payload.indices, 1))
-        geometry.computeBoundingSphere()
-        const material = new THREE.MeshStandardMaterial({
-          color: hasMultipleColors ? '#ffffff' : (colors[1] ?? colors[0] ?? '#6c827d'),
-          vertexColors: hasMultipleColors,
-          roughness: 0.72,
-          metalness: 0.03,
-        })
-        configureGreedyPreviewMaterial(material)
-        const greedyMesh = new THREE.Mesh(geometry, material)
-        greedyMesh.scale.setScalar(VOXEL_WORLD_SIZE)
-        greedyMesh.userData.scenePartId = scenePartId
-        greedyMesh.userData.greedyVoxels = voxels
-        greedyMesh.userData.greedyOutlinePositions = payload.outlinePositions
-        greedyMesh.userData.baseRenderColor = 0xffffff
-        greedyMesh.userData.greedyMesh = true
-        object.children.forEach((child) => {
-          if (child instanceof THREE.InstancedMesh) {
-            child.userData.renderInstanceCount = child.count
-            child.count = 0
-          }
-        })
-        object.add(greedyMesh)
-        // The worker may finish after the regular highlight pass. Apply the
-        // current selection/edit state here as well; otherwise the first
-        // selection of a large hand-drawn entity would remain unhighlighted
-        // until some unrelated React update happened.
-        if (selectedPartIdsRef.current.includes(scenePartId) || editRenderStateRef.current.partIds.has(scenePartId)) {
-          addVoxelHighlight(greedyMesh)
-        }
-        if (renderSignature) object.userData.greedyMeshBuiltSignature = renderSignature
-        invalidateRenderRef.current()
+        // The worker emits coordinates in voxel units. Keep the transferable
+        // buffers intact and let the shared attach path install the result.
+        attachGreedyMesh(object, payload, colors, scenePartId, renderSignature, true)
       })
     })
     return () => {
@@ -8751,6 +8773,8 @@ const MemoizedVoxelViewport = React.memo(VoxelViewport)
 
 const voxelRenderSignatureCache = new WeakMap<Voxel[], Map<string, { length: number; token: number }>>()
 const voxelRenderOriginCache = new WeakMap<ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>, { x: number; y: number; z: number }>()
+const pendingGeometryMeshCache = new Map<string, { mesh: VoxelGeometryMesh; voxelCount: number }>()
+type GreedyRenderMeshPayload = Pick<VoxelGeometryMesh, 'positions' | 'normals' | 'materialIds' | 'indices' | 'outlinePositions'>
 let nextVoxelRenderSignatureToken = 1
 
 function voxelRenderSignature(component: Voxel[], componentColor?: string, forceCellRender = false): string {
@@ -8913,6 +8937,16 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
   // worker path. Do not allocate and scan a second full voxel array for data
   // that this component will not use.
   if (!preserveVoxelCells) {
+    const prebuiltGeometry = pendingGeometryMeshCache.get(entityId)
+    if (prebuiltGeometry?.voxelCount === component.length) {
+      // Geometry confirmation already produced this exact surface mesh in the
+      // Worker. Hand it to the normal greedy-mesh attachment effect once,
+      // rather than rebuilding the same large component after commit.
+      componentGroup.userData.prebuiltGreedyMesh = prebuiltGeometry.mesh
+      componentGroup.userData.prebuiltGreedyColors = prebuiltGeometry.mesh.materialKeys
+      pendingGeometryMeshCache.delete(entityId)
+      return componentGroup
+    }
     const greedyColorIds = new Map<string, number>()
     const greedyColors: string[] = ['#ffffff']
     const greedyVoxels = component.map((voxel) => {
