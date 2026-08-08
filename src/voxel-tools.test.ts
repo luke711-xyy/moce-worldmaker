@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { brushOffsets, clampPlanePointToGround, makePlaneVoxel, planePointToVoxel, projectVoxelToPlane, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine, rasterizeLine2D, rasterizeSphere, rasterizeBrush, rasterizePlanarStroke, signedExtrudeDelta } from './voxel-tools'
+import { EDITOR_GROUND_PLANE, brushOffsets, clampPlanePointToGround, makePlaneVoxel, planePointToVoxel, projectVoxelToPlane, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine, rasterizeLine2D, rasterizeSphere, rasterizeBrush, rasterizePlanarStroke, signedExtrudeDelta } from './voxel-tools'
 
 describe('voxel plane tools', () => {
   it('maps all three drawing planes without changing the fixed axis', () => {
@@ -36,6 +36,18 @@ describe('voxel plane tools', () => {
     expect(rasterizeCuboid('xy', { u: 0, v: 0, layer: 0 }, { u: 1, v: 2, layer: 0 }, 0, 2)).toHaveLength(18)
     expect(rasterizeSphere({ x: 0, y: 0, z: 0 }, 1)).toHaveLength(7)
     expect(makePlaneVoxel('yz', 2, 3, 4)).toEqual({ x: 4, y: 2, z: 3, materialId: '' })
+  })
+
+  it('keeps shape tools on the editor XY ground plane', () => {
+    expect(EDITOR_GROUND_PLANE).toBe('xz')
+    const cuboid = rasterizeCuboid(EDITOR_GROUND_PLANE, { u: 2, v: 3, layer: 0 }, { u: 3, v: 4, layer: 0 }, 0, 2)
+    expect(cuboid).toHaveLength(12)
+    expect(cuboid.every((voxel) => voxel.y >= 0 && voxel.y <= 2)).toBe(true)
+    expect(cuboid.every((voxel) => voxel.x >= 2 && voxel.x <= 3 && voxel.z >= 3 && voxel.z <= 4)).toBe(true)
+
+    const sphere = rasterizeAnchoredSphere(EDITOR_GROUND_PLANE, { u: 4, v: 5, layer: 0 }, { u: 6, v: 5, layer: 0 }, 0)
+    expect(Math.min(...sphere.map((voxel) => voxel.y))).toBe(0)
+    expect(sphere.some((voxel) => voxel.x === 4 && voxel.y === 2 && voxel.z === 5)).toBe(true)
   })
 
   it('anchors a sphere on the selected ground layer', () => {

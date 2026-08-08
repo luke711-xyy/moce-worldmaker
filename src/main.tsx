@@ -17,7 +17,7 @@ import { ScenePreviewInputVoxel, ScenePreviewPayload, ScenePreviewWorkerClient }
 import { MAX_PREVIEW_VOXELS, mergePreviewFaceCells, previewVoxelKey, selectPreviewVoxels } from './preview-voxels'
 import { clearLocalSceneDraft, LocalSceneDraft, LocalSceneRef, readLocalSceneDraft, readLocalSceneRef, writeLocalSceneDraft, writeLocalSceneRef } from './local-scene-session'
 import { commitNumericDraft, sanitizeNumericDraft } from './numeric-input'
-import { DrawingPlane, DrawOperation, VoxelAxis, VoxelTool, clampPlanePointToGround, makePlaneVoxel, planeAxes, projectVoxelToPlane, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine, rasterizePlanarStroke, signedExtrudeDelta, toolCellKey, uniqueVoxels } from './voxel-tools'
+import { DrawingPlane, DrawOperation, EDITOR_GROUND_PLANE, VoxelAxis, VoxelTool, clampPlanePointToGround, makePlaneVoxel, planeAxes, projectVoxelToPlane, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine, rasterizePlanarStroke, signedExtrudeDelta, toolCellKey, uniqueVoxels } from './voxel-tools'
 import { VoxelToolsGeometryResult, VoxelToolsWorkerClient, VoxelToolsShapeRequest } from './runtime/voxel-tools-client'
 import { adjustHexHsl, hexToHsl } from './color-utils'
 import { SliceLayer, SlicePlane, SliceVoxel, sliceEntityParts, sliceLayerToAsset, slicePlaneLabel } from './slicing'
@@ -8011,6 +8011,9 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   }
 
   const drawingToolIds = new Set<Tool>(['brush', 'erase', 'line', 'cuboid', 'sphere', 'extrude'])
+  // Shape tools always use the editor's XY ground plane. The selectable
+  // drawing plane remains reserved for brush, erase and line tools.
+  const shapeDrawingPlane = EDITOR_GROUND_PLANE
   const drawingPlaneWorld = (plane: DrawingPlane, layer: number) => {
     const [, , layerAxis] = planeAxes(plane)
     const normal = layerAxis === 'x'
@@ -8025,7 +8028,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
 
   const worldToProjectVoxel = (world: THREE.Vector3) => ({ x: worldToVoxelCell(world.x), y: worldToVoxelCell(world.z), z: worldToVoxelCell(world.y) })
 
-  const pointerDrawingPoint = (event: { clientX: number; clientY: number }, operation: DrawOperation | 'extrude', fixedLayer?: number) => {
+  const pointerDrawingPoint = (event: { clientX: number; clientY: number }, operation: DrawOperation | 'extrude', fixedLayer?: number, plane: DrawingPlane = drawingPlane) => {
     // Once a gesture has a fixed layer, the pointer is no longer allowed to
     // jump to another surface. Avoid running the occupancy DDA and floor mesh
     // raycast for every move sample; the plane intersection is both cheaper and
@@ -8041,7 +8044,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     // locked, so re-applying the current hit normal would let a raycast on a
     // different surface move the stroke to another layer.
     if (anchor && operation === 'add' && fixedLayer === undefined) anchor = { ...anchor, x: anchor.x + (hit?.normal.x ?? 0), y: anchor.y + (hit?.normal.y ?? 0), z: anchor.z + (hit?.normal.z ?? 0) }
-    const layer = fixedLayer ?? (anchor ? projectVoxelToPlane(drawingPlane, anchor).layer : 0)
+    const layer = fixedLayer ?? (anchor ? projectVoxelToPlane(plane, anchor).layer : 0)
     // When a stroke starts on an occupied cell, the DDA hit plus its face
     // normal is already the exact grid answer. Re-projecting the same pointer
     // onto the plane can land in a neighbouring cell (especially in orthographic
@@ -8049,25 +8052,25 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     // miss or appear far from the cursor. Only project pointer movement after
     // the gesture has locked its layer.
     if (anchor && fixedLayer === undefined) {
-      const projected = projectVoxelToPlane(drawingPlane, anchor)
-      return { point: clampPlanePointToGround(drawingPlane, { u: projected.u, v: projected.v, layer }), anchor, context }
+      const projected = projectVoxelToPlane(plane, anchor)
+      return { point: clampPlanePointToGround(plane, { u: projected.u, v: projected.v, layer }), anchor, context }
     }
-    const plane = drawingPlaneWorld(drawingPlane, layer)
-    const worldPoint = raycasterRef.current.ray.intersectPlane(plane, new THREE.Vector3())
+    const worldPlane = drawingPlaneWorld(plane, layer)
+    const worldPoint = raycasterRef.current.ray.intersectPlane(worldPlane, new THREE.Vector3())
     if (worldPoint) {
       const projectPoint = worldToProjectVoxel(worldPoint)
-      const projected = projectVoxelToPlane(drawingPlane, projectPoint)
-      return { point: clampPlanePointToGround(drawingPlane, { u: projected.u, v: projected.v, layer }), anchor, context }
+      const projected = projectVoxelToPlane(plane, projectPoint)
+      return { point: clampPlanePointToGround(plane, { u: projected.u, v: projected.v, layer }), anchor, context }
     }
     if (anchor) {
-      const projected = projectVoxelToPlane(drawingPlane, anchor)
-      const point = clampPlanePointToGround(drawingPlane, { u: projected.u, v: projected.v, layer })
+      const projected = projectVoxelToPlane(plane, anchor)
+      const point = clampPlanePointToGround(plane, { u: projected.u, v: projected.v, layer })
       return { point, anchor, context }
     }
     if (context.floorPoint) {
       const projectPoint = worldToProjectVoxel(context.floorPoint)
-      const projected = projectVoxelToPlane(drawingPlane, { ...projectPoint, [planeAxes(drawingPlane)[2]]: layer })
-      const point = clampPlanePointToGround(drawingPlane, { u: projected.u, v: projected.v, layer })
+      const projected = projectVoxelToPlane(plane, { ...projectPoint, [planeAxes(plane)[2]]: layer })
+      const point = clampPlanePointToGround(plane, { u: projected.u, v: projected.v, layer })
       return { point, context }
     }
     return null
@@ -8080,7 +8083,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     const context = getPointerContext(event)
     const hit = context?.voxelHit
     if (!context || !hit) return null
-    return { point: projectVoxelToPlane('xy', hit.voxel), anchor: hit.voxel, context }
+    return { point: projectVoxelToPlane(shapeDrawingPlane, hit.voxel), anchor: hit.voxel, context }
   }
 
   const projectWorldToClient = (world: THREE.Vector3) => {
@@ -8238,13 +8241,13 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     if (tool === 'line') return rasterizeLine(drawingPlane, gesture.start, gesture.current, brushSize, materialId)
     if (tool === 'cuboid') {
       const footprintEnd = gesture.footprintEnd ?? gesture.current
-      return rasterizeCuboid(drawingPlane, gesture.start, footprintEnd, gesture.start.layer, gesture.stage === 'depth' ? gesture.current.layer : gesture.start.layer, materialId)
+      return rasterizeCuboid(shapeDrawingPlane, gesture.start, footprintEnd, gesture.start.layer, gesture.stage === 'depth' ? gesture.current.layer : gesture.start.layer, materialId)
     }
     if (tool === 'sphere') {
-      return rasterizeAnchoredSphere(drawingPlane, gesture.start, gesture.current, gesture.baseHeight, materialId)
+      return rasterizeAnchoredSphere(shapeDrawingPlane, gesture.start, gesture.current, gesture.baseHeight, materialId)
     }
     if (tool === 'extrude') {
-      return rasterizeExtrude(drawingPlane, gesture.extrudeSource ?? [], gesture.extrudeStartLayer ?? gesture.start.layer, gesture.extrudeDelta ?? 0, gesture.extrudeAxis, activeMaterial, gesture.operation ?? drawOperation)
+      return rasterizeExtrude(shapeDrawingPlane, gesture.extrudeSource ?? [], gesture.extrudeStartLayer ?? gesture.start.layer, gesture.extrudeDelta ?? 0, gesture.extrudeAxis, activeMaterial, gesture.operation ?? drawOperation)
     }
     return []
   }
@@ -8283,7 +8286,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     const source = tool === 'extrude' && !gesture.extrudeSourceUploaded ? gesture.extrudeSource ?? [] : undefined
     return {
       kind: tool as VoxelToolsShapeRequest['kind'],
-      plane: drawingPlane,
+      plane: tool === 'line' ? drawingPlane : shapeDrawingPlane,
       start: gesture.start,
       current: gesture.current,
       footprintEnd: gesture.footprintEnd,
@@ -8335,8 +8338,8 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     const camera = cameraRef.current
     const renderer = rendererRef.current
     if (!camera || !renderer) return gesture.start.layer
-    const [, , layerAxis] = planeAxes(drawingPlane)
-    const startCell = makePlaneVoxel(drawingPlane, gesture.start.u, gesture.start.v, gesture.start.layer)
+    const [, , layerAxis] = planeAxes(shapeDrawingPlane)
+    const startCell = makePlaneVoxel(shapeDrawingPlane, gesture.start.u, gesture.start.v, gesture.start.layer)
     const nextCell = { ...startCell, [layerAxis]: startCell[layerAxis] + 1 }
     const startWorld = toSceneWorld(voxelCenterToWorld(startCell.x), voxelCenterToWorld(startCell.y), voxelCenterToWorld(startCell.z))
     const nextWorld = toSceneWorld(voxelCenterToWorld(nextCell.x), voxelCenterToWorld(nextCell.y), voxelCenterToWorld(nextCell.z))
@@ -8360,13 +8363,13 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       // projected axis has no useful screen direction. A vertical fallback is
       // still deterministic and lets the second cuboid gesture succeed.
       const nextLayer = gesture.start.layer + Math.round((startClientY - event.clientY) / 8)
-      return planeAxes(drawingPlane)[2] === 'y' ? Math.max(0, nextLayer) : nextLayer
+      return planeAxes(shapeDrawingPlane)[2] === 'y' ? Math.max(0, nextLayer) : nextLayer
     }
     const deltaX = event.clientX - startClientX
     const deltaY = event.clientY - startClientY
     const projectedDelta = (deltaX * axisX + deltaY * axisY) / axisLengthSquared
     const nextLayer = gesture.start.layer + Math.round(projectedDelta)
-    return planeAxes(drawingPlane)[2] === 'y' ? Math.max(0, nextLayer) : nextLayer
+    return planeAxes(shapeDrawingPlane)[2] === 'y' ? Math.max(0, nextLayer) : nextLayer
   }
 
   const processDrawingGestureMove = (event: { pointerId: number; clientX: number; clientY: number }) => {
@@ -8871,7 +8874,9 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       ? null
       : tool === 'extrude'
         ? pointerExtrudePoint(event)
-        : pointerDrawingPoint(event, tool === 'erase' ? 'subtract' : drawOperation)
+        : (tool === 'cuboid' || tool === 'sphere')
+          ? pointerDrawingPoint(event, drawOperation, 0, shapeDrawingPlane)
+          : pointerDrawingPoint(event, tool === 'erase' ? 'subtract' : drawOperation)
     if (!existingCuboid && !drawing) return
     const extrudeState = tool === 'extrude' && drawing ? createExtrudeGestureState(drawing, event) : null
     if (tool === 'extrude' && (!extrudeState || !extrudeState.source.length)) {
@@ -8879,7 +8884,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       return
     }
     const start = existingCuboid?.start ?? drawing!.point
-    const baseVoxel = makePlaneVoxel(drawingPlane, start.u, start.v, start.layer)
+    const baseVoxel = makePlaneVoxel(tool === 'line' ? drawingPlane : shapeDrawingPlane, start.u, start.v, start.layer)
     drawingGestureRef.current = {
       pointerId: event.pointerId,
       startClientX: event.clientX,
@@ -8889,7 +8894,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       start,
       current: existingCuboid ? { ...(existingCuboid.footprintEnd ?? start), layer: start.layer } : drawing!.point,
       footprintEnd: existingCuboid?.footprintEnd,
-      baseHeight: existingCuboid?.baseHeight ?? Math.max(0, drawing?.anchor?.y ?? baseVoxel.y),
+      baseHeight: existingCuboid?.baseHeight ?? (tool === 'sphere' ? 0 : Math.max(0, drawing?.anchor?.y ?? baseVoxel.y)),
       stage: existingCuboid ? 'depth' : 'footprint',
       moved: false,
       extrudeAxis: extrudeState?.axis,

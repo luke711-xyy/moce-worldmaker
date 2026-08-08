@@ -1,4 +1,4 @@
-import { makePlaneVoxel, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine } from '../voxel-tools'
+import { EDITOR_GROUND_PLANE, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine } from '../voxel-tools'
 import { buildGreedyMesh } from '../runtime/greedy-mesher'
 import { computeScale, computeShell, validShellThicknesses, VoxelGeometryMesh, VoxelGeometryPreview } from '../voxel-geometry'
 import type { VoxelToolsGeometryRequest, VoxelToolsShapeRequest, VoxelToolsShellOptionsRequest } from '../runtime/voxel-tools-client'
@@ -93,9 +93,9 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       voxels = rasterizeLine(request.plane, request.start, request.current, request.brushSize, request.materialId)
     } else if (request.kind === 'cuboid') {
       const end = request.footprintEnd ?? request.current
-      voxels = rasterizeCuboid(request.plane, request.start, end, request.start.layer, request.current.layer, request.materialId)
+      voxels = rasterizeCuboid(EDITOR_GROUND_PLANE, request.start, end, request.start.layer, request.current.layer, request.materialId)
     } else if (request.kind === 'sphere') {
-      voxels = rasterizeAnchoredSphere(request.plane, request.start, request.current, request.baseHeight, request.materialId)
+      voxels = rasterizeAnchoredSphere(EDITOR_GROUND_PLANE, request.start, request.current, 0, request.materialId)
     } else {
       const delta = request.extrudeDelta ?? request.current.layer - request.start.layer
       if (request.extrudeSessionId && request.source) extrudeSources.set(request.extrudeSessionId, { source: request.source })

@@ -10,6 +10,15 @@ export type PlanePoint = { u: number; v: number; layer: number }
 export type ToolCell = Pick<Voxel, 'x' | 'y' | 'z'>
 
 /**
+ * The editor-facing ground plane is X/Y with Z as height. Project files keep
+ * the historical storage layout (X/Z on the ground and Y as height), so the
+ * corresponding voxel-tools plane is `xz`. Shape tools use this plane
+ * unconditionally; the user-selectable drawing plane is only for planar
+ * brush/erase/line tools.
+ */
+export const EDITOR_GROUND_PLANE: DrawingPlane = 'xz'
+
+/**
  * Drawing-plane names are literal voxel-coordinate planes.  The old version
  * translated XY to XZ and XZ to XY to compensate for the renderer's legacy
  * storage layout, which made the plane selector lie to the user.  Rendering
