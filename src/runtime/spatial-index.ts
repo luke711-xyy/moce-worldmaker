@@ -120,6 +120,9 @@ function createRuntimeChunk(key: string): RuntimeChunk {
 
 export class SceneOccupancyIndex {
   readonly chunks = new Map<string, RuntimeChunk>()
+  // A fork initially shares immutable chunk objects with its source index.
+  // The first structural write to a shared chunk materializes a private copy.
+  private readonly sharedChunkKeys = new Set<string>()
 
   private readonly ownerIdToHandle = new Map<string, number>()
   private readonly handleToOwnerId: string[] = ['']
@@ -152,26 +155,17 @@ export class SceneOccupancyIndex {
 
   /**
    * Create an independent snapshot of the index for a background structural
-   * rebuild. The chunk buffers are copied because geometry confirmation
-   * removes and inserts owners in the fork while the current index continues
-   * serving viewport queries. Immutable owner topology arrays can be shared.
+   * rebuild. Chunk buffers are shared until the fork first writes to a chunk;
+   * immutable owner topology arrays can be shared for the whole rebuild. This
+   * keeps the confirmation path from synchronously copying every TypedArray
+   * in a large scene while the current index continues serving queries.
    */
   fork(): SceneOccupancyIndex {
     const clone = new SceneOccupancyIndex()
     this.chunks.forEach((chunk, key) => {
-      const overflowOwners = new Map<number, Set<number>>()
-      chunk.overflowOwners.forEach((owners, localIndex) => {
-        overflowOwners.set(localIndex, new Set(owners))
-      })
-      clone.chunks.set(key, {
-        key: chunk.key,
-        occupancyBits: chunk.occupancyBits.slice(),
-        occupiedCount: chunk.occupiedCount,
-        materialIds: chunk.materialIds.slice(),
-        ownerIds: chunk.ownerIds.slice(),
-        overflowOwners,
-        dataRevision: chunk.dataRevision,
-      })
+      clone.chunks.set(key, chunk)
+      clone.sharedChunkKeys.add(key)
+      this.sharedChunkKeys.add(key)
     })
     this.ownerIdToHandle.forEach((handle, ownerId) => clone.ownerIdToHandle.set(ownerId, handle))
     clone.handleToOwnerId.splice(1, clone.handleToOwnerId.length - 1, ...this.handleToOwnerId.slice(1))
@@ -189,6 +183,7 @@ export class SceneOccupancyIndex {
 
   clear(): void {
     this.chunks.clear()
+    this.sharedChunkKeys.clear()
     this.ownerIdToHandle.clear()
     this.handleToOwnerId.splice(1)
     this.ownerVoxels.clear()
@@ -740,8 +735,13 @@ export class SceneOccupancyIndex {
 
   private insertOwnerVoxel(ownerHandle: number, voxel: Voxel, runtimeVoxel: RuntimeVoxelCoord, assumeEmpty: boolean): void {
     const { chunkKey, localIndex } = runtimeVoxelAddress(runtimeVoxel)
-    const chunk = this.chunks.get(chunkKey) ?? createRuntimeChunk(chunkKey)
-    if (!this.chunks.has(chunkKey)) this.chunks.set(chunkKey, chunk)
+    let chunk = this.chunks.get(chunkKey)
+    if (!chunk) {
+      chunk = createRuntimeChunk(chunkKey)
+      this.chunks.set(chunkKey, chunk)
+    } else {
+      chunk = this.ensureWritableChunk(chunkKey, chunk)
+    }
     const { wordIndex, bitMask } = bitAddress(localIndex)
     const wasOccupied = (chunk.occupancyBits[wordIndex] & bitMask) !== 0
     if (assumeEmpty && !wasOccupied) {
@@ -768,8 +768,9 @@ export class SceneOccupancyIndex {
 
   private removeOwnerVoxel(ownerHandle: number, voxel: RuntimeVoxelCoord): void {
     const { chunkKey, localIndex } = runtimeVoxelAddress(voxel)
-    const chunk = this.chunks.get(chunkKey)
-    if (!chunk) return
+    const sourceChunk = this.chunks.get(chunkKey)
+    if (!sourceChunk) return
+    const chunk = this.ensureWritableChunk(chunkKey, sourceChunk)
     const primaryOwner = chunk.ownerIds[localIndex]
     const overflowOwners = chunk.overflowOwners.get(localIndex)
     if (primaryOwner === ownerHandle) {
@@ -791,6 +792,26 @@ export class SceneOccupancyIndex {
     }
     chunk.dataRevision += 1
     if (chunk.occupiedCount === 0 && !chunk.overflowOwners.size) this.chunks.delete(chunkKey)
+  }
+
+  private ensureWritableChunk(chunkKey: string, chunk: RuntimeChunk): RuntimeChunk {
+    if (!this.sharedChunkKeys.has(chunkKey)) return chunk
+    const overflowOwners = new Map<number, Set<number>>()
+    chunk.overflowOwners.forEach((owners, localIndex) => {
+      overflowOwners.set(localIndex, new Set(owners))
+    })
+    const writable: RuntimeChunk = {
+      key: chunk.key,
+      occupancyBits: chunk.occupancyBits.slice(),
+      occupiedCount: chunk.occupiedCount,
+      materialIds: chunk.materialIds.slice(),
+      ownerIds: chunk.ownerIds.slice(),
+      overflowOwners,
+      dataRevision: chunk.dataRevision,
+    }
+    this.chunks.set(chunkKey, writable)
+    this.sharedChunkKeys.delete(chunkKey)
+    return writable
   }
 
   private finalizeRemovedOwner(ownerId: string, ownerHandle: number): void {

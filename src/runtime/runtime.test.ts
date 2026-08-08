@@ -105,12 +105,17 @@ describe('SceneOccupancyIndex', () => {
       part('stable', [voxel(8, 0, 0)]),
     ])
     const fork = index.fork()
+    expect(fork.chunks.get('0,0,0')).toBe(index.chunks.get('0,0,0'))
     await fork.removeOwnerChunked('old', 1)
     await fork.insertOwnerFromValidatedBatchChunked('replacement', [voxel(2, 0, 0)], undefined, undefined, 1)
     expect(index.queryProjectVoxel(voxel(0, 0, 0)).ownerIds).toEqual(['old'])
     expect(index.queryProjectVoxel(voxel(2, 0, 0)).occupied).toBe(false)
     expect(fork.queryProjectVoxel(voxel(0, 0, 0)).occupied).toBe(false)
     expect(fork.queryProjectVoxel(voxel(2, 0, 0)).ownerIds).toEqual(['replacement'])
+    expect(fork.queryProjectVoxel(voxel(8, 0, 0)).ownerIds).toEqual(['stable'])
+    expect(fork.chunks.get('0,0,0')).not.toBe(index.chunks.get('0,0,0'))
+    index.removeOwner('stable')
+    expect(index.queryProjectVoxel(voxel(8, 0, 0)).occupied).toBe(false)
     expect(fork.queryProjectVoxel(voxel(8, 0, 0)).ownerIds).toEqual(['stable'])
   })
 
