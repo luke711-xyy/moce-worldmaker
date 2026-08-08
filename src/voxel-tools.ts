@@ -192,6 +192,32 @@ export function signedExtrudeDelta(projectedCellDelta: number, directionSign: 1 
   return Math.max(-max, Math.min(max, signed))
 }
 
+/**
+ * Select the complete outer face that will be pulled in an extrusion
+ * direction.  The clicked voxel is only the hit-test anchor; it must not
+ * decide which internal coordinate layer is pulled.  Otherwise clicking a
+ * tall column on a stepped model produces a thin wall instead of the whole
+ * face.
+ */
+export function selectExtrudeFace(source: Voxel[], axis: VoxelAxis, directionSign: 1 | -1): Voxel[] {
+  if (!source.length) return []
+  let faceLayer = source[0][axis]
+  for (let index = 1; index < source.length; index += 1) {
+    const layer = source[index][axis]
+    if (directionSign > 0 ? layer > faceLayer : layer < faceLayer) faceLayer = layer
+  }
+  const result: Voxel[] = []
+  const seen = new Set<string>()
+  for (const voxel of source) {
+    if (voxel[axis] !== faceLayer) continue
+    const key = toolCellKey(voxel)
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(voxel)
+  }
+  return result
+}
+
 export function rasterizeExtrude(plane: DrawingPlane, source: Voxel[], startLayer: number, delta: number, axisOverride?: VoxelAxis, materialId = '', operation: DrawOperation = 'add'): Voxel[] {
   if (!delta) return []
   const layerAxis = axisOverride ?? planeAxes(plane)[2]
