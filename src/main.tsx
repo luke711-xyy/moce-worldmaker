@@ -17,7 +17,7 @@ import { ScenePreviewInputVoxel, ScenePreviewPayload, ScenePreviewWorkerClient }
 import { MAX_PREVIEW_VOXELS, mergePreviewFaceCells, previewVoxelKey, selectPreviewVoxels } from './preview-voxels'
 import { clearLocalSceneDraft, LocalSceneDraft, LocalSceneRef, readLocalSceneDraft, readLocalSceneRef, writeLocalSceneDraft, writeLocalSceneRef } from './local-scene-session'
 import { commitNumericDraft, sanitizeNumericDraft } from './numeric-input'
-import { DrawingPlane, DrawOperation, EDITOR_GROUND_PLANE, VoxelAxis, VoxelTool, clampPlanePointToGround, makePlaneVoxel, planeAxes, projectVoxelToPlane, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine, rasterizePlanarStroke, selectExtrudeFace, signedExtrudeDelta, toolCellKey, uniqueVoxels } from './voxel-tools'
+import { DrawingPlane, DrawOperation, EDITOR_GROUND_PLANE, VoxelAxis, VoxelTool, clampPlanePointToGround, makePlaneVoxel, planeAxes, projectVoxelToPlane, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine, rasterizePlanarStroke, selectExtrudeLayer, signedExtrudeDelta, toolCellKey, uniqueVoxels } from './voxel-tools'
 import { VoxelToolsGeometryResult, VoxelToolsWorkerClient, VoxelToolsShapeRequest } from './runtime/voxel-tools-client'
 import { adjustHexHsl, hexToHsl } from './color-utils'
 import { SliceLayer, SlicePlane, SliceVoxel, sliceEntityParts, sliceLayerToAsset, slicePlaneLabel } from './slicing'
@@ -8123,13 +8123,14 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     return scenePartsRef.current.filter((part) => !editEntityId || part.id === editEntityId || Boolean(editAssemblyId && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(editAssemblyId)))
   }
 
-  const extrudeSourceFor = (axis: VoxelAxis, directionSign: 1 | -1) => {
+  const extrudeSourceFor = (axis: VoxelAxis, layer: number) => {
     // Use the same effective scene-space voxel path as hit testing and
     // collision detection.  The old canonical-array scan selected the
-    // clicked coordinate layer, which was wrong for stepped/asset-moved
-    // entities and could leave the preview and commit using different cells.
+    // clicked coordinate layer, which is the intended extrusion behavior for
+    // stepped models. The effective scene-space conversion remains important
+    // for moved asset instances and editable sub-parts.
     const effectiveVoxels = extrudeParts().flatMap((part) => scenePartVoxels(part))
-    const source = selectExtrudeFace(effectiveVoxels, axis, directionSign)
+    const source = selectExtrudeLayer(effectiveVoxels, axis, layer)
     return {
       source,
       startLayer: source.length ? source[0][axis] : undefined,
@@ -8176,7 +8177,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     return {
       axis: fallbackAxis,
       sign: fallbackSign,
-      ...extrudeSourceFor(fallbackAxis, fallbackSign),
+      ...extrudeSourceFor(fallbackAxis, hit.voxel[fallbackAxis]),
       hitVoxel: hit.voxel,
       screenVector: fallbackStart && fallbackEnd
         ? { x: fallbackEnd.x - fallbackStart.x, y: fallbackEnd.y - fallbackStart.y }
@@ -8205,9 +8206,10 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       gesture.extrudeAxis = direction.axis
       gesture.extrudeSign = direction.sign
       gesture.extrudeScreenVector = direction.screenVector
-      const face = extrudeSourceFor(direction.axis, direction.sign)
-      gesture.extrudeStartLayer = face.startLayer
-      gesture.extrudeSource = face.source
+      const layer = hitVoxel[direction.axis]
+      const selectedLayer = extrudeSourceFor(direction.axis, layer)
+      gesture.extrudeStartLayer = selectedLayer.startLayer
+      gesture.extrudeSource = selectedLayer.source
       // The fallback normal is only used before the drag direction is known.
       // Replace the worker session source when the actual direction locks;
       // otherwise the worker can keep extruding the initial thin/incorrect

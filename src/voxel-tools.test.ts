@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { EDITOR_GROUND_PLANE, brushOffsets, clampPlanePointToGround, makePlaneVoxel, planePointToVoxel, projectVoxelToPlane, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine, rasterizeLine2D, rasterizeSphere, rasterizeBrush, rasterizePlanarStroke, selectExtrudeFace, signedExtrudeDelta } from './voxel-tools'
+import { EDITOR_GROUND_PLANE, brushOffsets, clampPlanePointToGround, makePlaneVoxel, planePointToVoxel, projectVoxelToPlane, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine, rasterizeLine2D, rasterizeSphere, rasterizeBrush, rasterizePlanarStroke, selectExtrudeLayer, signedExtrudeDelta } from './voxel-tools'
 
 describe('voxel plane tools', () => {
   it('maps all three drawing planes without changing the fixed axis', () => {
@@ -80,7 +80,7 @@ describe('voxel plane tools', () => {
     ])
   })
 
-  it('selects the complete outer face instead of the clicked internal layer', () => {
+  it('selects the complete clicked layer instead of the entity outer face', () => {
     const source = [
       { x: 0, y: 0, z: 0, materialId: 'a' },
       { x: 0, y: 1, z: 0, materialId: 'b' },
@@ -89,11 +89,9 @@ describe('voxel plane tools', () => {
       { x: 1, y: 2, z: 0, materialId: 'e' },
       { x: 1, y: 2, z: 0, materialId: 'duplicate' },
     ]
-    expect(selectExtrudeFace(source, 'x', -1)).toEqual(source.slice(0, 4))
-    expect(selectExtrudeFace(source, 'y', 1)).toEqual([
-      source[2], source[3], source[4],
-    ])
-    expect(selectExtrudeFace(source, 'y', -1)).toEqual([source[0]])
+    expect(selectExtrudeLayer(source, 'x', 1)).toEqual([source[4]])
+    expect(selectExtrudeLayer(source, 'y', 2)).toEqual([source[2], source[3], source[4]])
+    expect(selectExtrudeLayer(source, 'y', 1)).toEqual([source[1]])
   })
 
   it('marks extrusion preview cells with the active material in paint mode', () => {
