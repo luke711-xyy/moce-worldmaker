@@ -8076,6 +8076,14 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     return null
   }
 
+  const pointerShapeGroundPoint = (event: { clientX: number; clientY: number }, operation: DrawOperation, layer = 0) => {
+    // Do not call this through the selected drawing plane. Shape tools use a
+    // separate, fixed XY ground gesture for both pointer-down and pointer-
+    // move; otherwise selecting XZ/YZ for manual drawing leaks into the shape
+    // footprint calculation and can make the preview jump or grow unbounded.
+    return pointerDrawingPoint(event, operation, layer, shapeDrawingPlane)
+  }
+
   // Extrusion is view-driven rather than plane-driven.  Keep its initial
   // point in a stable coordinate projection only for the gesture bookkeeping;
   // the actual source slice and direction are determined from the hit voxel.
@@ -8396,7 +8404,9 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       applyPlanarStrokeAt(previousPoint, drawing.point, 'subtract')
       return
     }
-    const drawing = pointerDrawingPoint(event, drawOperation, drawingGesture.start.layer)
+    const drawing = (tool === 'cuboid' || tool === 'sphere')
+      ? pointerShapeGroundPoint(event, drawOperation, drawingGesture.start.layer)
+      : pointerDrawingPoint(event, drawOperation, drawingGesture.start.layer)
     if (!drawing) return
     if (drawingGesture.stage !== 'depth') drawing.point.layer = drawingGesture.start.layer
     else if (tool === 'cuboid' && drawingGesture.footprintEnd) drawing.point = { ...drawing.point, u: drawingGesture.footprintEnd.u, v: drawingGesture.footprintEnd.v }
@@ -8875,7 +8885,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       : tool === 'extrude'
         ? pointerExtrudePoint(event)
         : (tool === 'cuboid' || tool === 'sphere')
-          ? pointerDrawingPoint(event, drawOperation, 0, shapeDrawingPlane)
+          ? pointerShapeGroundPoint(event, drawOperation)
           : pointerDrawingPoint(event, tool === 'erase' ? 'subtract' : drawOperation)
     if (!existingCuboid && !drawing) return
     const extrudeState = tool === 'extrude' && drawing ? createExtrudeGestureState(drawing, event) : null
