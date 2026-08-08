@@ -150,6 +150,43 @@ export class SceneOccupancyIndex {
     return index
   }
 
+  /**
+   * Create an independent snapshot of the index for a background structural
+   * rebuild. The chunk buffers are copied because geometry confirmation
+   * removes and inserts owners in the fork while the current index continues
+   * serving viewport queries. Immutable owner topology arrays can be shared.
+   */
+  fork(): SceneOccupancyIndex {
+    const clone = new SceneOccupancyIndex()
+    this.chunks.forEach((chunk, key) => {
+      const overflowOwners = new Map<number, Set<number>>()
+      chunk.overflowOwners.forEach((owners, localIndex) => {
+        overflowOwners.set(localIndex, new Set(owners))
+      })
+      clone.chunks.set(key, {
+        key: chunk.key,
+        occupancyBits: chunk.occupancyBits.slice(),
+        occupiedCount: chunk.occupiedCount,
+        materialIds: chunk.materialIds.slice(),
+        ownerIds: chunk.ownerIds.slice(),
+        overflowOwners,
+        dataRevision: chunk.dataRevision,
+      })
+    })
+    this.ownerIdToHandle.forEach((handle, ownerId) => clone.ownerIdToHandle.set(ownerId, handle))
+    clone.handleToOwnerId.splice(1, clone.handleToOwnerId.length - 1, ...this.handleToOwnerId.slice(1))
+    this.ownerVoxels.forEach((voxels, handle) => clone.ownerVoxels.set(handle, voxels))
+    this.ownerTranslations.forEach((translation, handle) => clone.ownerTranslations.set(handle, { ...translation }))
+    this.ownerBounds.forEach((bounds, handle) => clone.ownerBounds.set(handle, { ...bounds }))
+    this.ownerVoxelRefs.forEach((voxels, ownerId) => clone.ownerVoxelRefs.set(ownerId, voxels))
+    this.ownerVoxelKeys.forEach((keys, ownerId) => clone.ownerVoxelKeys.set(ownerId, [...keys]))
+    this.ownerSourceRefs.forEach((voxels, ownerId) => clone.ownerSourceRefs.set(ownerId, voxels))
+    this.ownerBaseOffsets.forEach((offset, ownerId) => clone.ownerBaseOffsets.set(ownerId, { ...offset }))
+    this.materialIdToIndex.forEach((index, materialId) => clone.materialIdToIndex.set(materialId, index))
+    clone.nextMaterialIndex = this.nextMaterialIndex
+    return clone
+  }
+
   clear(): void {
     this.chunks.clear()
     this.ownerIdToHandle.clear()

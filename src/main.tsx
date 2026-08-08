@@ -1592,6 +1592,8 @@ function App() {
 
   const commitGeometryProject = async (next: ProjectState, removedPartIds: string[], resultGroups: Array<{ entityId: string; voxels: Voxel[] }>) => {
     const applyRevision = geometryApplyRevisionRef.current
+    const occupancy = sceneOccupancyRef.current
+    const nextOccupancy = occupancy?.fork()
     // Geometry confirmation is already a validated, integer-grid batch. Do
     // not send it through updateProject(): that path deep-clones the whole
     // project and normalizeStoredProject() then walks every asset and voxel.
@@ -1609,12 +1611,11 @@ function App() {
       setHistoryRevision((value) => value + 1)
     })
 
-    // Rebuild the occupancy index in bounded batches after publishing the
-    // already-validated project. The viewport is temporarily interaction
-    // locked by geometryApplying, so queries cannot observe the intermediate
-    // state while the browser gets a chance to paint between batches.
-    const occupancy = sceneOccupancyRef.current
-    if (!occupancy) return
+    // Rebuild an independent occupancy index in bounded batches after
+    // publishing the already-validated project. The old index remains the
+    // authoritative query source while the fork is incomplete, so camera
+    // browsing and read-only viewport work do not observe a half-built index.
+    if (!nextOccupancy) return
     // Geometry confirmation has already checked collision/bounds. Larger
     // batches reduce the number of event-loop turns for a large scale-up while
     // still yielding often enough for the browser to paint and remain
@@ -1623,12 +1624,13 @@ function App() {
     const occupancyBatchSize = resultVoxelCount >= 100_000 ? 16_384 : 4_096
     for (const partId of removedPartIds) {
       if (geometryApplyRevisionRef.current !== applyRevision) return
-      await occupancy.removeOwnerChunked(partId, occupancyBatchSize)
+      await nextOccupancy.removeOwnerChunked(partId, occupancyBatchSize)
     }
     for (const { entityId, voxels } of resultGroups) {
       if (geometryApplyRevisionRef.current !== applyRevision) return
-      await occupancy.insertOwnerFromValidatedBatchChunked(`custom:${entityId}`, voxels, voxels, { x: 0, y: 0, z: 0 }, occupancyBatchSize)
+      await nextOccupancy.insertOwnerFromValidatedBatchChunked(`custom:${entityId}`, voxels, voxels, { x: 0, y: 0, z: 0 }, occupancyBatchSize)
     }
+    if (geometryApplyRevisionRef.current === applyRevision) sceneOccupancyRef.current = nextOccupancy
   }
 
   const updateProject = (updater: (draft: ProjectState) => void, trackHistory = true) => {
