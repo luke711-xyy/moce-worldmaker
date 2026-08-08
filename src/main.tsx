@@ -829,6 +829,33 @@ type ProjectHistoryEntry = {
   checkedTreePartIds: string[]
 }
 
+// History entries structurally share project roots, but a derived scene-part
+// array can still retain a large per-voxel grouping for every edit. Keep the
+// small, fast path for ordinary scenes and reconstruct derived parts on undo
+// for large scenes instead of retaining another heavy view of the same model.
+const HISTORY_PARTS_VOXEL_LIMIT = 50_000
+const HISTORY_MAX_ENTRIES = 50
+
+function historyLimitForProject(project: ProjectState): number {
+  // Template-library assets are not part of the scene snapshot's render
+  // payload. Count only assets actually instantiated in the scene, otherwise
+  // a large catalogue would unnecessarily reduce undo depth for a small
+  // scene.
+  const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
+  const assetVoxelCount = project.instances.reduce((total, instance) => total + (assetMap.get(instance.assetId)?.voxels.length ?? 0), 0)
+  const voxelCount = project.customVoxels.length + assetVoxelCount
+  if (voxelCount >= 500_000) return 6
+  if (voxelCount >= 100_000) return 12
+  if (voxelCount >= 25_000) return 24
+  return HISTORY_MAX_ENTRIES
+}
+
+function pushBoundedHistoryEntry(stack: ProjectHistoryEntry[], entry: ProjectHistoryEntry): void {
+  stack.push(entry)
+  const limit = historyLimitForProject(entry.project)
+  if (stack.length > limit) stack.splice(0, stack.length - limit)
+}
+
 function sameScenePartOffset(left: { x?: number; y?: number; z?: number } | undefined, right: { x?: number; y?: number; z?: number } | undefined): boolean {
   return (left?.x ?? 0) === (right?.x ?? 0)
     && (left?.y ?? 0) === (right?.y ?? 0)
@@ -1138,13 +1165,23 @@ function App() {
   }
 
   const sceneParts = useMemo(() => sceneEntityParts(project), [project])
-  const makeHistoryEntry = (historyProject: ProjectState, historyParts = sceneParts): ProjectHistoryEntry => ({
-    project: historyProject,
-    parts: historyParts,
-    editEntityId,
-    selectedId,
-    checkedTreePartIds: [...checkedTreePartIds],
-  })
+  const makeHistoryEntry = (historyProject: ProjectState, historyParts = sceneParts): ProjectHistoryEntry => {
+    let derivedVoxelCount = 0
+    for (const part of historyParts) {
+      derivedVoxelCount += part.voxels.length
+      if (derivedVoxelCount > HISTORY_PARTS_VOXEL_LIMIT) break
+    }
+    return {
+      project: historyProject,
+      // Rebuilding sceneEntityParts on undo is cheaper than retaining a
+      // second large per-voxel grouping for every history entry. Small scenes
+      // keep the cached parts and therefore retain their existing fast undo.
+      ...(derivedVoxelCount <= HISTORY_PARTS_VOXEL_LIMIT ? { parts: historyParts } : {}),
+      editEntityId,
+      selectedId,
+      checkedTreePartIds: [...checkedTreePartIds],
+    }
+  }
   useEffect(() => {
     // Editing is also a tree-selection state. Keep the checkbox invariant in
     // one place so a newly-created custom entity cannot render as selected
@@ -1462,12 +1499,12 @@ function App() {
     // collections it can mutate. Avoid the general persistence normalizer's
     // full asset/voxel clone on pointer-up.
     const next = finalizeVoxelStrokeProject(transaction.draft)
-    historyRef.current.past = [...historyRef.current.past, {
+    pushBoundedHistoryEntry(historyRef.current.past, {
       ...makeHistoryEntry(transaction.original, initialParts),
       editEntityId: transaction.historyEditEntityId,
       selectedId: transaction.historySelectedId,
       checkedTreePartIds: [...transaction.historyCheckedTreePartIds],
-    }].slice(-50)
+    })
     historyRef.current.future = []
     const finalParts = sceneEntityParts(next)
     const touchedOwnerIds = new Set(transaction.touchedOwnerIds)
@@ -1508,7 +1545,7 @@ function App() {
     const normalizedBase = normalizeStoredProject(next, { normalizeNaming: false })
     const normalizedNext = normalizeProjectNaming(normalizedBase, { clone: false })
     if (trackHistory) {
-      historyRef.current.past = [...historyRef.current.past, makeHistoryEntry(projectRef.current)].slice(-50)
+      pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(projectRef.current))
       historyRef.current.future = []
     }
     const nextParts = sceneEntityParts(normalizedNext)
@@ -1525,7 +1562,7 @@ function App() {
   }
 
   const commitScenePartsMoveFast = (nextProject: ProjectState, movableParts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => {
-    historyRef.current.past = [...historyRef.current.past, makeHistoryEntry(projectRef.current)].slice(-50)
+    pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(projectRef.current))
     historyRef.current.future = []
     movableParts.forEach((part) => {
       // A move preserves the owner's topology. Let the occupancy index keep
@@ -1556,7 +1593,7 @@ function App() {
     // project and normalizeStoredProject() then walks every asset and voxel.
     // The project root and mutable scene arrays were prepared by the caller;
     // history can therefore retain the immutable previous root directly.
-    historyRef.current.past = [...historyRef.current.past, makeHistoryEntry(projectRef.current)].slice(-50)
+    pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(projectRef.current))
     historyRef.current.future = []
     // The occupancy index was updated incrementally above. The following
     // sceneParts effect must not sort and rescan the same large result again.
@@ -1915,7 +1952,7 @@ function App() {
       setNotice('没有可撤销的操作')
       return
     }
-    historyRef.current.future.push(makeHistoryEntry(projectRef.current))
+    pushBoundedHistoryEntry(historyRef.current.future, makeHistoryEntry(projectRef.current))
     const previousParts = previous.parts ?? sceneEntityParts(previous.project)
     const changedOwnerIds = changedOccupancyOwnerIds(sceneParts, previousParts)
     if (changedOwnerIds.size) sceneOccupancyRef.current?.syncOwnerParts(previousParts, changedOwnerIds)
@@ -1936,7 +1973,7 @@ function App() {
       setNotice('没有可重做的操作')
       return
     }
-    historyRef.current.past.push(makeHistoryEntry(projectRef.current))
+    pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(projectRef.current))
     const nextParts = next.parts ?? sceneEntityParts(next.project)
     const changedOwnerIds = changedOccupancyOwnerIds(sceneParts, nextParts)
     if (changedOwnerIds.size) sceneOccupancyRef.current?.syncOwnerParts(nextParts, changedOwnerIds)
@@ -3887,7 +3924,7 @@ function App() {
     const normalizedNext = normalizeProjectNaming(normalizeStoredProject(unnormalizedNext, { normalizeNaming: false }), { clone: false })
     const newOwnerIds = new Set<string>([...createdCustomIds].map((entityId) => `custom:${entityId}`))
     sceneEntityParts(normalizedNext).filter((part) => part.instanceId && createdInstanceIds.has(part.instanceId)).forEach((part) => newOwnerIds.add(part.id))
-    historyRef.current.past = [...historyRef.current.past, makeHistoryEntry(sourceProject)].slice(-50)
+    pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(sourceProject))
     historyRef.current.future = []
     sceneOccupancyRef.current?.syncOwnerParts(sceneEntityParts(normalizedNext), newOwnerIds)
     skipSceneOccupancySyncRef.current = true
@@ -4429,7 +4466,7 @@ function App() {
       if (baseColor) nextCustomColors[entityId] = adjustHexHsl(baseColor, hueDelta, saturationTarget)
     })
     const nextProject: ProjectState = { ...sourceProject, instances: nextInstances, customVoxels: nextCustomVoxels, customColors: nextCustomColors }
-    historyRef.current.past = [...historyRef.current.past, makeHistoryEntry(sourceProject)].slice(-50)
+    pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(sourceProject))
     historyRef.current.future = []
     // Color changes do not alter occupancy. Avoid rehashing every scene voxel
     // while the inspector publishes the new material state.
@@ -4515,7 +4552,7 @@ function App() {
       sceneParts.filter((part) => part.instanceId === instanceId).forEach((part) => changedOwnerIds.add(part.id))
     })
     const nextProject: ProjectState = { ...sourceProject, customVoxels: nextCustomVoxels, instances: nextInstances }
-    historyRef.current.past = [...historyRef.current.past, makeHistoryEntry(sourceProject)].slice(-50)
+    pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(sourceProject))
     historyRef.current.future = []
     const nextParts = sceneEntityParts(nextProject)
     sceneOccupancyRef.current?.syncOwnerParts(nextParts, changedOwnerIds)
@@ -8855,12 +8892,12 @@ function assetGreedyCacheToken(asset: VoxelAsset): number {
 
 function scheduleInstancedVoxelMatrices(
   componentGroup: THREE.Group,
-  batches: Array<{ mesh: THREE.InstancedMesh; voxels: Voxel[] }>,
+  batches: Array<{ mesh: THREE.InstancedMesh; voxels: Voxel[]; start?: number; end?: number }>,
   origin: { x: number; y: number; z: number },
   resolveColor?: (voxel: Voxel, target: THREE.Color) => void,
 ): void {
   let batchIndex = 0
-  let voxelIndex = 0
+  let voxelIndex = batches[0]?.start ?? 0
   let frameId: number | null = null
   let cancelled = false
   const matrix = new THREE.Matrix4()
@@ -8874,27 +8911,30 @@ function scheduleInstancedVoxelMatrices(
     let budget = 1200
     while (budget > 0 && batchIndex < batches.length) {
       const batch = batches[batchIndex]
-      while (budget > 0 && voxelIndex < batch.voxels.length) {
+      const start = batch.start ?? 0
+      const end = batch.end ?? batch.voxels.length
+      while (budget > 0 && voxelIndex < end) {
         const voxel = batch.voxels[voxelIndex]
+        const meshIndex = voxelIndex - start
         matrix.makeTranslation(
           voxelCenterToWorld(voxel.x - origin.x),
           voxelCenterToWorld(voxel.z - origin.z),
           voxelCenterToWorld(voxel.y - origin.y),
         )
-        batch.mesh.setMatrixAt(voxelIndex, matrix)
+        batch.mesh.setMatrixAt(meshIndex, matrix)
         if (resolveColor) {
           resolveColor(voxel, color)
-          batch.mesh.setColorAt(voxelIndex, color)
+          batch.mesh.setColorAt(meshIndex, color)
         }
         voxelIndex += 1
-        batch.mesh.count = voxelIndex
+        batch.mesh.count = meshIndex + 1
         budget -= 1
       }
       batch.mesh.instanceMatrix.needsUpdate = true
       if (resolveColor && batch.mesh.instanceColor) batch.mesh.instanceColor.needsUpdate = true
-      if (voxelIndex >= batch.voxels.length) {
+      if (voxelIndex >= end) {
         batchIndex += 1
-        voxelIndex = 0
+        voxelIndex = batches[batchIndex]?.start ?? 0
       }
     }
     if (batchIndex < batches.length) {
@@ -9011,20 +9051,31 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
     // still synchronously walked the entire enlarged component here to group
     // every voxel by color before scheduling the matrix writes. That made the
     // geometry confirmation hitch scale with the final voxel count even though
-    // the expensive matrix upload was already deferred. A single instanced
-    // mesh with per-instance colors lets both the matrix and color upload use
-    // the same bounded animation-frame budget.
-    const meshMaterial = new THREE.MeshStandardMaterial({ color: '#ffffff', vertexColors: true, roughness: 0.72, metalness: 0.03 })
-    configureInstancedVoxelPreviewMaterial(meshMaterial)
-    const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, meshMaterial, component.length)
-    mesh.count = 0
-    mesh.userData.customVoxels = component
-    mesh.userData.customComponentId = voxelComponentId(component)
-    mesh.userData.scenePartId = componentScenePartId
-    mesh.userData.outerVoxel = true
-    mesh.userData.baseRenderColor = 0xffffff
-    mesh.userData.instancedVoxelColors = true
-    componentGroup.add(mesh)
+    // the expensive matrix upload was already deferred. Keep the exact unit
+    // cell representation, but split GPU instance buffers into bounded chunks
+    // so one large allocation cannot monopolize the main thread or create a
+    // single oversized buffer update after confirmation.
+    const cellBatches: Array<{ mesh: THREE.InstancedMesh; voxels: Voxel[]; start: number; end: number }> = []
+    // The entity id is already stable for this whole component. Re-sorting
+    // hundreds of thousands of coordinates just to derive a debug id would
+    // reintroduce a synchronous O(n log n) confirmation hitch.
+    const componentId = entityId
+    const cellChunkSize = 16_384
+    for (let start = 0; start < component.length; start += cellChunkSize) {
+      const end = Math.min(component.length, start + cellChunkSize)
+      const meshMaterial = new THREE.MeshStandardMaterial({ color: '#ffffff', vertexColors: true, roughness: 0.72, metalness: 0.03 })
+      configureInstancedVoxelPreviewMaterial(meshMaterial)
+      const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, meshMaterial, end - start)
+      mesh.count = 0
+      mesh.userData.customVoxels = component
+      mesh.userData.customComponentId = componentId
+      mesh.userData.scenePartId = componentScenePartId
+      mesh.userData.outerVoxel = true
+      mesh.userData.baseRenderColor = 0xffffff
+      mesh.userData.instancedVoxelColors = true
+      componentGroup.add(mesh)
+      cellBatches.push({ mesh, voxels: component, start, end })
+    }
 
     const colorCache = new Map<string, THREE.Color>()
     const resolveColor = (voxel: Voxel, target: THREE.Color) => {
@@ -9038,7 +9089,7 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
       colorCache.set(key, next)
       target.copy(next)
     }
-    scheduleInstancedVoxelMatrices(componentGroup, [{ mesh, voxels: component }], origin, resolveColor)
+    scheduleInstancedVoxelMatrices(componentGroup, cellBatches, origin, resolveColor)
     return componentGroup
   }
 
