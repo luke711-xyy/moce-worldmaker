@@ -13,9 +13,17 @@ export type VoxelToolsShapeRequest = {
   materialId: string
   operation?: DrawOperation
   source?: Voxel[]
+  /**
+   * Extrusion keeps its source slice in the worker for the duration of one
+   * pointer gesture.  Subsequent samples only send this id and the new delta,
+   * instead of structured-cloning the whole source slice again.
+   */
+  extrudeSessionId?: string
   extrudeAxis?: VoxelAxis
   extrudeStartLayer?: number
   extrudeDelta?: number
+  /** Preview requests may return only a compact surface mesh. */
+  includeVoxels?: boolean
 }
 
 export type VoxelToolsGeometryRequest =
@@ -23,6 +31,11 @@ export type VoxelToolsGeometryRequest =
   | { kind: 'scale'; voxels: GeometryVoxel[]; mode: GeometryScaleMode; factor: number }
 
 export type VoxelToolsShellOptionsRequest = { kind: 'shell-options'; voxels: GeometryVoxel[] }
+
+export type VoxelToolsShapeResult = {
+  voxels: Voxel[]
+  mesh: VoxelGeometryMesh | null
+}
 
 type WorkerResponse = {
   id: number
@@ -48,11 +61,12 @@ export class VoxelToolsWorkerClient {
   private nextId = 1
   private readonly pending = new Map<number, PendingRequest>()
   private latestInFlightId: number | null = null
-  private latestQueued: { request: VoxelToolsShapeRequest; resolve: (voxels: Voxel[]) => void; reject: (error: Error) => void } | null = null
+  private latestQueued: { request: VoxelToolsShapeRequest; resolve: (result: VoxelToolsShapeResult) => void; reject: (error: Error) => void } | null = null
   private latestGeometryInFlightId: number | null = null
   private latestGeometryQueued: { request: VoxelToolsGeometryRequest; resolve: (result: VoxelToolsGeometryResult | null) => void; reject: (error: Error) => void } | null = null
   private latestShellOptionsInFlightId: number | null = null
   private latestShellOptionsQueued: { request: VoxelToolsShellOptionsRequest; resolve: (result: number[] | null) => void; reject: (error: Error) => void } | null = null
+  private nextExtrudeSessionId = 1
 
   constructor() {
     this.worker = new Worker(new URL('../workers/voxel-tools.worker.ts', import.meta.url), { type: 'module' })
@@ -67,7 +81,7 @@ export class VoxelToolsWorkerClient {
       if (response.error) request.reject(new Error(response.error))
       else if (response.geometry) request.resolve(response.geometry ? { geometry: response.geometry, mesh: response.mesh ?? null } : [])
       else if (response.shellThicknesses) request.resolve(response.shellThicknesses)
-      else request.resolve(response.voxels ?? [])
+      else request.resolve({ voxels: response.voxels ?? [], mesh: response.mesh ?? null })
       this.flushLatest()
       this.flushLatestGeometry()
       this.flushLatestShellOptions()
@@ -91,7 +105,7 @@ export class VoxelToolsWorkerClient {
   compute(request: VoxelToolsShapeRequest): Promise<Voxel[]> {
     const id = this.nextId++
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve: (value) => resolve(value as Voxel[]), reject })
+      this.pending.set(id, { resolve: (value) => resolve((value as VoxelToolsShapeResult).voxels), reject })
       this.worker.postMessage({ id, request })
     })
   }
@@ -136,12 +150,22 @@ export class VoxelToolsWorkerClient {
    * newer pointer sample arrives. This prevents a long cuboid/sphere preview
    * from rendering a queue of obsolete intermediate shapes.
    */
-  computeLatest(request: VoxelToolsShapeRequest): Promise<Voxel[]> {
+  computeLatest(request: VoxelToolsShapeRequest): Promise<VoxelToolsShapeResult> {
     return new Promise((resolve, reject) => {
-      this.latestQueued?.resolve([])
+      this.latestQueued?.resolve({ voxels: [], mesh: null })
       this.latestQueued = { request, resolve, reject }
       this.flushLatest()
     })
+  }
+
+  /** Allocate a worker-side source id for one extrusion gesture. */
+  createExtrudeSession(): string {
+    return `extrude-${this.nextExtrudeSessionId++}`
+  }
+
+  /** Release a source slice once the gesture has been committed or cancelled. */
+  disposeExtrudeSession(sessionId: string) {
+    this.worker.postMessage({ type: 'dispose-extrude-source', sessionId })
   }
 
   private flushLatest() {
@@ -150,7 +174,7 @@ export class VoxelToolsWorkerClient {
     this.latestQueued = null
     const id = this.nextId++
     this.latestInFlightId = id
-    this.pending.set(id, { resolve: (value) => queued.resolve(value as Voxel[]), reject: queued.reject })
+    this.pending.set(id, { resolve: (value) => queued.resolve(value as VoxelToolsShapeResult), reject: queued.reject })
     this.worker.postMessage({ id, request: queued.request })
   }
 

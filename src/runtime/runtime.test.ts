@@ -267,6 +267,45 @@ describe('AssetTransformCache', () => {
     expect(cache.localVoxelAtSceneVoxel({ ...instance, x: 2, z: 3 }, asset, { x: 99, y: 0, z: 30 })).toBeUndefined()
   })
 
+  it('resolves empty target cells for edits without creating a child entity', () => {
+    const asset = {
+      id: 'asset',
+      name: 'asset',
+      kind: 'house' as const,
+      style: 'greek' as const,
+      width: 2,
+      height: 1,
+      depth: 1,
+      color: '#ffffff',
+      accent: '#000000',
+      parts: ['main'],
+      voxels: [voxel(0, 0, 0)],
+    }
+    const instance = { id: 'instance', assetId: asset.id, x: 0, y: 0, z: 0.05, rotation: 0, style: asset.style, visible: true, overrides: [] }
+    const cache = new AssetTransformCache()
+    expect(cache.localCoordinateAtSceneVoxel(instance, asset, { x: 0, y: 0, z: 0 }, 'main')).toEqual({ x: 1, y: 0, z: 0 })
+  })
+
+  it('round-trips rotated and mirrored asset cells', () => {
+    const asset = {
+      id: 'asset',
+      name: 'asset',
+      kind: 'house' as const,
+      style: 'greek' as const,
+      width: 2,
+      height: 2,
+      depth: 2,
+      color: '#ffffff',
+      accent: '#000000',
+      parts: ['main'],
+      voxels: [voxel(1, 1, 0)],
+    }
+    const instance = { id: 'instance', assetId: asset.id, x: 0, y: 0, z: 0, rotation: 90, mirror: { x: true, y: false, z: true }, style: asset.style, visible: true, overrides: [] }
+    const cache = new AssetTransformCache()
+    const sceneVoxel = cache.resolve(instance, asset)[0]
+    expect(cache.localCoordinateAtSceneVoxel(instance, asset, sceneVoxel, 'main')).toEqual({ x: 1, y: 1, z: 0 })
+  })
+
   it('keeps mirror and rotation variants in separate cache entries', () => {
     const asset = {
       id: 'asset',
@@ -334,5 +373,39 @@ describe('voxel DDA', () => {
 
   it('returns null when the ray leaves the query distance without a hit', () => {
     expect(raycastVoxelDda({ x: 0.5, y: 0.5, z: 0.5 }, { x: 0, y: 0, z: 1 }, () => ({ occupied: false, ownerIds: [] }), 3)).toBeNull()
+  })
+
+  it('starts at the scene AABB after a far camera pan', () => {
+    const hit = raycastVoxelDda(
+      { x: 10000.5, y: 0.5, z: 0.5 },
+      { x: -1, y: 0, z: 0 },
+      (candidate) => ({ occupied: candidate.gx === 0 && candidate.gy === 0 && candidate.gz === 0, ownerIds: ['target'] }),
+      20_000,
+      { minGx: 0, maxGx: 2, minGy: 0, maxGy: 0, minGz: 0, maxGz: 0 },
+    )
+    expect(hit?.voxel).toEqual({ gx: 0, gy: 0, gz: 0 })
+    expect(hit?.normal).toEqual({ gx: 1, gy: 0, gz: 0 })
+  })
+
+  it('provides a usable entry normal when the first bounded cell is occupied', () => {
+    const hit = raycastVoxelDda(
+      { x: 10000.5, y: 0.5, z: 0.5 },
+      { x: -1, y: 0, z: 0 },
+      (candidate) => ({ occupied: candidate.gx === 2 && candidate.gy === 0 && candidate.gz === 0, ownerIds: ['target'] }),
+      20_000,
+      { minGx: 0, maxGx: 2, minGy: 0, maxGy: 0, minGz: 0, maxGz: 0 },
+    )
+    expect(hit?.voxel).toEqual({ gx: 2, gy: 0, gz: 0 })
+    expect(hit?.normal).toEqual({ gx: 1, gy: 0, gz: 0 })
+  })
+
+  it('uses the dominant incoming direction if the ray starts inside an occupied cell', () => {
+    const hit = raycastVoxelDda(
+      { x: 0.5, y: 0.5, z: 0.5 },
+      { x: 1, y: 0.1, z: 0 },
+      () => ({ occupied: true, ownerIds: ['target'] }),
+      10,
+    )
+    expect(hit?.normal).toEqual({ gx: -1, gy: 0, gz: 0 })
   })
 })

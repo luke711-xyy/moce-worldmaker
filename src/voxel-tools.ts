@@ -86,6 +86,24 @@ export function rasterizeBrush(plane: DrawingPlane, center: PlanePoint, size: nu
   return brushOffsets(size).map(({ u, v }) => clampPlanePointToGround(plane, { u: safeCenter.u + u, v: safeCenter.v + v, layer: safeCenter.layer })).map((point) => makePlaneVoxel(plane, point.u, point.v, point.layer, materialId))
 }
 
+/**
+ * Rasterize one continuous planar pointer stroke.
+ *
+ * This is deliberately operation-agnostic: add, subtract and paint must use
+ * the exact same grid cells.  Keeping the rasterizer independent from the
+ * React/Three pointer handlers prevents the two tools from drifting apart
+ * again (which previously made erase use a second, non-planar hit path).
+ */
+export function rasterizePlanarStroke(plane: DrawingPlane, start: PlanePoint, end: PlanePoint, size: number, materialId = ''): Voxel[] {
+  const cells = new Map<string, Voxel>()
+  for (const point of interpolatePlanePoints(start, end)) {
+    for (const voxel of rasterizeBrush(plane, point, size, materialId)) {
+      cells.set(toolCellKey(voxel), voxel)
+    }
+  }
+  return [...cells.values()]
+}
+
 /** Inclusive 2D Bresenham/supercover approximation with no gaps between cells. */
 export function rasterizeLine2D(start: PlanePoint, end: PlanePoint): Array<{ u: number; v: number }> {
   let x0 = Math.round(start.u)
@@ -170,6 +188,11 @@ export function rasterizeExtrude(plane: DrawingPlane, source: Voxel[], startLaye
   const layerAxis = axisOverride ?? planeAxes(plane)[2]
   const step = delta > 0 ? 1 : -1
   const result: Voxel[] = []
+  // Source slices are normally deduplicated when the gesture starts, but
+  // keeping this guard here makes the pure algorithm safe for imported or
+  // legacy data without requiring a second full-size uniqueVoxels() pass over
+  // the generated extrusion result.
+  const seen = new Set<string>()
   for (const voxel of source) {
     // An explicit extrusion axis is view-selected and is intentionally
     // independent from the drawing plane. Filtering through the plane's
@@ -180,10 +203,13 @@ export function rasterizeExtrude(plane: DrawingPlane, source: Voxel[], startLaye
       target[layerAxis] = layer
       if (target.y < 0) continue
       if (operation === 'paint') target.materialId = materialId
+      const key = toolCellKey(target)
+      if (seen.has(key)) continue
+      seen.add(key)
       result.push(target)
     }
   }
-  return uniqueVoxels(result)
+  return result
 }
 
 export function uniqueVoxels(voxels: Voxel[]): Voxel[] {

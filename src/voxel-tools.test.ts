@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { brushOffsets, clampPlanePointToGround, makePlaneVoxel, planePointToVoxel, projectVoxelToPlane, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine, rasterizeLine2D, rasterizeSphere, rasterizeBrush, signedExtrudeDelta } from './voxel-tools'
+import { brushOffsets, clampPlanePointToGround, makePlaneVoxel, planePointToVoxel, projectVoxelToPlane, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine, rasterizeLine2D, rasterizeSphere, rasterizeBrush, rasterizePlanarStroke, signedExtrudeDelta } from './voxel-tools'
 
 describe('voxel plane tools', () => {
   it('maps all three drawing planes without changing the fixed axis', () => {
@@ -15,6 +15,14 @@ describe('voxel plane tools', () => {
     expect(brushOffsets(99)).toEqual(brushOffsets(99))
     expect(brushOffsets(100).length).toBeGreaterThan(brushOffsets(99).length)
     expect(rasterizeBrush('xy', { u: 4, v: 5, layer: 7 }, 1, 'red')[0]).toEqual({ x: 4, y: 5, z: 7, materialId: 'red' })
+  })
+
+  it('uses one deterministic cell set for a continuous planar stroke', () => {
+    const stroke = rasterizePlanarStroke('xz', { u: 0, v: 0, layer: 2 }, { u: 3, v: 2, layer: 2 }, 1, 'red')
+    expect(stroke).toHaveLength(4)
+    expect(stroke.every((voxel) => voxel.y === 2)).toBe(true)
+    expect(stroke[0]).toEqual({ x: 0, y: 2, z: 0, materialId: 'red' })
+    expect(stroke.at(-1)).toEqual({ x: 3, y: 2, z: 2, materialId: 'red' })
   })
 
   it('rasterizes diagonal lines without an empty endpoint', () => {

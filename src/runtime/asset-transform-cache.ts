@@ -4,8 +4,10 @@ import {
   resolveInstanceSceneVoxels,
   SceneInstance,
   snapAssetOrigin,
+  voxelCenterToWorld,
   Voxel,
   VoxelAsset,
+  VOXEL_WORLD_SIZE,
   voxelBounds,
   worldToVoxel,
 } from '../voxel'
@@ -98,5 +100,44 @@ export class AssetTransformCache {
       sceneVoxel.y - translation.y,
       sceneVoxel.z - translation.z,
     ))
+  }
+
+  /** Convert any scene cell to an instance-local cell, including empty cells. */
+  localCoordinateAtSceneVoxel(
+    instance: SceneInstance,
+    asset: VoxelAsset,
+    sceneVoxel: Pick<Voxel, 'x' | 'y' | 'z'>,
+    componentId: string,
+  ): Pick<Voxel, 'x' | 'y' | 'z'> | undefined {
+    const offset = instance.partOffsets?.[componentId] ?? { x: 0, y: 0, z: 0 }
+    const mirror = instance.mirror ?? { x: false, y: false, z: false }
+    const rotationX = (instance.rotationX ?? 0) * Math.PI / 180
+    const rotationY = (instance.rotationY ?? 0) * Math.PI / 180
+    const rotationZ = -(instance.rotation + (instance.rotationZ ?? 0)) * Math.PI / 180
+    const scene = {
+      x: voxelCenterToWorld(sceneVoxel.x) - instance.x,
+      y: voxelCenterToWorld(sceneVoxel.z) - instance.z,
+      z: voxelCenterToWorld(sceneVoxel.y) - (instance.y ?? 0),
+    }
+    // The forward transform applies X, then Y, then Z rotation. Undo it in
+    // reverse order before converting the local physical position to indices.
+    const cz = Math.cos(-rotationZ)
+    const sz = Math.sin(-rotationZ)
+    const afterZ = { x: cz * scene.x - sz * scene.y, y: sz * scene.x + cz * scene.y, z: scene.z }
+    const cy = Math.cos(-rotationY)
+    const sy = Math.sin(-rotationY)
+    const afterY = { x: cy * afterZ.x + sy * afterZ.z, y: afterZ.y, z: -sy * afterZ.x + cy * afterZ.z }
+    const cx = Math.cos(-rotationX)
+    const sx = Math.sin(-rotationX)
+    const local = { x: afterY.x, y: cx * afterY.y - sx * afterY.z, z: sx * afterY.y + cx * afterY.z }
+    const localXIndex = Math.round((local.x - (mirror.x ? -offset.x : offset.x)) / VOXEL_WORLD_SIZE - 0.5 + asset.width / 2)
+    const localZIndex = Math.round((local.y - (mirror.y ? -offset.z : offset.z)) / VOXEL_WORLD_SIZE - 0.5 + asset.depth / 2)
+    const localYIndex = Math.round((local.z - (mirror.z ? -offset.y : offset.y)) / VOXEL_WORLD_SIZE - 0.5)
+    if (localXIndex < 0 || localXIndex >= asset.width || localZIndex < 0 || localZIndex >= asset.depth || localYIndex < 0 || localYIndex >= asset.height) return undefined
+    return {
+      x: mirror.x ? asset.width - 1 - localXIndex : localXIndex,
+      y: mirror.z ? asset.height - 1 - localYIndex : localYIndex,
+      z: mirror.y ? asset.depth - 1 - localZIndex : localZIndex,
+    }
   }
 }
