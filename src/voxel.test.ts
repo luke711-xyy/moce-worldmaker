@@ -36,6 +36,29 @@ describe('莫测造境体素核心数据', () => {
     expect(secondParts.find((part) => part.id === 'custom:cache-test')?.voxels).toHaveLength(1)
   })
 
+  it('reuses unchanged custom groups when another entity is replaced', () => {
+    const project = {
+      ...makeDefaultProject(),
+      instances: [],
+      customVoxels: [
+        { x: 0, y: 0, z: 0, materialId: 'terracotta', entityId: 'replace-me' },
+        { x: 4, y: 0, z: 0, materialId: 'teal', entityId: 'keep-me' },
+      ],
+    }
+    const firstParts = sceneEntityParts(project)
+    const stableVoxels = firstParts.find((part) => part.id === 'custom:keep-me')?.voxels
+    const nextProject = {
+      ...project,
+      customVoxels: [
+        { x: 1, y: 0, z: 0, materialId: 'terracotta', entityId: 'replace-me' },
+        project.customVoxels[1],
+      ],
+    }
+    const secondParts = sceneEntityParts(nextProject)
+    expect(secondParts.find((part) => part.id === 'custom:keep-me')?.voxels).toBe(stableVoxels)
+    expect(secondParts.find((part) => part.id === 'custom:replace-me')?.voxels[0].x).toBe(1)
+  })
+
   it('reuses unchanged instance voxel arrays when another instance moves', () => {
     const project = makeDefaultProject()
     const firstParts = sceneEntityParts(project)

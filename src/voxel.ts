@@ -658,6 +658,7 @@ type SceneEntityPartsCache = {
   customVoxelsRef: Voxel[] | null
   customVoxelLength: number
   customGroups: Map<string, Voxel[]>
+  customVoxelOwnerCache: WeakMap<object, string>
 }
 
 // sceneEntityParts() is used by rendering, hit testing, selection and the
@@ -672,6 +673,7 @@ const sceneEntityPartsCache: SceneEntityPartsCache = {
   customVoxelsRef: null,
   customVoxelLength: 0,
   customGroups: new Map(),
+  customVoxelOwnerCache: new WeakMap(),
 }
 
 // Geometry signatures are requested by every render/selection pass. Large
@@ -863,9 +865,58 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
   })
 
   if (cache.customVoxelsRef !== project.customVoxels || project.customVoxels.length < cache.customVoxelLength) {
+    const previousGroups = cache.customGroups
+    const previousOwnerCache = cache.customVoxelOwnerCache
+    const nextGroups = new Map<string, Voxel[]>()
+    const changedGroups = new Map<string, Voxel[]>()
+    const presentEntityIds = new Set<string>()
+    const reusedCounts = new Map<string, number>()
+    const changedEntityIds = new Set<string>()
+
+    // A geometry replacement creates a new flat array but keeps every
+    // unaffected voxel object immutable and reusable. Identify changed
+    // entities by object identity first, instead of allocating a new group
+    // array for every entity in the scene.
+    project.customVoxels.forEach((voxel) => {
+      const entityId = voxelEntityId(voxel)
+      presentEntityIds.add(entityId)
+      if (previousOwnerCache.get(voxel as object) === entityId) {
+        reusedCounts.set(entityId, (reusedCounts.get(entityId) ?? 0) + 1)
+      } else {
+        changedEntityIds.add(entityId)
+        const group = changedGroups.get(entityId)
+        if (group) group.push(voxel)
+        else changedGroups.set(entityId, [voxel])
+      }
+    })
+
+    previousGroups.forEach((group, entityId) => {
+      if (!presentEntityIds.has(entityId)) return
+      if (changedEntityIds.has(entityId) || (reusedCounts.get(entityId) ?? 0) !== group.length) changedEntityIds.add(entityId)
+      else nextGroups.set(entityId, group)
+    })
+
+    // If an entity lost old voxels but gained no new object, the first pass
+    // only knows the count changed. Reconstruct just those affected groups;
+    // the common replacement case still touches one entity rather than the
+    // entire scene's group map.
+    if (changedEntityIds.size && previousGroups.size) {
+      changedGroups.clear()
+      project.customVoxels.forEach((voxel) => {
+        const entityId = voxelEntityId(voxel)
+        if (!changedEntityIds.has(entityId)) return
+        const group = changedGroups.get(entityId)
+        if (group) group.push(voxel)
+        else changedGroups.set(entityId, [voxel])
+      })
+    }
+    changedGroups.forEach((group, entityId) => {
+      group.forEach((voxel) => cache.customVoxelOwnerCache.set(voxel as object, entityId))
+      nextGroups.set(entityId, group)
+    })
     cache.customVoxelsRef = project.customVoxels
-    cache.customVoxelLength = 0
-    cache.customGroups.clear()
+    cache.customVoxelLength = project.customVoxels.length
+    cache.customGroups = nextGroups
   }
   // Add-only strokes append to the same array. Copy only the new tail and
   // replace the affected group array so the occupancy index can detect it by
@@ -879,6 +930,7 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
     // voxel made large generated entities quadratic to assemble.
     if (group) group.push(voxel)
     else cache.customGroups.set(entityId, [voxel])
+    cache.customVoxelOwnerCache.set(voxel as object, entityId)
   }
   cache.customVoxelLength = project.customVoxels.length
   cache.customGroups.forEach((voxels, entityId) => {

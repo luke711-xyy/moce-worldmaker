@@ -4022,8 +4022,13 @@ function App() {
       // is already one contiguous batch, so a single pass is sufficient.
       const voxels = new Array<Voxel>(geometryPreview.result.voxels.length)
       for (let index = 0; index < geometryPreview.result.voxels.length; index += 1) {
-        const { sourcePartId: _sourcePartId, ...voxel } = geometryPreview.result.voxels[index]
-        voxels[index] = { ...voxel, entityId: singleCustomEntityId }
+        // The Worker result is detached from the preview as soon as this
+        // transaction is committed. Reuse each object in place instead of
+        // allocating a second object for every generated cell.
+        const voxel = geometryPreview.result.voxels[index]
+        voxel.entityId = singleCustomEntityId
+        delete voxel.sourcePartId
+        voxels[index] = voxel
       }
       groupEntries = [{ sourcePartId: firstSourcePartId, entityId: singleCustomEntityId, sourcePart: selectedEntityParts[0], voxels }]
       transformed = voxels
@@ -4039,12 +4044,27 @@ function App() {
       groupEntries = [...resultGroups.entries()].filter(([, voxels]) => voxels.length > 0).map(([sourcePartId, voxels], index) => {
         const sourcePart = sourcePartById.get(sourcePartId)
         const entityId = `${operationBatchId}-${index + 1}`
-        const transformedVoxels = voxels.map(({ sourcePartId: _sourcePartId, ...voxel }) => ({ ...voxel, entityId }))
+        const transformedVoxels = voxels.map((voxel) => {
+          voxel.entityId = entityId
+          delete voxel.sourcePartId
+          return voxel
+        })
         transformed.push(...transformedVoxels)
         return { sourcePartId, entityId, sourcePart, voxels: transformedVoxels }
       })
     }
     const transformedGroups = groupEntries.map(({ entityId, voxels }) => ({ entityId, voxels }))
+    if (geometryPreview.result.bounds && transformed.length) {
+      // The geometry Worker already computed the result bounds. Seed the
+      // render-origin cache so the first post-confirm scene build does not
+      // scan the entire enlarged array a second time just to find its minimum
+      // coordinate.
+      voxelRenderOriginCache.set(transformed, {
+        x: geometryPreview.result.bounds.minX,
+        y: geometryPreview.result.bounds.minY,
+        z: geometryPreview.result.bounds.minZ,
+      })
+    }
     const selectedReplacementKeys = new Map<string, string[]>()
     groupEntries.forEach(({ sourcePartId, entityId, sourcePart }) => {
       if (!sourcePart) return
@@ -8729,8 +8749,9 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
 // component body and its effect dependency checks.
 const MemoizedVoxelViewport = React.memo(VoxelViewport)
 
-const voxelRenderSignatureCache = new WeakMap<Voxel[], Map<string, string>>()
+const voxelRenderSignatureCache = new WeakMap<Voxel[], Map<string, { length: number; token: number }>>()
 const voxelRenderOriginCache = new WeakMap<ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>, { x: number; y: number; z: number }>()
+let nextVoxelRenderSignatureToken = 1
 
 function voxelRenderSignature(component: Voxel[], componentColor?: string, forceCellRender = false): string {
   // A scene move changes only the component group's transform. The canonical
@@ -8741,43 +8762,16 @@ function voxelRenderSignature(component: Voxel[], componentColor?: string, force
   const colorKey = `${componentColor ?? ''}|${forceCellRender ? 'cells' : 'auto'}`
   const cachedVariants = voxelRenderSignatureCache.get(component)
   const cached = cachedVariants?.get(colorKey)
-  if (cached) return cached
-
-  // Keep the actual signature calculation O(n) but avoid allocating one large
-  // string per voxel. The previous join(';') signature was especially
-  // expensive after a 2x/3x enlargement because it temporarily duplicated
-  // hundreds of MB of text on the main thread before Three.js could start the
-  // greedy-mesh worker.
-  let hash = 2166136261
-  const origin = customComponentRenderOrigin(component)
-  const addNumber = (value: number) => {
-    hash ^= value | 0
-    hash = Math.imul(hash, 16777619)
-  }
-  const addText = (value: string) => {
-    for (let index = 0; index < value.length; index += 1) {
-      hash ^= value.charCodeAt(index)
-      hash = Math.imul(hash, 16777619)
-    }
-    hash ^= 124
-    hash = Math.imul(hash, 16777619)
-  }
-  addNumber(component.length)
-  addText(colorKey)
-  component.forEach((voxel) => {
-    // Translation is represented by the component group position. Hash the
-    // local shape so moving a large custom entity does not invalidate its
-    // already-built mesh.
-    addNumber(voxel.x - origin.x)
-    addNumber(voxel.y - origin.y)
-    addNumber(voxel.z - origin.z)
-    addText(voxel.materialId)
-    addText(voxel.paintMaterialId ?? '')
-    addNumber(voxel.preserveVoxelCells ? 1 : 0)
-  })
-  const signature = `${component.length}|${hash >>> 0}`
-  const variants = cachedVariants ?? new Map<string, string>()
-  variants.set(colorKey, signature)
+  // Scene voxel arrays are immutable for replacement/paint operations. The
+  // only intentional in-place mutation is append-only brush publishing, for
+  // which the component length changes. Therefore array identity + length is
+  // a complete invalidation key and avoids hashing hundreds of thousands of
+  // coordinates on the main thread after geometry confirmation.
+  if (cached && cached.length === component.length) return `${component.length}|${cached.token}`
+  const token = nextVoxelRenderSignatureToken++
+  const signature = `${component.length}|${token}`
+  const variants = cachedVariants ?? new Map<string, { length: number; token: number }>()
+  variants.set(colorKey, { length: component.length, token })
   if (!cachedVariants) voxelRenderSignatureCache.set(component, variants)
   return signature
 }
