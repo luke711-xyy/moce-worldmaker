@@ -661,6 +661,12 @@ type SceneEntityPartsCache = {
   customVoxelOwnerCache: WeakMap<object, string>
 }
 
+type AssemblyPathResolver = {
+  signature: string
+  paths: Map<string, string[]>
+  resolve: (memberKey: string) => string[]
+}
+
 // sceneEntityParts() is used by rendering, hit testing, selection and the
 // occupancy index. Keep the cache independent from the project root and the
 // instances array: a transform-only commit creates a new instances array, but
@@ -675,6 +681,13 @@ const sceneEntityPartsCache: SceneEntityPartsCache = {
   customGroups: new Map(),
   customVoxelOwnerCache: new WeakMap(),
 }
+
+// Transform-only scene updates replace the project root and instances array,
+// but the asset catalog and assembly tree remain referentially stable. Keep
+// their lookup structures outside sceneEntityParts() so a pointer release does
+// not rebuild the same maps once per render/selection consumer.
+const assetMapCache = new WeakMap<ReadonlyArray<VoxelAsset>, Map<string, VoxelAsset>>()
+const assemblyPathResolverCache = new WeakMap<ReadonlyArray<SceneAssembly>, AssemblyPathResolver>()
 
 // Geometry signatures are requested by every render/selection pass. Large
 // edited entities can carry thousands of overrides, so rebuilding the same
@@ -705,8 +718,37 @@ function instancePartOffsetsSignature(partOffsets: SceneInstance['partOffsets'])
   return signature
 }
 
-function sceneAssemblySignature(assemblies: SceneAssembly[]): string {
+function sceneAssemblySignature(assemblies: ReadonlyArray<SceneAssembly>): string {
   return assemblies.map((assembly) => `${assembly.id}:${assembly.memberKeys.join(',')}`).join('|')
+}
+
+function assemblyPathResolver(assemblies: ReadonlyArray<SceneAssembly>): AssemblyPathResolver {
+  const signature = sceneAssemblySignature(assemblies)
+  const cached = assemblyPathResolverCache.get(assemblies)
+  if (cached?.signature === signature) return cached
+
+  const paths = new Map<string, string[]>()
+  const memberKeyMatches = (storedKey: string, candidateKey: string) => storedKey === candidateKey
+    || (storedKey.startsWith('asset:') && (candidateKey.startsWith(`${storedKey}:`) || candidateKey.startsWith(`${storedKey}#`)))
+  const resolve = (memberKey: string): string[] => {
+    const existing = paths.get(memberKey)
+    if (existing) return existing
+    let bestPath: string[] = []
+    const visit = (key: string, path: string[], seen: Set<string>) => {
+      assemblies.forEach((assembly) => {
+        if (seen.has(assembly.id) || !assembly.memberKeys.some((storedKey) => memberKeyMatches(storedKey, key))) return
+        const nextPath = [...path, assembly.id]
+        if (nextPath.length > bestPath.length) bestPath = nextPath
+        visit(`assembly:${assembly.id}`, nextPath, new Set([...seen, assembly.id]))
+      })
+    }
+    visit(memberKey, [], new Set())
+    paths.set(memberKey, bestPath)
+    return bestPath
+  }
+  const next = { signature, paths, resolve }
+  assemblyPathResolverCache.set(assemblies, next)
+  return next
 }
 
 /**
@@ -783,23 +825,14 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
   const instances = project.instances
   const cache = sceneEntityPartsCache
 
-  const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
+  let assetMap = assetMapCache.get(project.assets)
+  if (!assetMap) {
+    assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
+    assetMapCache.set(project.assets, assetMap)
+  }
   const assemblies = project.assemblies ?? []
   const nextAssemblySignature = sceneAssemblySignature(assemblies)
-  const memberKeyMatches = (storedKey: string, candidateKey: string) => storedKey === candidateKey || (storedKey.startsWith('asset:') && (candidateKey.startsWith(`${storedKey}:`) || candidateKey.startsWith(`${storedKey}#`)))
-  const assemblyPathForMemberKey = (memberKey: string): string[] => {
-    let bestPath: string[] = []
-    const visit = (key: string, path: string[], seen: Set<string>) => {
-      assemblies.forEach((assembly) => {
-        if (seen.has(assembly.id) || !assembly.memberKeys.some((storedKey) => memberKeyMatches(storedKey, key))) return
-        const nextPath = [...path, assembly.id]
-        if (nextPath.length > bestPath.length) bestPath = nextPath
-        visit(`assembly:${assembly.id}`, nextPath, new Set([...seen, assembly.id]))
-      })
-    }
-    visit(memberKey, [], new Set())
-    return bestPath
-  }
+  const assemblyPathForMemberKey = assemblyPathResolver(assemblies).resolve
 
   if (cache.assetsRef !== project.assets) {
     cache.assetsRef = project.assets
