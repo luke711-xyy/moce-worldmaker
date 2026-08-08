@@ -900,11 +900,18 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
     // only knows the count changed. Reconstruct just those affected groups;
     // the common replacement case still touches one entity rather than the
     // entire scene's group map.
-    if (changedEntityIds.size && previousGroups.size) {
-      changedGroups.clear()
+    const needsRebuildFromFullPass = new Set<string>([...changedEntityIds].filter((entityId) => {
+      // A pure replacement supplies the complete new group as unknown voxel
+      // objects in changedGroups. Only scan the flat array again when an
+      // entity mixes reused and new objects, or when old voxels disappeared
+      // without any replacement objects to collect.
+      return previousGroups.size > 0 && ((reusedCounts.get(entityId) ?? 0) > 0 || !changedGroups.has(entityId))
+    }))
+    if (needsRebuildFromFullPass.size) {
+      needsRebuildFromFullPass.forEach((entityId) => changedGroups.delete(entityId))
       project.customVoxels.forEach((voxel) => {
         const entityId = voxelEntityId(voxel)
-        if (!changedEntityIds.has(entityId)) return
+        if (!needsRebuildFromFullPass.has(entityId)) return
         const group = changedGroups.get(entityId)
         if (group) group.push(voxel)
         else changedGroups.set(entityId, [voxel])
