@@ -1190,8 +1190,13 @@ function App() {
   // Keep selection identity stable across camera/zoom-only App renders. The
   // viewport uses this array as an effect dependency; rebuilding it inline in
   // JSX made every zoom ruler update rerun the scene-wide highlight pass.
-  const selectedEntityPartIds = useMemo(() => selectedEntityParts.map((part) => part.id), [selectedEntityParts])
-  const selectedEntityPartsKey = selectedEntityPartIds.join('|')
+  // sceneEntityParts() may refresh lightweight transform metadata after a
+  // move release even though the selected entity IDs did not change. Keep the
+  // ID array referentially stable in that case; the viewport's selection pass
+  // traverses the rendered scene, so rerunning it for an unchanged selection
+  // is especially visible with large models.
+  const selectedEntityPartsKey = selectedEntityParts.map((part) => part.id).join('|')
+  const selectedEntityPartIds = useMemo(() => selectedEntityPartsKey ? selectedEntityPartsKey.split('|') : [], [selectedEntityPartsKey])
   useEffect(() => {
     // A color preview belongs to the selection it was started on. Changing
     // selection must restore the source materials before showing the next
@@ -1267,11 +1272,19 @@ function App() {
     geometrySourceCacheRef.current = { selectionKey: geometrySourceKey, selectionEntityKey: selectedEntityPartsKey, voxels: next }
     return next
   }, [geometrySourceKey, project.assets, project.customVoxels, project.customColors, project.materials])
-  const currentGeometrySourceVoxels = () => selectedEntityParts.flatMap((part) => scenePartVoxels(part).map((voxel) => ({
-    ...voxel,
-    materialId: scenePartVoxelDisplayColor(projectRef.current, part, voxel),
-    sourcePartId: part.id,
-  })))
+  const currentGeometrySourceVoxels = () => {
+    const singleCustomSource = selectedEntityParts.length === 1 && selectedEntityParts[0]?.kind === 'custom'
+    return selectedEntityParts.flatMap((part) => scenePartVoxels(part).map((voxel) => ({
+      ...voxel,
+      materialId: scenePartVoxelDisplayColor(projectRef.current, part, voxel),
+      // A single custom entity already carries its stable entityId on every
+      // voxel. Do not add a temporary sourcePartId in this hot path: scale
+      // operations can then hand their Worker result to commit without a
+      // second full per-voxel cleanup loop. Multi-part operations still need
+      // sourcePartId for ownership reconstruction.
+      ...(singleCustomSource ? {} : { sourcePartId: part.id }),
+    })))
+  }
   const [geometryShellThicknessOptions, setGeometryShellThicknessOptions] = useState<number[]>([])
   const geometryShellOptionsRevisionRef = useRef(0)
   useEffect(() => {
@@ -1561,9 +1574,15 @@ function App() {
     // state while the browser gets a chance to paint between batches.
     const occupancy = sceneOccupancyRef.current
     if (!occupancy) return
-    for (const partId of removedPartIds) await occupancy.removeOwnerChunked(partId)
+    // Geometry confirmation has already checked collision/bounds. Larger
+    // batches reduce the number of event-loop turns for a large scale-up while
+    // still yielding often enough for the browser to paint and remain
+    // interruptible. Small edits keep the conservative default batch size.
+    const resultVoxelCount = resultGroups.reduce((total, group) => total + group.voxels.length, 0)
+    const occupancyBatchSize = resultVoxelCount >= 100_000 ? 16_384 : 4_096
+    for (const partId of removedPartIds) await occupancy.removeOwnerChunked(partId, occupancyBatchSize)
     for (const { entityId, voxels } of resultGroups) {
-      await occupancy.insertOwnerFromValidatedBatchChunked(`custom:${entityId}`, voxels)
+      await occupancy.insertOwnerFromValidatedBatchChunked(`custom:${entityId}`, voxels, voxels, { x: 0, y: 0, z: 0 }, occupancyBatchSize)
     }
   }
 
@@ -4020,8 +4039,16 @@ function App() {
       // The common large-model case has one custom entity. Do not build a
       // per-source grouping map and then flatten it again: the worker result
       // is already one contiguous batch, so a single pass is sufficient.
-      const voxels = new Array<Voxel>(geometryPreview.result.voxels.length)
-      for (let index = 0; index < geometryPreview.result.voxels.length; index += 1) {
+      // computeScale preserves entityId/source ownership for a single custom
+      // entity. The Worker result is already validated before this handler,
+      // so do not scan every generated voxel again just to prove the invariant
+      // we established at request time. That extra O(n) pass was noticeable
+      // when confirming a large scale-up operation.
+      const canReuseScaleResult = geometryPreview.operation === 'scale'
+      const voxels = canReuseScaleResult
+        ? geometryPreview.result.voxels as Voxel[]
+        : new Array<Voxel>(geometryPreview.result.voxels.length)
+      if (!canReuseScaleResult) for (let index = 0; index < geometryPreview.result.voxels.length; index += 1) {
         // The Worker result is detached from the preview as soon as this
         // transaction is committed. Reuse each object in place instead of
         // allocating a second object for every generated cell.
