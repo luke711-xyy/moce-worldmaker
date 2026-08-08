@@ -836,7 +836,16 @@ type ProjectHistoryEntry = {
 const HISTORY_PARTS_VOXEL_LIMIT = 50_000
 const HISTORY_MAX_ENTRIES = 50
 
+// A drag changes the project root, but usually reuses the same assets and
+// instances arrays. Cache the history budget by those immutable collection
+// identities so pointer-up does not rebuild an asset map and rescan every
+// instance on every move release.
+const historyLimitCache = new WeakMap<ReadonlyArray<VoxelAsset>, WeakMap<ReadonlyArray<SceneInstance>, number>>()
+
 function historyLimitForProject(project: ProjectState): number {
+  const byInstances = historyLimitCache.get(project.assets)
+  const cached = byInstances?.get(project.instances)
+  if (cached !== undefined) return cached
   // Template-library assets are not part of the scene snapshot's render
   // payload. Count only assets actually instantiated in the scene, otherwise
   // a large catalogue would unnecessarily reduce undo depth for a small
@@ -844,10 +853,17 @@ function historyLimitForProject(project: ProjectState): number {
   const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
   const assetVoxelCount = project.instances.reduce((total, instance) => total + (assetMap.get(instance.assetId)?.voxels.length ?? 0), 0)
   const voxelCount = project.customVoxels.length + assetVoxelCount
-  if (voxelCount >= 500_000) return 6
-  if (voxelCount >= 100_000) return 12
-  if (voxelCount >= 25_000) return 24
-  return HISTORY_MAX_ENTRIES
+  const limit = voxelCount >= 500_000
+    ? 6
+    : voxelCount >= 100_000
+      ? 12
+      : voxelCount >= 25_000
+        ? 24
+        : HISTORY_MAX_ENTRIES
+  const nextByInstances = byInstances ?? new WeakMap<ReadonlyArray<SceneInstance>, number>()
+  nextByInstances.set(project.instances, limit)
+  if (!byInstances) historyLimitCache.set(project.assets, nextByInstances)
+  return limit
 }
 
 function pushBoundedHistoryEntry(stack: ProjectHistoryEntry[], entry: ProjectHistoryEntry): void {
@@ -2687,20 +2703,30 @@ function App() {
     }
     const movableParts = parts.filter((part) => !scenePartIsLocked(projectRef.current, part))
     const currentParts = sceneParts
-    const movingIds = new Set(movableParts.map((part) => part.id))
     const movingCustomIds = new Set(movableParts.filter((part) => part.kind === 'custom').map((part) => part.partId))
+    const movingAssetParts = movableParts.filter((part) => part.kind === 'asset' && part.instanceId)
+    const hasMovingAssets = movingAssetParts.length > 0
+    const movingIds = hasMovingAssets ? new Set(movableParts.map((part) => part.id)) : undefined
     const assetPartsByInstance = new Map<string, SceneEntityPart[]>()
-    movableParts.filter((part) => part.kind === 'asset' && part.instanceId).forEach((part) => {
-      const list = assetPartsByInstance.get(part.instanceId!) ?? []
-      list.push(part)
-      assetPartsByInstance.set(part.instanceId!, list)
-    })
-    const currentPartsByInstance = new Map<string, SceneEntityPart[]>()
-    currentParts.filter((part) => part.kind === 'asset' && part.instanceId).forEach((part) => {
-      const list = currentPartsByInstance.get(part.instanceId!) ?? []
-      list.push(part)
-      currentPartsByInstance.set(part.instanceId!, list)
-    })
+    if (hasMovingAssets) {
+      movingAssetParts.forEach((part) => {
+        const list = assetPartsByInstance.get(part.instanceId!) ?? []
+        list.push(part)
+        assetPartsByInstance.set(part.instanceId!, list)
+      })
+    }
+    // Pure custom-entity moves do not need asset membership analysis. This
+    // avoids scanning every rendered part at release time, which is wasted
+    // work for scenes containing large imported assets elsewhere.
+    const currentPartsByInstance = hasMovingAssets
+      ? currentParts.reduce((groups, part) => {
+        if (part.kind !== 'asset' || !part.instanceId) return groups
+        const list = groups.get(part.instanceId) ?? []
+        list.push(part)
+        groups.set(part.instanceId, list)
+        return groups
+      }, new Map<string, SceneEntityPart[]>())
+      : new Map<string, SceneEntityPart[]>()
     // A move changes transforms, not the asset/material catalogs. Keep those
     // large immutable collections shared instead of cloning every voxel in
     // the project on pointer release.
@@ -2714,7 +2740,7 @@ function App() {
     // instance. Avoid copying the complete instances array for that common
     // path; doing so needlessly invalidated file-tree and derived panel work
     // on every large custom-entity release.
-    if (movableParts.some((part) => part.kind === 'asset' && part.instanceId)) {
+    if (hasMovingAssets) {
       nextProject.instances = [...projectRef.current.instances]
     }
     const mutableInstances = new Map<string, SceneInstance>()
@@ -2749,7 +2775,7 @@ function App() {
       const instance = mutableInstance(instanceId)
       if (!instance) return
       const allParts = currentPartsByInstance.get(instanceId) ?? []
-      const movesWholeInstance = allParts.length > 0 && selectedParts.length === allParts.length && allParts.every((part) => movingIds.has(part.id))
+      const movesWholeInstance = allParts.length > 0 && selectedParts.length === allParts.length && allParts.every((part) => movingIds?.has(part.id))
       if (movesWholeInstance) {
         const asset = nextProject.assets.find((item) => item.id === instance.assetId)
         instance.x = snapAssetOrigin(instance.x + voxelToWorld(result.deltaX), asset?.width ?? 1)
