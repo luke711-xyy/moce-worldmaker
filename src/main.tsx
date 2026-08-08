@@ -1027,6 +1027,7 @@ function App() {
   const [geometryPreview, setGeometryPreview] = useState<GeometryPreviewState | null>(null)
   const [geometryApplying, setGeometryApplying] = useState(false)
   const geometryApplyingRef = useRef(false)
+  const geometryApplyRevisionRef = useRef(0)
   const geometryWorkerRef = useRef<VoxelToolsWorkerClient | null>(null)
   const geometryRequestRevisionRef = useRef(0)
   const colorPreviewPendingRef = useRef<ColorPreviewState | null>(null)
@@ -1536,6 +1537,7 @@ function App() {
   }
 
   const commitProject = (next: ProjectState, trackHistory = true) => {
+    if (geometryApplyingRef.current) return
     // updateProject()/replaceProject() already provide an isolated next
     // project. The default storage normalizer would deep-clone it again from
     // normalizeProjectNaming(), which is especially costly for large voxel
@@ -1562,6 +1564,7 @@ function App() {
   }
 
   const commitScenePartsMoveFast = (nextProject: ProjectState, movableParts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => {
+    if (geometryApplyingRef.current) return
     pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(projectRef.current))
     historyRef.current.future = []
     movableParts.forEach((part) => {
@@ -1588,6 +1591,7 @@ function App() {
   }
 
   const commitGeometryProject = async (next: ProjectState, removedPartIds: string[], resultGroups: Array<{ entityId: string; voxels: Voxel[] }>) => {
+    const applyRevision = geometryApplyRevisionRef.current
     // Geometry confirmation is already a validated, integer-grid batch. Do
     // not send it through updateProject(): that path deep-clones the whole
     // project and normalizeStoredProject() then walks every asset and voxel.
@@ -1617,13 +1621,18 @@ function App() {
     // interruptible. Small edits keep the conservative default batch size.
     const resultVoxelCount = resultGroups.reduce((total, group) => total + group.voxels.length, 0)
     const occupancyBatchSize = resultVoxelCount >= 100_000 ? 16_384 : 4_096
-    for (const partId of removedPartIds) await occupancy.removeOwnerChunked(partId, occupancyBatchSize)
+    for (const partId of removedPartIds) {
+      if (geometryApplyRevisionRef.current !== applyRevision) return
+      await occupancy.removeOwnerChunked(partId, occupancyBatchSize)
+    }
     for (const { entityId, voxels } of resultGroups) {
+      if (geometryApplyRevisionRef.current !== applyRevision) return
       await occupancy.insertOwnerFromValidatedBatchChunked(`custom:${entityId}`, voxels, voxels, { x: 0, y: 0, z: 0 }, occupancyBatchSize)
     }
   }
 
   const updateProject = (updater: (draft: ProjectState) => void, trackHistory = true) => {
+    if (geometryApplyingRef.current) return
     const transaction = voxelStrokeTransactionRef.current
     if (transaction) {
       updater(transaction.draft)
@@ -1638,6 +1647,7 @@ function App() {
   }
 
   const replaceProject = (next: ProjectState, trackHistory = true) => {
+    if (geometryApplyingRef.current) return
     commitProject(structuredClone(next), trackHistory)
   }
 
@@ -1654,6 +1664,10 @@ function App() {
   }
 
   const requestSceneReplace = (operation: () => Promise<void>) => {
+    if (geometryApplyingRef.current) {
+      setNotice('正在完成几何处理，请稍候再切换场景')
+      return
+    }
     // Recompute only at the correctness boundary for New/Open/Library
     // actions. Normal editing uses the O(1) dirty hint above and stays off
     // the synchronous signature path.
@@ -1947,6 +1961,7 @@ function App() {
   }, [])
 
   const undoProject = () => {
+    if (geometryApplyingRef.current) return
     const previous = historyRef.current.past.pop()
     if (!previous) {
       setNotice('没有可撤销的操作')
@@ -1968,6 +1983,7 @@ function App() {
   }
 
   const redoProject = () => {
+    if (geometryApplyingRef.current) return
     const next = historyRef.current.future.pop()
     if (!next) {
       setNotice('没有可重做的操作')
@@ -3819,6 +3835,7 @@ function App() {
   }
 
   const startDuplicatePreview = (requestedCount: number) => {
+    if (geometryApplyingRef.current) return
     const sourceProject = projectRef.current
     if (!selectedEntityParts.length) {
       setNotice('请先选择要复制的实体')
@@ -4185,6 +4202,8 @@ function App() {
       selectedResultEntityIds.forEach((entityId) => { renderModes[entityId] = 'cells' })
       namedNextProject.customVoxelRenderModes = renderModes
     }
+    const applyRevision = geometryApplyRevisionRef.current + 1
+    geometryApplyRevisionRef.current = applyRevision
     geometryApplyingRef.current = true
     setGeometryApplying(true)
     const completionNotice = `已应用${geometryPreview.operation === 'shell' ? '外壳' : geometryPreview.scaleMode === 'up' ? '放大' : '缩小'}处理 · ${transformed.length} 个体素 · ${groupEntries.length} 个零件`
@@ -4195,10 +4214,12 @@ function App() {
     setEditEntityId(null)
     setGeometryPreview(null)
     void applyTask.then(() => {
+      if (geometryApplyRevisionRef.current !== applyRevision) return
       geometryApplyingRef.current = false
       setGeometryApplying(false)
       setNotice(completionNotice)
     }).catch((error) => {
+      if (geometryApplyRevisionRef.current !== applyRevision) return
       geometryApplyingRef.current = false
       setGeometryApplying(false)
       setNotice(error instanceof Error ? `几何处理应用失败：${error.message}` : '几何处理应用失败')
@@ -4392,6 +4413,7 @@ function App() {
   }
 
   const commitSelectedHsl = (hueDelta: number, saturationTarget: number) => {
+    if (geometryApplyingRef.current) return
     cancelColorPreview()
     if (!selectedEntityParts.length) return
     const sourceProject = projectRef.current
@@ -4516,6 +4538,7 @@ function App() {
   }
 
   const commitSceneDiscreteTransform = (parts: SceneEntityPart[], mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90) => {
+    if (geometryApplyingRef.current) return false
     const sourceProject = projectRef.current
     const selectedCustomIds = new Set(parts.filter((part) => part.kind === 'custom').map((part) => part.partId))
     const selectedInstanceIds = new Set(parts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
@@ -6480,7 +6503,11 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     scenePartsRef.current = sceneParts
   }, [sceneParts])
   useEffect(() => {
-    if (controlsRef.current) controlsRef.current.enabled = !geometryApplying
+    // Geometry confirmation rebuilds the occupancy index in the background.
+    // Keep camera browsing available while the scene-editing handlers remain
+    // locked; users should not have to wait for a large model's index to finish
+    // just to rotate, pan, or zoom the viewport.
+    if (controlsRef.current) controlsRef.current.enabled = true
   }, [geometryApplying])
   useEffect(() => {
     if (drawingMoveFrameRef.current !== null) cancelAnimationFrame(drawingMoveFrameRef.current)
@@ -8374,17 +8401,19 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   }
 
   const handleEditPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (geometryApplying) return
     if (isPreviewTouch(event)) {
       beginPreviewTouch(event)
       return
     }
+    // A right-button gesture is camera panning and does not query occupancy;
+    // left-button scene edits stay locked until the background index is ready.
+    if (geometryApplying && event.button === 0) return
     if (event.button === 0 || event.button === 2) setSceneContextMenu(null)
     if (event.button === 0 || event.button === 2) event.currentTarget.setPointerCapture(event.pointerId)
     if (event.button === 2) {
       if (placementAsset) return
       if (tool === 'select') onCancelPendingEntityOperation()
-      const context = getPointerContext(event)
+      const context = geometryApplying ? null : getPointerContext(event)
       const hitPartId = context?.voxelHit?.ownerIds[0]
       const hitPart = hitPartId ? sceneParts.find((part) => part.id === hitPartId) : undefined
       const explicitMultiSelection = selectedPartIds.length > 1 && (checkedPartIds.length > 1 || (checkedPartIds.length === 1 && !checkedPartIds[0].startsWith('assembly:')))
@@ -8802,6 +8831,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   }, [flushPendingEditMove, onNotice, onSelectMultiple])
 
   const handlePlacementDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    if (geometryApplying) return
     const assetId = placementAsset?.id ?? event.dataTransfer.getData('application/x-moce-asset')
     if (!assetId) return
     event.preventDefault()
@@ -8811,6 +8841,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   }
 
   const handlePlacementDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    if (geometryApplying) return
     const assetId = placementAsset?.id ?? event.dataTransfer.getData('application/x-moce-asset')
     if (!assetId) return
     event.preventDefault()
