@@ -4652,7 +4652,10 @@ function App() {
         simulated.rotationPivot = instanceRotationPivot(simulated, asset)
       }
       else {
-        const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationY' : 'rotationZ'
+        // Project coordinates are X/Y ground and Z height, while Three.js
+        // receives them as X/Z/Y. Therefore project-Z rotation is Three-Y
+        // rotation, project-Y rotation is Three-Z rotation.
+        const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationZ' : 'rotationY'
         simulated[key] = ((simulated[key] ?? 0) + degrees) % 360
       }
       if (!withinBoundary(resolveInstanceSceneVoxels(simulated, asset))) return false
@@ -4694,7 +4697,7 @@ function App() {
           const mirrored = { ...instance, mirror }
           return asset ? { ...mirrored, rotationPivot: instanceRotationPivot(mirrored, asset) } : mirrored
         }
-        const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationY' : 'rotationZ'
+        const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationZ' : 'rotationY'
         const asset = assetMap.get(instance.assetId)
         return {
           ...instance,
@@ -6386,6 +6389,11 @@ function createInstancedVoxelOutlineGeometry(mesh: THREE.InstancedMesh): THREE.B
   const occupied = partGroup?.userData.instanceVoxelOccupancy as Set<string> | undefined
   const dimensions = partGroup?.userData.instanceVoxelDimensions as { width: number; depth: number; height: number } | undefined
   const mirror = partGroup?.userData.instanceVoxelMirror as { x?: boolean; y?: boolean; z?: boolean } | undefined
+  // The rendered instanced matrices are expressed around the same local
+  // rotation pivot as buildAssetGroup(). Keep the outline in that exact
+  // coordinate frame; omitting this offset leaves the white frame at the
+  // unrotated origin while the model rotates around its persisted center.
+  const pivot = partGroup?.userData.instanceVoxelPivot as { x?: number; y?: number; z?: number } | undefined
   if (!occupied || !dimensions) return createInstancedVoxelOutlineGeometryFallback(mesh)
 
   const scale = VOXEL_WORLD_SIZE
@@ -6403,9 +6411,9 @@ function createInstancedVoxelOutlineGeometry(mesh: THREE.InstancedMesh): THREE.B
     const localX = mirror?.x ? dimensions.width - 1 - voxel.x : voxel.x
     const localY = mirror?.z ? dimensions.height - 1 - voxel.y : voxel.y
     const localZ = mirror?.y ? dimensions.depth - 1 - voxel.z : voxel.z
-    const cx = (localX + 0.5 - dimensions.width / 2) * scale
-    const cy = (localZ + 0.5 - dimensions.depth / 2) * scale
-    const cz = (localY + 0.5) * scale
+    const cx = (localX + 0.5 - dimensions.width / 2) * scale - (pivot?.x ?? 0)
+    const cy = (localZ + 0.5 - dimensions.depth / 2) * scale - (pivot?.y ?? 0)
+    const cz = (localY + 0.5) * scale - (pivot?.z ?? 0)
     const corners: Array<[number, number, number]> = [
       [cx - half, cy - half, cz - half], [cx + half, cy - half, cz - half],
       [cx + half, cy + half, cz - half], [cx - half, cy + half, cz - half],
@@ -7622,7 +7630,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       instanceGroup.userData.renderSignature = renderSignature
       instanceGroup.userData.geometrySignature = geometrySignature
       instanceGroup.userData.assetRef = asset
-      syncAssetAdditionsOverlay(instanceGroup, renderAsset, materialMap, incrementalAdds ?? [], instance.partOffsets, instance.colorOverride, instance.mirror, instance.rotationPivot)
+      syncAssetAdditionsOverlay(instanceGroup, renderAsset, materialMap, incrementalAdds ?? [], instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ, instance.rotationPivot)
       syncAssetPartOffsets(instanceGroup, instance.partOffsets, instance.mirror)
       instanceGroup.traverse((object) => {
         object.userData.instanceId = instance.id
@@ -7732,7 +7740,13 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       if (!instance.visible) return
       const instanceGroup = existingAssetGroups.get(instance.id)
       if (!instanceGroup) return
-      instanceGroup.position.copy(toSceneWorld(instance.x, instance.y ?? 0, instance.z))
+      // Keep the lightweight transform pass on the same pivot convention as
+      // the geometry pass above. Omitting the persisted rotation pivot here
+      // moves the rendered model by half of its height/ground extent after a
+      // rotation, while the cached selection outline still uses the pivoted
+      // coordinates and appears to remain in the old position.
+      const pivot = instance.rotationPivot ?? { x: 0, y: 0, z: 0 }
+      instanceGroup.position.copy(toSceneWorld(instance.x + pivot.x, (instance.y ?? 0) + pivot.y, instance.z + pivot.z))
       syncAssetPartOffsets(instanceGroup, instance.partOffsets, instance.mirror)
     })
 
@@ -9382,6 +9396,8 @@ function customComponentRenderOrigin(component: ReadonlyArray<Pick<Voxel, 'x' | 
 const CUSTOM_INSTANCE_RENDER_LIMIT = 16_384
 const assetBaseComponentsCache = new WeakMap<VoxelAsset, Array<{ partId: string; voxels: Voxel[] }>>()
 const assetGreedyCacheTokens = new WeakMap<VoxelAsset, number>()
+const assetOverrideSignatureCache = new WeakMap<ReadonlyArray<VoxelOverride>, number>()
+let nextAssetOverrideSignatureToken = 1
 
 function addOnlyAssetOverrides(overrides: VoxelOverride[] | undefined): VoxelOverride[] | null {
   if (!overrides?.length || overrides.some((override) => (override.mode ?? 'add') !== 'add')) return null
@@ -9389,9 +9405,14 @@ function addOnlyAssetOverrides(overrides: VoxelOverride[] | undefined): VoxelOve
 }
 
 function assetOverrideSignature(overrides: VoxelOverride[]): string {
-  return overrides
-    .map((voxel) => `${voxel.x},${voxel.y},${voxel.z},${voxel.materialId},${voxel.paintMaterialId ?? ''}`)
-    .join(';')
+  const cached = assetOverrideSignatureCache.get(overrides)
+  if (cached !== undefined) return `@${cached}`
+  // Brush edits replace the override array when its contents change. Use its
+  // identity as the overlay invalidation key instead of serializing the full
+  // imported-model delta on every animation frame.
+  const token = nextAssetOverrideSignatureToken++
+  assetOverrideSignatureCache.set(overrides, token)
+  return `@${token}`
 }
 let nextAssetGreedyCacheToken = 1
 
@@ -9722,6 +9743,7 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
     const offset = partOffsets?.[partId] ?? { x: 0, y: 0, z: 0 }
     partGroup.position.set(mirror?.x ? -offset.x : offset.x, mirror?.y ? -offset.z : offset.z, mirror?.z ? -offset.y : offset.y)
     partGroup.userData.instancePartId = partId
+    partGroup.userData.instanceVoxelPivot = pivotWorld
     const preserveVoxelCells = component.some((voxel) => voxel.preserveVoxelCells)
     if (allowGreedyMesh && component.length > CUSTOM_INSTANCE_RENDER_LIMIT && !preserveVoxelCells) {
       const greedyColorIds = new Map<string, number>()
@@ -9805,8 +9827,12 @@ function syncAssetAdditionsOverlay(
   materialMap: Map<string, THREE.MeshStandardMaterial>,
   additions: VoxelOverride[],
   partOffsets: SceneInstance['partOffsets'],
+  rotation: number,
   colorOverride: string | undefined,
   mirror: SceneInstance['mirror'],
+  rotationX: number | undefined,
+  rotationY: number | undefined,
+  rotationZ: number | undefined,
   rotationPivot: SceneInstance['rotationPivot'],
 ): void {
   const existing = instanceGroup.children.find((child) => child.name === 'asset-edit-additions')
@@ -9838,7 +9864,7 @@ function syncAssetAdditionsOverlay(
     assembly: undefined,
     voxels: additions.map((voxel) => ({ ...voxel, mode: undefined })),
   }
-  const overlay = buildAssetGroup(overlayAsset, materialMap, [], partOffsets, 0, colorOverride, mirror, 0, 0, 0, false, undefined, rotationPivot)
+  const overlay = buildAssetGroup(overlayAsset, materialMap, [], partOffsets, rotation, colorOverride, mirror, rotationX, rotationY, rotationZ, false, undefined, rotationPivot)
   overlay.name = 'asset-edit-additions'
   overlay.userData.assetEditOverlay = true
   overlay.userData.assetAdditionsSignature = signature

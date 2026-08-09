@@ -84,6 +84,17 @@ export class AssetTransformCache {
    * reverse index; subsequent batch paint/erase targets are constant-time.
    */
   localVoxelAtSceneVoxel(instance: SceneInstance, asset: VoxelAsset, sceneVoxel: Pick<Voxel, 'x' | 'y' | 'z'>): Voxel | undefined {
+    // Imported mesh assets are edited by addressing a scene cell and then
+    // writing an override. The inverse transform is enough for that lookup;
+    // resolving the complete imported model first made every brush frame
+    // rebuild and index hundreds of thousands of voxels. Occupancy has
+    // already established that the target belongs to this instance, so do
+    // not pay the full-asset lookup cost here.
+    if (asset.kind === 'imported' && !asset.assembly) {
+      const componentId = asset.parts[0] ?? '导入模型'
+      const local = this.localCoordinateAtSceneVoxel(instance, asset, sceneVoxel, componentId)
+      return local ? { ...local, materialId: 'primary' } : undefined
+    }
     const cached = this.get(instance, asset)
     if (!cached.localVoxelBySceneKey) {
       const canonicalInstance = {
@@ -111,6 +122,10 @@ export class AssetTransformCache {
     sceneVoxel: Pick<Voxel, 'x' | 'y' | 'z'>,
     componentId: string,
   ): Pick<Voxel, 'x' | 'y' | 'z'> | undefined {
+    // This method intentionally does not call get(). It is used for both
+    // empty-cell drawing and existing-cell editing, and neither operation
+    // needs the effective voxel array. Keeping it transform-only means an
+    // add-only brush stroke never invalidates a full imported-model cache.
     const offset = instance.partOffsets?.[componentId] ?? { x: 0, y: 0, z: 0 }
     const mirror = instance.mirror ?? { x: false, y: false, z: false }
     const rotationX = (instance.rotationX ?? 0) * Math.PI / 180
@@ -137,26 +152,37 @@ export class AssetTransformCache {
       y: afterY.y + pivot.z,
       z: afterY.z + pivot.y,
     }
-    const localXIndex = Math.round((local.x - (mirror.x ? -offset.x : offset.x)) / VOXEL_WORLD_SIZE - 0.5 + asset.width / 2)
-    const localZIndex = Math.round((local.y - (mirror.y ? -offset.z : offset.z)) / VOXEL_WORLD_SIZE - 0.5 + asset.depth / 2)
-    const localYIndex = Math.round((local.z - (mirror.z ? -offset.y : offset.y)) / VOXEL_WORLD_SIZE - 0.5)
+    const rawXIndex = (local.x - (mirror.x ? -offset.x : offset.x)) / VOXEL_WORLD_SIZE - 0.5 + asset.width / 2
+    const rawZIndex = (local.y - (mirror.y ? -offset.z : offset.z)) / VOXEL_WORLD_SIZE - 0.5 + asset.depth / 2
+    const rawYIndex = (local.z - (mirror.z ? -offset.y : offset.y)) / VOXEL_WORLD_SIZE - 0.5
+    const localXIndex = Math.round(rawXIndex)
+    const localZIndex = Math.round(rawZIndex)
+    const localYIndex = Math.round(rawYIndex)
     if (localXIndex < 0 || localXIndex >= asset.width || localZIndex < 0 || localZIndex >= asset.depth || localYIndex < 0 || localYIndex >= asset.height) return undefined
     const estimated = {
       x: mirror.x ? asset.width - 1 - localXIndex : localXIndex,
       y: mirror.z ? asset.height - 1 - localYIndex : localYIndex,
       z: mirror.y ? asset.depth - 1 - localZIndex : localZIndex,
     }
-    // Rotation around an off-grid geometry center can land exactly on a cell
-    // boundary before the scene-space quantization step. Try the nearby
-    // integer cells through the same forward resolver and prefer an exact
-    // round-trip, so empty-cell drawing does not jump to the adjacent layer.
+    // Most pointer samples are safely inside one voxel cell. Only a point
+    // close to a cell boundary can be ambiguous after a rotated/off-grid
+    // transform; skip all forward-projection calls for the common case.
+    const nearBoundary = [rawXIndex, rawYIndex, rawZIndex].some((value) => {
+      const fractional = Math.abs(value - Math.floor(value))
+      return Math.abs(fractional - 0.5) < 1e-4
+    })
+    if (!nearBoundary) return estimated
+    // Boundary cases retain the exact round-trip fallback. This preserves
+    // the previous tie-breaking behavior while keeping normal brush samples
+    // out of the 27-neighbour scan.
     for (let dx = -1; dx <= 1; dx += 1) {
       for (let dy = -1; dy <= 1; dy += 1) {
         for (let dz = -1; dz <= 1; dz += 1) {
+          if (dx === 0 && dy === 0 && dz === 0) continue
           const candidate = { x: estimated.x + dx, y: estimated.y + dy, z: estimated.z + dz }
           if (candidate.x < 0 || candidate.x >= asset.width || candidate.y < 0 || candidate.y >= asset.height || candidate.z < 0 || candidate.z >= asset.depth) continue
-          const projected = instanceLocalVoxelToSceneVoxelFast(instance, asset, { ...candidate, materialId: 'primary' }, componentId)
-          if (projected.x === sceneVoxel.x && projected.y === sceneVoxel.y && projected.z === sceneVoxel.z) return candidate
+          const candidateProjected = instanceLocalVoxelToSceneVoxelFast(instance, asset, { ...candidate, materialId: 'primary' }, componentId)
+          if (candidateProjected.x === sceneVoxel.x && candidateProjected.y === sceneVoxel.y && candidateProjected.z === sceneVoxel.z) return candidate
         }
       }
     }

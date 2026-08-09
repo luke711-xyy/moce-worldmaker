@@ -478,6 +478,12 @@ export function voxelComponentId(component: Voxel[]): string {
   return voxelKey(first)
 }
 
+function isOrdinaryImportedModel(asset: VoxelAsset): boolean {
+  return asset.kind === 'imported'
+    && !asset.assembly
+    && (/\.(?:glb|gltf|obj|stl)$/i.test(asset.source ?? '') || !asset.partVoxels)
+}
+
 export function resolveInstanceVoxels(asset: VoxelAsset, overrides: VoxelOverride[] = []): Voxel[] {
   const resolved = new Map<string, Voxel>(asset.voxels.map((voxel) => [voxelKey(voxel), { ...voxel }]))
   for (const override of overrides) {
@@ -500,8 +506,7 @@ export function resolveInstanceComponents(asset: VoxelAsset, overrides: VoxelOve
   // contains several disconnected meshes or voxel islands. Explicitly saved
   // assembly templates keep their authored parts; ordinary model imports do
   // not expose source-mesh parts in the scene tree.
-  const isImportedModel = asset.kind === 'imported' && /\.(?:glb|gltf|obj|stl)$/i.test(asset.source ?? '') && !asset.assembly
-  if (isImportedModel || (asset.kind === 'imported' && !asset.partVoxels && !asset.assembly)) {
+  if (isOrdinaryImportedModel(asset)) {
     return [{ partId: asset.parts[0] ?? '导入模型', voxels: resolved }]
   }
   if (!asset.partVoxels || !Object.keys(asset.partVoxels).length) return voxelComponents(resolved).map((voxels) => ({ partId: voxelComponentId(voxels), voxels }))
@@ -688,6 +693,12 @@ type CachedAssetSceneParts = {
   asset: VoxelAsset
   signature: string
   parts: SceneEntityPart[]
+  /** Geometry signature without overrides, used by incremental model edits. */
+  baseSignature?: string
+  /** Number of immutable base cells in each effective part array. */
+  baseVoxelLengths?: number[]
+  /** Previous append-only override array, retained for tail detection. */
+  addOnlyOverrides?: VoxelOverride[]
 }
 
 type SceneEntityPartsCache = {
@@ -728,22 +739,35 @@ const sceneEntityPartsCache: SceneEntityPartsCache = {
 // not rebuild the same maps once per render/selection consumer.
 const assetMapCache = new WeakMap<ReadonlyArray<VoxelAsset>, Map<string, VoxelAsset>>()
 const assemblyPathResolverCache = new WeakMap<ReadonlyArray<SceneAssembly>, AssemblyPathResolver>()
+const assetVoxelKeyCache = new WeakMap<VoxelAsset, Set<string>>()
+
+function assetVoxelKeys(asset: VoxelAsset): Set<string> {
+  const cached = assetVoxelKeyCache.get(asset)
+  if (cached) return cached
+  const next = new Set(asset.voxels.map(voxelKey))
+  assetVoxelKeyCache.set(asset, next)
+  return next
+}
 
 // Geometry signatures are requested by every render/selection pass. Large
-// edited entities can carry thousands of overrides, so rebuilding the same
-// delimiter string on every transform-only update becomes an avoidable O(n)
-// pause. Project updates replace the overrides array when its contents change;
-// unchanged instances keep the same array reference and can reuse this value.
-const instanceOverridesSignatureCache = new WeakMap<ReadonlyArray<VoxelOverride>, string>()
+// edited entities can carry thousands of overrides, so serializing the same
+// array on every transform-only update becomes an avoidable O(n) pause.
+// Project updates replace the overrides array when its contents change;
+// unchanged instances keep the same array reference and can reuse its token.
+const instanceOverridesSignatureCache = new WeakMap<ReadonlyArray<VoxelOverride>, number>()
 const instancePartOffsetsSignatureCache = new WeakMap<NonNullable<SceneInstance['partOffsets']>, string>()
+let nextInstanceOverridesSignatureToken = 1
 
 function instanceOverridesSignature(overrides: ReadonlyArray<VoxelOverride> | undefined): string {
   if (!overrides?.length) return ''
   const cached = instanceOverridesSignatureCache.get(overrides)
-  if (cached !== undefined) return cached
-  const signature = overrides.map((voxel) => `${voxel.x},${voxel.y},${voxel.z},${voxel.materialId},${voxel.paintMaterialId ?? ''},${voxel.mode ?? 'add'}`).join(';')
-  instanceOverridesSignatureCache.set(overrides, signature)
-  return signature
+  if (cached !== undefined) return `@${cached}`
+  // The override array is replaced whenever its contents change. A stable
+  // identity token is therefore a complete invalidation key and avoids
+  // serializing thousands of imported-model edits on every render pass.
+  const token = nextInstanceOverridesSignatureToken++
+  instanceOverridesSignatureCache.set(overrides, token)
+  return `@${token}`
 }
 
 function instancePartOffsetsSignature(partOffsets: SceneInstance['partOffsets']): string {
@@ -909,11 +933,66 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
     const signature = sceneInstanceGeometrySignature(instance)
     const cached = cache.assetParts.get(instance.id)
     const sceneOffset = sceneInstanceVoxelOffset(instance, asset)
-    if (!cached || cached.asset !== asset || cached.signature !== signature) {
+    const overrides = instance.overrides ?? []
+    const baseSignature = sceneInstanceGeometrySignature({ ...instance, overrides: [] })
+    const isAddOnlyImported = isOrdinaryImportedModel(asset)
+      && overrides.length > 0
+      && overrides.every((override) => (override.mode ?? 'add') === 'add')
+    const addOnlyFastPath = isAddOnlyImported && !overrides.some((override) => assetVoxelKeys(asset).has(voxelKey(override)))
+    const refreshAssetPartMetadata = (entry: CachedAssetSceneParts) => {
+      entry.parts = entry.parts.map((part) => {
+        const partSceneOffset = sceneInstancePartVoxelOffset(instance, asset, part.partId)
+        return sameSceneOffset(part.sceneOffset, sceneOffset)
+          && sameSceneOffset(part.partSceneOffset, partSceneOffset)
+          && part.colorOverride === instance.colorOverride
+          ? part
+          : { ...part, sceneOffset, partSceneOffset, colorOverride: instance.colorOverride }
+      })
+    }
+
+    // Imported models are represented by one editable component. During an
+    // add-only brush stroke the base mesh never changes; rebuilding a Map and
+    // remapping every source voxel for each animation frame was the main
+    // reason editing a converted model lagged while an empty hand-drawn
+    // entity stayed responsive. Keep one canonical scene-space base array and
+    // append only the new override tail.
+    if (isOrdinaryImportedModel(asset) && (addOnlyFastPath || overrides.length === 0)
+      && cached?.asset === asset && cached.baseSignature === baseSignature && cached.baseVoxelLengths) {
+      cached.baseVoxelLengths.forEach((length, index) => {
+        const part = cached.parts[index]
+        if (part) part.voxels.length = length
+      })
+      const previousOverrides = cached.addOnlyOverrides
+      const prefixUnchanged = Boolean(addOnlyFastPath && previousOverrides
+        && overrides.length >= previousOverrides.length
+        && previousOverrides.every((override, index) => override === overrides[index]))
+      const firstPart = cached.parts[0]
+      const canonicalX = snapAssetOrigin(0, asset.width)
+      const canonicalZ = snapAssetOrigin(0, asset.depth)
+      const canonicalInstance = { ...instance, x: canonicalX, y: 0, z: canonicalZ, partOffsets: undefined, overrides: [] }
+      if (firstPart && addOnlyFastPath) {
+        const start = prefixUnchanged ? (previousOverrides?.length ?? 0) : 0
+        if (!prefixUnchanged) firstPart.voxels.length = cached.baseVoxelLengths[0] ?? firstPart.voxels.length
+        for (let index = start; index < overrides.length; index += 1) {
+          const override = overrides[index]
+          firstPart.voxels.push(resolveInstanceComponentSceneVoxel(canonicalInstance, asset, override, firstPart.partId))
+        }
+      }
+      cached.signature = signature
+      cached.addOnlyOverrides = addOnlyFastPath ? overrides : undefined
+      refreshAssetPartMetadata(cached)
+    } else if (!cached || cached.asset !== asset || cached.signature !== signature) {
       const nextParts: SceneEntityPart[] = []
       const canonicalX = snapAssetOrigin(0, asset.width)
       const canonicalZ = snapAssetOrigin(0, asset.depth)
-      const canonicalInstance = { ...instance, x: canonicalX, y: 0, z: canonicalZ, partOffsets: undefined }
+      const canonicalInstance = {
+        ...instance,
+        x: canonicalX,
+        y: 0,
+        z: canonicalZ,
+        partOffsets: undefined,
+        overrides: addOnlyFastPath ? [] : overrides,
+      }
       for (const { partId, voxels: component } of resolveInstanceComponents(asset, canonicalInstance.overrides ?? [])) {
         const sceneVoxels = resolveInstanceComponentSceneVoxels(canonicalInstance, asset, component, partId)
         const partSceneOffset = sceneInstancePartVoxelOffset(instance, asset, partId)
@@ -922,7 +1001,21 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
         const assemblyIds = assemblyPathForMemberKey(memberKey)
         nextParts.push({ id: `asset:${instance.id}:${partId}`, kind: 'asset', instanceId: instance.id, partId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label, colorOverride: instance.colorOverride, sceneOffset, partSceneOffset, voxels: sceneVoxels })
       }
-      cache.assetParts.set(instance.id, { asset, signature, parts: nextParts })
+      const entry: CachedAssetSceneParts = { asset, signature, parts: nextParts }
+      if (isOrdinaryImportedModel(asset) && addOnlyFastPath) {
+        // The base is intentionally created without overrides above. Append
+        // the complete initial tail once; later frames only append its tail.
+        const firstPart = nextParts[0]
+        const baseLengths = nextParts.map((part) => part.voxels.length)
+        if (firstPart) overrides.forEach((override) => firstPart.voxels.push(resolveInstanceComponentSceneVoxel(canonicalInstance, asset, override, firstPart.partId)))
+        entry.baseSignature = baseSignature
+        entry.baseVoxelLengths = baseLengths
+        entry.addOnlyOverrides = overrides
+      } else if (isOrdinaryImportedModel(asset) && overrides.length === 0) {
+        entry.baseSignature = baseSignature
+        entry.baseVoxelLengths = nextParts.map((part) => part.voxels.length)
+      }
+      cache.assetParts.set(instance.id, entry)
     } else {
       // Keep the canonical voxel topology and refresh only small transform
       // objects when the instance root or one of its parts moves.
