@@ -74,6 +74,8 @@ export type SceneInstance = {
   rotationX?: number
   rotationY?: number
   rotationZ?: number
+  /** Local project-space pivot used for discrete instance rotations. */
+  rotationPivot?: { x: number; y: number; z: number }
 }
 
 export type ProjectState = {
@@ -515,6 +517,43 @@ export function resolveInstanceComponents(asset: VoxelAsset, overrides: VoxelOve
   return components
 }
 
+/**
+ * Return the effective geometry bounding-box center in the instance's local
+ * project coordinates. The instance origin is still the asset's historical
+ * placement origin (centered X/Y ground axes, floor at Z=0); this pivot is
+ * persisted separately so old scenes remain compatible while rotations use
+ * the actual visible entity center.
+ */
+export function instanceRotationPivot(instance: SceneInstance, asset: VoxelAsset): { x: number; y: number; z: number } {
+  const mirror = instance.mirror ?? { x: false, y: false, z: false }
+  const components = resolveInstanceComponents(asset, instance.overrides ?? [])
+  let minX = Number.POSITIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let minZ = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let maxY = Number.NEGATIVE_INFINITY
+  let maxZ = Number.NEGATIVE_INFINITY
+  components.forEach(({ partId, voxels }) => {
+    const offset = instance.partOffsets?.[partId] ?? { x: 0, y: 0, z: 0 }
+    voxels.forEach((voxel) => {
+      const localXIndex = mirror.x ? asset.width - 1 - voxel.x : voxel.x
+      const localYIndex = mirror.z ? asset.height - 1 - voxel.y : voxel.y
+      const localZIndex = mirror.y ? asset.depth - 1 - voxel.z : voxel.z
+      const x = (localXIndex + 0.5 - asset.width / 2) * VOXEL_WORLD_SIZE + (mirror.x ? -offset.x : offset.x)
+      const z = (localZIndex + 0.5 - asset.depth / 2) * VOXEL_WORLD_SIZE + (mirror.y ? -offset.z : offset.z)
+      const y = (localYIndex + 0.5) * VOXEL_WORLD_SIZE + (mirror.z ? -offset.y : offset.y)
+      minX = Math.min(minX, x)
+      minY = Math.min(minY, y)
+      minZ = Math.min(minZ, z)
+      maxX = Math.max(maxX, x)
+      maxY = Math.max(maxY, y)
+      maxZ = Math.max(maxZ, z)
+    })
+  })
+  if (!Number.isFinite(minX)) return { x: 0, y: asset.height * VOXEL_WORLD_SIZE / 2, z: 0 }
+  return { x: (minX + maxX) / 2, y: (minY + maxY) / 2, z: (minZ + maxZ) / 2 }
+}
+
 export type VoxelTransformAxis = 'x' | 'y' | 'z'
 
 export function mirrorVoxels(voxels: Voxel[], axis: VoxelTransformAxis): Voxel[] {
@@ -603,16 +642,17 @@ function resolveInstanceComponentSceneVoxel(instance: SceneInstance, asset: Voxe
   const localXIndex = mirror.x ? asset.width - 1 - voxel.x : voxel.x
   const localYIndex = mirror.z ? asset.height - 1 - voxel.y : voxel.y
   const localZIndex = mirror.y ? asset.depth - 1 - voxel.z : voxel.z
+  const pivot = instance.rotationPivot ?? { x: 0, y: 0, z: 0 }
   const local = rotateSceneVector({
-    x: (localXIndex + 0.5 - asset.width / 2) * VOXEL_WORLD_SIZE + (mirror.x ? -offset.x : offset.x),
-    y: (localZIndex + 0.5 - asset.depth / 2) * VOXEL_WORLD_SIZE + (mirror.y ? -offset.z : offset.z),
-    z: (localYIndex + 0.5) * VOXEL_WORLD_SIZE + (mirror.z ? -offset.y : offset.y),
+    x: (localXIndex + 0.5 - asset.width / 2) * VOXEL_WORLD_SIZE + (mirror.x ? -offset.x : offset.x) - pivot.x,
+    y: (localZIndex + 0.5 - asset.depth / 2) * VOXEL_WORLD_SIZE + (mirror.y ? -offset.z : offset.z) - pivot.z,
+    z: (localYIndex + 0.5) * VOXEL_WORLD_SIZE + (mirror.z ? -offset.y : offset.y) - pivot.y,
   }, rotationX, rotationY, rotationZ)
   return {
     ...voxel,
-    x: worldToVoxelCenter(x + local.x),
-    y: Math.round((local.z + y) / VOXEL_WORLD_SIZE - 0.5),
-    z: worldToVoxelCenter(z + local.y),
+    x: worldToVoxelCenter(x + local.x + pivot.x),
+    y: Math.round((local.z + pivot.y + y) / VOXEL_WORLD_SIZE - 0.5),
+    z: worldToVoxelCenter(z + local.y + pivot.z),
   }
 }
 
@@ -774,6 +814,7 @@ export function sceneInstanceGeometrySignature(instance: SceneInstance): string 
     instance.rotationX ?? 0,
     instance.rotationY ?? 0,
     instance.rotationZ ?? 0,
+    instance.rotationPivot ? `${instance.rotationPivot.x},${instance.rotationPivot.y},${instance.rotationPivot.z}` : '',
     instance.style,
     instance.colorOverride ?? '',
     mirror,

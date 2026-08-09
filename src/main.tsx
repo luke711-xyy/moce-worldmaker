@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceRotationPivot, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, loadScenePreview, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
@@ -4638,8 +4638,19 @@ function App() {
       if (!instance || !asset) continue
       // Boundary validation only reads the instance. A shallow copy is enough
       // and avoids cloning a large override list just to test one transform.
-      const simulated = { ...instance, overrides: instance.overrides, partOffsets: instance.partOffsets, mirror: instance.mirror ? { ...instance.mirror } : undefined }
-      if (mode === 'mirror') simulated.mirror = { x: simulated.mirror?.x ?? false, y: simulated.mirror?.y ?? false, z: simulated.mirror?.z ?? false, [axis]: !(simulated.mirror?.[axis] ?? false) }
+      const simulated = {
+        ...instance,
+        overrides: instance.overrides,
+        partOffsets: instance.partOffsets,
+        mirror: instance.mirror ? { ...instance.mirror } : undefined,
+        rotationPivot: mode === 'rotate' && asset
+          ? instanceRotationPivot(instance, asset)
+          : instance.rotationPivot,
+      }
+      if (mode === 'mirror') {
+        simulated.mirror = { x: simulated.mirror?.x ?? false, y: simulated.mirror?.y ?? false, z: simulated.mirror?.z ?? false, [axis]: !(simulated.mirror?.[axis] ?? false) }
+        simulated.rotationPivot = instanceRotationPivot(simulated, asset)
+      }
       else {
         const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationY' : 'rotationZ'
         simulated[key] = ((simulated[key] ?? 0) + degrees) % 360
@@ -4655,6 +4666,7 @@ function App() {
     const selectedCustomIds = new Set(parts.filter((part) => part.kind === 'custom').map((part) => part.partId))
     const selectedInstanceIds = new Set(parts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
     if (!selectedCustomIds.size && !selectedInstanceIds.size) return false
+    const assetMap = new Map(sourceProject.assets.map((asset) => [asset.id, asset]))
     const voxelAxis = sceneAxisToVoxelAxis(axis)
     const transformedByKey = new Map<string, Voxel>()
     const changedOwnerIds = new Set<string>()
@@ -4677,10 +4689,18 @@ function App() {
       ? sourceProject.instances.map((instance) => {
         if (!selectedInstanceIds.has(instance.id)) return instance
         if (mode === 'mirror') {
-          return { ...instance, mirror: { x: instance.mirror?.x ?? false, y: instance.mirror?.y ?? false, z: instance.mirror?.z ?? false, [axis]: !(instance.mirror?.[axis] ?? false) } }
+          const mirror = { x: instance.mirror?.x ?? false, y: instance.mirror?.y ?? false, z: instance.mirror?.z ?? false, [axis]: !(instance.mirror?.[axis] ?? false) }
+          const asset = assetMap.get(instance.assetId)
+          const mirrored = { ...instance, mirror }
+          return asset ? { ...mirrored, rotationPivot: instanceRotationPivot(mirrored, asset) } : mirrored
         }
         const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationY' : 'rotationZ'
-        return { ...instance, [key]: ((instance[key] ?? 0) + degrees) % 360 }
+        const asset = assetMap.get(instance.assetId)
+        return {
+          ...instance,
+          rotationPivot: asset ? instanceRotationPivot(instance, asset) : instance.rotationPivot,
+          [key]: ((instance[key] ?? 0) + degrees) % 360,
+        }
       })
       : sourceProject.instances
     selectedInstanceIds.forEach((instanceId) => {
@@ -7552,7 +7572,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         ? existing
         : existing && existing.userData.renderSignature === renderSignature && existing.userData.assetRef === asset
           ? existing
-          : buildAssetGroup(renderAsset, materialMap, instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ, true, `asset:${assetGreedyCacheToken(asset)}:${renderSignature}`)
+          : buildAssetGroup(renderAsset, materialMap, instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ, true, `asset:${assetGreedyCacheToken(asset)}:${renderSignature}`, instance.rotationPivot)
       if (instanceGroup !== existing) {
         if (existing) {
           group.remove(existing)
@@ -7561,7 +7581,8 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         group.add(instanceGroup)
       }
       retainedAssetIds.add(instance.id)
-      instanceGroup.position.copy(toSceneWorld(instance.x, instance.y ?? 0, instance.z))
+      const pivot = instance.rotationPivot ?? { x: 0, y: 0, z: 0 }
+      instanceGroup.position.copy(toSceneWorld(instance.x + pivot.x, (instance.y ?? 0) + pivot.y, instance.z + pivot.z))
       instanceGroup.userData.instanceId = instance.id
       instanceGroup.userData.renderSignature = renderSignature
       instanceGroup.userData.geometrySignature = geometrySignature
@@ -9588,9 +9609,12 @@ function syncAssetPartOffsets(group: THREE.Group, partOffsets: SceneInstance['pa
   group.userData.mirrorRef = mirror
 }
 
-function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0, colorOverride?: string, mirror: SceneInstance['mirror'] = undefined, rotationX = 0, rotationY = 0, rotationZ = 0, allowGreedyMesh = false, greedyCacheKey?: string) {
+function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshStandardMaterial>, overrides: VoxelOverride[] = [], partOffsets: SceneInstance['partOffsets'] = {}, rotation = 0, colorOverride?: string, mirror: SceneInstance['mirror'] = undefined, rotationX = 0, rotationY = 0, rotationZ = 0, allowGreedyMesh = false, greedyCacheKey?: string, rotationPivot: SceneInstance['rotationPivot'] = undefined) {
   const group = new THREE.Group()
   const scale = VOXEL_WORLD_SIZE
+  const pivot = rotationPivot ?? { x: 0, y: 0, z: 0 }
+  // Three.js uses X/Y/Z = project X/ground Z/vertical Y.
+  const pivotWorld = { x: pivot.x, y: pivot.z, z: pivot.y }
   const resolvedComponents = overrides.length
     ? resolveInstanceComponents(asset, overrides)
     : assetBaseComponentsCache.get(asset) ?? (() => {
@@ -9601,7 +9625,7 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
   group.rotation.set(rotationX * Math.PI / 180, rotationY * Math.PI / 180, -(rotation + rotationZ) * Math.PI / 180)
   if (!resolvedComponents.length) {
     const placeholder = new THREE.Mesh(new THREE.BoxGeometry(asset.width * scale, asset.depth * scale, asset.height * scale), new THREE.MeshStandardMaterial({ color: asset.color, roughness: 0.76 }))
-    placeholder.position.z = asset.height * scale / 2
+    placeholder.position.set(-pivotWorld.x, -pivotWorld.y, asset.height * scale / 2 - pivotWorld.z)
     placeholder.userData.instanceId = asset.id
     group.add(placeholder)
     return group
@@ -9632,18 +9656,18 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
       // same local origin used by the old per-cell matrices, so the physical
       // voxel size and the asset's centered X/Y placement remain unchanged.
       partGroup.position.set(
-        (mirror?.x ? -offset.x : offset.x) - (asset.width / 2) * scale,
-        (mirror?.y ? -offset.z : offset.z) - (asset.depth / 2) * scale,
-        (mirror?.z ? -offset.y : offset.y),
+        (mirror?.x ? -offset.x : offset.x) - (asset.width / 2) * scale - pivotWorld.x,
+        (mirror?.y ? -offset.z : offset.z) - (asset.depth / 2) * scale - pivotWorld.y,
+        (mirror?.z ? -offset.y : offset.y) - pivotWorld.z,
       )
       partGroup.userData.greedyVoxels = greedyVoxels
       partGroup.userData.greedyColors = greedyColors
       partGroup.userData.greedyMeshCacheKey = greedyCacheKey ? `${greedyCacheKey}:${partId}` : undefined
       partGroup.userData.greedyDisabled = false
       partGroup.userData.baseRenderOffset = {
-        x: -(asset.width / 2) * scale,
-        y: -(asset.depth / 2) * scale,
-        z: 0,
+        x: -(asset.width / 2) * scale - pivotWorld.x,
+        y: -(asset.depth / 2) * scale - pivotWorld.y,
+        z: -pivotWorld.z,
       }
       group.add(partGroup)
       continue
@@ -9668,7 +9692,11 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
         const localXIndex = mirror?.x ? asset.width - 1 - voxel.x : voxel.x
         const localYIndex = mirror?.z ? asset.height - 1 - voxel.y : voxel.y
         const localZIndex = mirror?.y ? asset.depth - 1 - voxel.z : voxel.z
-        matrix.makeTranslation((localXIndex + 0.5 - asset.width / 2) * scale, (localZIndex + 0.5 - asset.depth / 2) * scale, (localYIndex + 0.5) * scale)
+        matrix.makeTranslation(
+          (localXIndex + 0.5 - asset.width / 2) * scale - pivotWorld.x,
+          (localZIndex + 0.5 - asset.depth / 2) * scale - pivotWorld.y,
+          (localYIndex + 0.5) * scale - pivotWorld.z,
+        )
         mesh.setMatrixAt(index, matrix)
       })
       mesh.instanceMatrix.needsUpdate = true

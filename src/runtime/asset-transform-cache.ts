@@ -1,6 +1,7 @@
 import {
   assetOriginGridCoordinate,
   instanceVoxelPairs,
+  instanceLocalVoxelToSceneVoxelFast,
   resolveInstanceSceneVoxels,
   SceneInstance,
   snapAssetOrigin,
@@ -29,6 +30,7 @@ function transformKey(instance: SceneInstance): string {
     rotationX: instance.rotationX ?? 0,
     rotationY: instance.rotationY ?? 0,
     rotationZ: instance.rotationZ ?? 0,
+    rotationPivot: instance.rotationPivot ?? null,
     partOffsets: instance.partOffsets ?? {},
   })
 }
@@ -114,10 +116,11 @@ export class AssetTransformCache {
     const rotationX = (instance.rotationX ?? 0) * Math.PI / 180
     const rotationY = (instance.rotationY ?? 0) * Math.PI / 180
     const rotationZ = -(instance.rotation + (instance.rotationZ ?? 0)) * Math.PI / 180
+    const pivot = instance.rotationPivot ?? { x: 0, y: 0, z: 0 }
     const scene = {
-      x: voxelCenterToWorld(sceneVoxel.x) - instance.x,
-      y: voxelCenterToWorld(sceneVoxel.z) - instance.z,
-      z: voxelCenterToWorld(sceneVoxel.y) - (instance.y ?? 0),
+      x: voxelCenterToWorld(sceneVoxel.x) - instance.x - pivot.x,
+      y: voxelCenterToWorld(sceneVoxel.z) - instance.z - pivot.z,
+      z: voxelCenterToWorld(sceneVoxel.y) - (instance.y ?? 0) - pivot.y,
     }
     // The forward transform applies X, then Y, then Z rotation. Undo it in
     // reverse order before converting the local physical position to indices.
@@ -129,11 +132,34 @@ export class AssetTransformCache {
     const afterY = { x: cy * afterZ.x + sy * afterZ.z, y: afterZ.y, z: -sy * afterZ.x + cy * afterZ.z }
     const cx = Math.cos(-rotationX)
     const sx = Math.sin(-rotationX)
-    const local = { x: afterY.x, y: cx * afterY.y - sx * afterY.z, z: sx * afterY.y + cx * afterY.z }
+    const local = {
+      x: afterY.x + pivot.x,
+      y: afterY.y + pivot.z,
+      z: afterY.z + pivot.y,
+    }
     const localXIndex = Math.round((local.x - (mirror.x ? -offset.x : offset.x)) / VOXEL_WORLD_SIZE - 0.5 + asset.width / 2)
     const localZIndex = Math.round((local.y - (mirror.y ? -offset.z : offset.z)) / VOXEL_WORLD_SIZE - 0.5 + asset.depth / 2)
     const localYIndex = Math.round((local.z - (mirror.z ? -offset.y : offset.y)) / VOXEL_WORLD_SIZE - 0.5)
     if (localXIndex < 0 || localXIndex >= asset.width || localZIndex < 0 || localZIndex >= asset.depth || localYIndex < 0 || localYIndex >= asset.height) return undefined
+    const estimated = {
+      x: mirror.x ? asset.width - 1 - localXIndex : localXIndex,
+      y: mirror.z ? asset.height - 1 - localYIndex : localYIndex,
+      z: mirror.y ? asset.depth - 1 - localZIndex : localZIndex,
+    }
+    // Rotation around an off-grid geometry center can land exactly on a cell
+    // boundary before the scene-space quantization step. Try the nearby
+    // integer cells through the same forward resolver and prefer an exact
+    // round-trip, so empty-cell drawing does not jump to the adjacent layer.
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dz = -1; dz <= 1; dz += 1) {
+          const candidate = { x: estimated.x + dx, y: estimated.y + dy, z: estimated.z + dz }
+          if (candidate.x < 0 || candidate.x >= asset.width || candidate.y < 0 || candidate.y >= asset.height || candidate.z < 0 || candidate.z >= asset.depth) continue
+          const projected = instanceLocalVoxelToSceneVoxelFast(instance, asset, { ...candidate, materialId: 'primary' }, componentId)
+          if (projected.x === sceneVoxel.x && projected.y === sceneVoxel.y && projected.z === sceneVoxel.z) return candidate
+        }
+      }
+    }
     return {
       x: mirror.x ? asset.width - 1 - localXIndex : localXIndex,
       y: mirror.z ? asset.height - 1 - localYIndex : localYIndex,

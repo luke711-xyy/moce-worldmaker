@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { SceneEntityPart, Voxel } from '../voxel'
+import { SceneEntityPart, Voxel, instanceRotationPivot } from '../voxel'
 import {
   projectVoxelToRuntime,
   runtimeChunkCoord,
@@ -304,6 +304,27 @@ describe('AssetTransformCache', () => {
     const cache = new AssetTransformCache()
     const sceneVoxel = cache.resolve(instance, asset)[0]
     expect(cache.localCoordinateAtSceneVoxel(instance, asset, sceneVoxel, 'main')).toEqual({ x: 1, y: 1, z: 0 })
+  })
+
+  it('round-trips asset cells when the rotation pivot is offset from the root', () => {
+    const asset = {
+      id: 'asset',
+      name: 'asset',
+      kind: 'house' as const,
+      style: 'greek' as const,
+      width: 6,
+      height: 3,
+      depth: 6,
+      color: '#ffffff',
+      accent: '#000000',
+      parts: ['main'],
+      voxels: [voxel(0, 0, 0), voxel(4, 2, 3)],
+    }
+    const base = { id: 'instance', assetId: asset.id, x: 0, y: 0, z: 0, rotation: 90, style: asset.style, visible: true, overrides: [] }
+    const instance = { ...base, rotationPivot: instanceRotationPivot(base, asset) }
+    const cache = new AssetTransformCache()
+    const sceneVoxel = cache.resolve(instance, asset)[0]
+    expect(cache.localCoordinateAtSceneVoxel(instance, asset, sceneVoxel, 'main')).toEqual({ x: 0, y: 0, z: 0 })
   })
 
   it('keeps mirror and rotation variants in separate cache entries', () => {

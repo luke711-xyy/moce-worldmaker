@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { VOXEL_WORLD_SIZE, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceLocalVoxelToSceneVoxelFast, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { VOXEL_WORLD_SIZE, Voxel, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceLocalVoxelToSceneVoxelFast, instanceRotationPivot, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
@@ -427,6 +427,43 @@ describe('莫测造境体素核心数据', () => {
     const localVoxel = component.voxels[Math.min(3, component.voxels.length - 1)]
     expect(instanceLocalVoxelToSceneVoxelFast(instance, asset, localVoxel, component.partId))
       .toEqual(instanceLocalVoxelToSceneVoxel(instance, asset, localVoxel))
+  })
+
+  it('rotates asset instances around the effective geometry center', () => {
+    const project = makeDefaultProject()
+    const asset = {
+      ...project.assets[0],
+      id: 'pivot-test',
+      width: 6,
+      depth: 6,
+      height: 5,
+      partVoxels: undefined,
+      assembly: undefined,
+      voxels: [
+        { x: 0, y: 0, z: 0, materialId: 'primary' },
+        { x: 4, y: 0, z: 0, materialId: 'primary' },
+        { x: 4, y: 3, z: 2, materialId: 'primary' },
+        { x: 1, y: 3, z: 2, materialId: 'primary' },
+      ],
+    }
+    const instance = {
+      ...project.instances[0],
+      assetId: asset.id,
+      x: snapAssetOrigin(2, asset.width),
+      z: snapAssetOrigin(-1, asset.depth),
+      rotation: 0,
+    }
+    const pivot = instanceRotationPivot(instance, asset)
+    const center = (voxels: Voxel[]) => {
+      const axes = ['x', 'y', 'z'] as const
+      return axes.map((axis) => {
+        const values = voxels.map((voxel) => voxel[axis])
+        return (voxelCenterToWorld(Math.min(...values)) + voxelCenterToWorld(Math.max(...values))) / 2
+      })
+    }
+    const before = center(resolveInstanceSceneVoxels(instance, asset))
+    const after = center(resolveInstanceSceneVoxels({ ...instance, rotation: 90, rotationPivot: pivot }, asset))
+    expect(after).toEqual(before)
   })
 
   it('groups only face-connected voxels into one draggable component', () => {
