@@ -8972,30 +8972,44 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         const instance = instanceId ? project.instances.find((item) => item.id === instanceId) : undefined
         const asset = instance ? project.assets.find((item) => item.id === instance.assetId) : undefined
 
-        // Imported models can be split into many editable parts (especially a
-        // GLB with several meshes or disconnected voxel islands).  Selection
-        // still stays on the hit part so the file tree and property panel keep
-        // their precise meaning, but a plain drag must move the imported model
-        // as one body.  Otherwise the selected part immediately collides with
-        // its own unselected sibling parts and every drag step is rejected.
-        // Coordinate editing did not have this problem because it moves the
-        // instance directly, which is why the same GLB could move from the
-        // numeric position fields while mouse dragging appeared completely
-        // broken.
-        const dragParts = !explicitMultiSelection
-          && hitPart.kind === 'asset'
-          && instanceId
-          && asset?.kind === 'imported'
-          && !hitPart.assemblyIds?.length
-          ? sceneParts.filter((part) => part.kind === 'asset' && part.instanceId === instanceId)
-          : selectedParts
+        const hitAssemblyIds = hitPart.assemblyIds ?? (hitPart.assemblyId ? [hitPart.assemblyId] : [])
+        const selectedAssemblyRootIds = new Set(selectedParts.flatMap((part) => {
+          const assemblyIds = part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])
+          return assemblyIds.length ? [assemblyIds[assemblyIds.length - 1]] : []
+        }))
+        if (hitAssemblyIds.length && !selectedAssemblyRootIds.size) {
+          selectedAssemblyRootIds.add(hitAssemblyIds[hitAssemblyIds.length - 1])
+        }
+        // A scene drag always operates on an assembly as a single rigid body.
+        // The file tree may select one child, and a scene hit may land on only
+        // one voxel, but moving just that part would split the assembly and
+        // make its own remaining members look like collision obstacles. Use
+        // the outermost assembly id so nested assemblies move with their
+        // parent as well.
+        const dragParts = selectedAssemblyRootIds.size
+            ? sceneParts.filter((part) => {
+                const assemblyIds = part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])
+                return selectedParts.some((selected) => selected.id === part.id)
+                  || assemblyIds.some((assemblyId) => selectedAssemblyRootIds.has(assemblyId))
+              })
+            : !explicitMultiSelection
+              && hitPart.kind === 'asset'
+              && instanceId
+              && asset?.kind === 'imported'
+              ? sceneParts.filter((part) => part.kind === 'asset' && part.instanceId === instanceId)
+              : selectedParts
+        const dragContainsAssembly = dragParts.some((part) => {
+          const assemblyIds = part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])
+          return assemblyIds.length > 0
+        })
         if (event.metaKey || event.shiftKey) {
           onSelectMultiple(hitSelectionPartIds(hitPart), true)
           onNotice('已加入复选 · 可继续选择多个实体')
           return
         }
         onSelect(hitPart.id)
-        const movableParts = dragParts.filter((part) => !lockedPartIds.has(part.id))
+        const dragAssemblyLocked = dragContainsAssembly && dragParts.some((part) => lockedPartIds.has(part.id))
+        const movableParts = dragAssemblyLocked ? [] : dragParts.filter((part) => !lockedPartIds.has(part.id))
         if (!movableParts.length) {
           onNotice('当前实体已固定 · 请先在右键菜单中取消固定')
           return
@@ -9007,8 +9021,8 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         const anchor = instance
           ? toSceneWorld(instance.x, instance.y ?? 0, instance.z)
           : toSceneWorld(voxelCenterToWorld(anchorVoxel?.x ?? 0), voxelCenterToWorld(anchorVoxel?.y ?? 0), voxelCenterToWorld(anchorVoxel?.z ?? 0))
-        const selectionLabel = selectedParts.some((part) => part.assemblyId || part.assemblyIds?.length) ? '已选中装配体' : '已选中实体'
-        onNotice(`${selectionLabel} · ${selectedParts.length} 个零件`)
+        const selectionLabel = dragContainsAssembly ? '已选中装配体' : '已选中实体'
+        onNotice(`${selectionLabel} · ${movableParts.length} 个零件`)
         selectGestureRef.current = {
           pointerId: event.pointerId,
           kind: 'parts',
