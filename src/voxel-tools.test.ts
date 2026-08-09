@@ -105,4 +105,16 @@ describe('voxel plane tools', () => {
     expect(signedExtrudeDelta(-2, -1, 20)).toBe(2)
     expect(signedExtrudeDelta(99, -1, 4)).toBe(-4)
   })
+
+  it('allows negative horizontal extrusion while keeping height above ground', () => {
+    expect(rasterizeExtrude('xz', [{ x: 0, y: 3, z: 0, materialId: 'a' }], 0, -2, 'z'))
+      .toEqual([
+        { x: 0, y: 3, z: -1, materialId: 'a' },
+        { x: 0, y: 3, z: -2, materialId: 'a' },
+      ])
+    expect(rasterizeExtrude('xz', [{ x: 0, y: 1, z: 0, materialId: 'a' }], 1, -4, 'y'))
+      .toEqual([
+        { x: 0, y: 0, z: 0, materialId: 'a' },
+      ])
+  })
 })

@@ -216,12 +216,16 @@ export function rasterizeExtrude(plane: DrawingPlane, source: Voxel[], startLaye
   // legacy data without requiring a second full-size uniqueVoxels() pass over
   // the generated extrusion result.
   const seen = new Set<string>()
+  // Project X/Z are centered horizontal axes and legitimately contain
+  // negative coordinates. Only storage Y is the height axis whose lower
+  // bound is the ground plane.
+  const endLayer = layerAxis === 'y' ? Math.max(0, startLayer + delta) : startLayer + delta
   for (const voxel of source) {
     // An explicit extrusion axis is view-selected and is intentionally
     // independent from the drawing plane. Filtering through the plane's
     // layer axis here made a valid X/Y/Z extrusion use the wrong slice.
     if (voxel[layerAxis] !== startLayer) continue
-    for (let layer = startLayer + step; delta > 0 ? layer <= startLayer + delta : layer >= Math.max(0, startLayer + delta); layer += step) {
+    for (let layer = startLayer + step; delta > 0 ? layer <= endLayer : layer >= endLayer; layer += step) {
       const target = { ...voxel }
       target[layerAxis] = layer
       if (target.y < 0) continue
