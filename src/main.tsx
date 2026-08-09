@@ -9987,7 +9987,11 @@ function customComponentRenderOrigin(component: ReadonlyArray<Pick<Voxel, 'x' | 
   return origin
 }
 
-const CUSTOM_INSTANCE_RENDER_LIMIT = 16_384
+// Diagnostic baseline: keep every practical scene component on the ordinary
+// per-voxel path while we measure whether the deferred large-entity renderer
+// is still necessary. This is intentionally beyond any usable browser scene;
+// it can be lowered again after the real interaction limit is established.
+const CUSTOM_INSTANCE_RENDER_LIMIT = 1_000_000_000
 const assetBaseComponentsCache = new WeakMap<VoxelAsset, Array<{ partId: string; voxels: Voxel[] }>>()
 const assetGreedyCacheTokens = new WeakMap<VoxelAsset, number>()
 const assetOverrideSignatureCache = new WeakMap<ReadonlyArray<VoxelOverride>, number>()
