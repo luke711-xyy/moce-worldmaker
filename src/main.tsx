@@ -8541,19 +8541,22 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
 
   const commitDragGesture = (gesture: SelectGesture) => {
     if (!gesture.moved || (!gesture.lastDeltaX && !gesture.lastDeltaY && !gesture.lastDeltaZ)) {
+      skipNextTransformRenderRef.current = false
       resetDragVisuals(gesture)
       onCancelScenePartsMove()
       return
     }
-    // The pointer preview is an imperative offset on part objects. Restore
-    // those local positions before committing the authoritative project
-    // transform; otherwise an asset root move plus its already-offset child
-    // groups applies the same delta twice and desynchronizes rendering from
-    // occupancy/picking.
-    resetDragVisuals(gesture)
+    // Keep the imperative preview at the final position while the authoritative
+    // project snapshot is committed. Resetting it first makes the released
+    // entity visibly jump back to its start position; the following React
+    // render then moves it to the destination again. The preview and the
+    // project use the same grid delta, so there is no double-translation here.
+    skipNextTransformRenderRef.current = true
     const result = onCommitScenePartsMove(gesture.parts, gesture.lastDeltaX, gesture.lastDeltaY, gesture.lastDeltaZ)
-    if (!result.moved) resetDragVisuals(gesture)
-    else skipNextTransformRenderRef.current = true
+    if (!result.moved) {
+      skipNextTransformRenderRef.current = false
+      resetDragVisuals(gesture)
+    }
     finishDragRenderBurstRef.current()
   }
 
