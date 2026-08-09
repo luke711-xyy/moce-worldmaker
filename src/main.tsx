@@ -8092,8 +8092,23 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       custom.name = 'custom-voxels'
       if (!existingCustom) group.add(custom)
       const existingComponents = new Map<string, THREE.Group>()
+      const componentCandidates = new Map<string, THREE.Group[]>()
       custom.children.filter((child): child is THREE.Group => child instanceof THREE.Group && typeof child.userData.scenePartId === 'string')
-        .forEach((child) => existingComponents.set(child.userData.scenePartId as string, child))
+        .forEach((child) => {
+          const scenePartId = child.userData.scenePartId as string
+          componentCandidates.set(scenePartId, [...(componentCandidates.get(scenePartId) ?? []), child])
+        })
+      // A large component can have one visible, stable group and one hidden
+      // replacement group uploading unit cells over several animation frames.
+      // Always use the stable visible group as the replacement source; using
+      // the hidden group here would make every brush sample chain another
+      // rebuild and could leave the entity invisible for a long time.
+      componentCandidates.forEach((candidates, scenePartId) => {
+        const stable = candidates.find((candidate) => candidate.visible && !candidate.userData.pendingReplacementFor)
+          ?? candidates.find((candidate) => candidate.visible)
+          ?? candidates[0]
+        if (stable) existingComponents.set(scenePartId, stable)
+      })
       const retainedComponents = new Set<string>()
       for (const part of customParts) {
         const entityId = part.partId
@@ -8110,17 +8125,50 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
         const forceCellRender = part.renderMode === 'cells' || project.customVoxelRenderModes?.[entityId] === 'cells'
         const renderSignature = voxelRenderSignature(component, project.customColors?.[entityId], forceCellRender)
         const existingComponent = existingComponents.get(scenePartId)
+        // A newer edit supersedes any still-uploading replacement. Cancel and
+        // dispose those stale hidden groups before starting the next one, but
+        // never remove the visible stable group that is keeping the entity on
+        // screen during the rebuild.
+        const candidates = componentCandidates.get(scenePartId) ?? []
+        candidates.forEach((candidate) => {
+          if (candidate === existingComponent || !candidate.userData.pendingReplacementFor) return
+          const cancel = candidate.userData.cancelCellBuild as (() => void) | undefined
+          cancel?.()
+          custom.remove(candidate)
+          disposeThreeObject(candidate)
+        })
         const componentGroup = existingComponent && existingComponent.userData.renderSignature === renderSignature
           ? existingComponent
           : buildCustomComponentGroup(component, entityId, materialMap, project.customColors?.[entityId], forceCellRender)
+        const isProgressiveCellBuild = Boolean(componentGroup.userData.cellBuildPending)
+        const isWorkerGreedyBuild = Boolean(componentGroup.userData.greedyBuildPending)
+        const isAsyncRenderBuild = isProgressiveCellBuild || isWorkerGreedyBuild
         if (componentGroup !== existingComponent) {
-          if (existingComponent) {
-            custom.remove(existingComponent)
-            disposeThreeObject(existingComponent)
+          if (existingComponent && isAsyncRenderBuild) {
+            // Keep the previous complete render visible while the replacement
+            // uploads/builds. The completion callback removes it atomically,
+            // so a brush update never exposes an empty render group.
+            componentGroup.visible = false
+            componentGroup.userData.pendingReplacementFor = existingComponent
+            custom.add(componentGroup)
+          } else {
+            if (existingComponent) {
+              custom.remove(existingComponent)
+              disposeThreeObject(existingComponent)
+            }
+            custom.add(componentGroup)
           }
-          custom.add(componentGroup)
         }
-        componentGroup.userData.onCellBuildComplete = () => {
+        componentGroup.userData.onRenderBuildComplete = () => {
+          componentGroup.userData.cellBuildPending = false
+          componentGroup.userData.greedyBuildPending = false
+          const previous = componentGroup.userData.pendingReplacementFor as THREE.Group | undefined
+          if (previous?.parent) {
+            previous.parent.remove(previous)
+            disposeThreeObject(previous)
+          }
+          delete componentGroup.userData.pendingReplacementFor
+          componentGroup.visible = true
           const shouldHighlight = selectedPartIdsRef.current.includes(scenePartId)
             || editRenderStateRef.current.partIds.has(scenePartId)
           if (shouldHighlight) {
@@ -8129,6 +8177,12 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
             })
           }
           invalidateRenderRef.current()
+        }
+        componentGroup.userData.onRenderBuildFailed = () => {
+          const previous = componentGroup.userData.pendingReplacementFor as THREE.Group | undefined
+          if (previous?.parent) previous.visible = true
+          if (componentGroup.parent) componentGroup.parent.remove(componentGroup)
+          disposeThreeObject(componentGroup)
         }
         const renderOrigin = customComponentRenderOrigin(component)
         const sceneOffset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
@@ -8146,6 +8200,14 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
         if (retainedComponents.has(scenePartId)) return
         custom.remove(existingComponent)
         disposeThreeObject(existingComponent)
+      })
+      componentCandidates.forEach((candidates, scenePartId) => {
+        if (retainedComponents.has(scenePartId)) return
+        candidates.forEach((candidate) => {
+          if (candidate === existingComponents.get(scenePartId)) return
+          custom.remove(candidate)
+          disposeThreeObject(candidate)
+        })
       })
     } else if (existingCustom) {
       group.remove(existingCustom)
@@ -8278,6 +8340,11 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       if (selectedPartIdsRef.current.includes(scenePartId) || editRenderStateRef.current.partIds.has(scenePartId)) {
         addVoxelHighlight(greedyMesh)
       }
+      if (object.userData.greedyBuildPending) {
+        object.userData.greedyBuildPending = false
+        const onComplete = object.userData.onRenderBuildComplete as (() => void) | undefined
+        onComplete?.()
+      }
       if (renderSignature) object.userData.greedyMeshBuiltSignature = renderSignature
       const replacementRoot = object.parent?.userData.assetRebuildPending ? object.parent as THREE.Group : undefined
       if (replacementRoot) {
@@ -8326,6 +8393,8 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
             disposeThreeObject(pendingRoot)
             if (previous?.parent) previous.visible = true
           }
+          const onFailed = object.userData.onRenderBuildFailed as (() => void) | undefined
+          onFailed?.()
           return
         }
         // The worker emits coordinates in voxel units. Keep the transferable
@@ -10013,7 +10082,8 @@ function scheduleInstancedVoxelMatrices(
       mesh.frustumCulled = true
     })
     delete componentGroup.userData.cancelCellBuild
-    const onComplete = componentGroup.userData.onCellBuildComplete as (() => void) | undefined
+    componentGroup.userData.cellBuildPending = false
+    const onComplete = componentGroup.userData.onRenderBuildComplete as (() => void) | undefined
     onComplete?.()
   }
   const cancel = () => {
@@ -10136,7 +10206,13 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
   // cells. Keep those results on the exact InstancedMesh path even when they
   // cross the normal greedy-mesh threshold; otherwise the worker replaces the
   // small cubes with merged coplanar faces and the model appears block-scaled.
-  if (component.length > CUSTOM_INSTANCE_RENDER_LIMIT && !preserveVoxelCells) return componentGroup
+  if (component.length > CUSTOM_INSTANCE_RENDER_LIMIT && !preserveVoxelCells) {
+    // The worker will attach the merged surface asynchronously. Mark this
+    // group explicitly so the scene effect can keep the previous complete
+    // group visible until that surface has finished building.
+    componentGroup.userData.greedyBuildPending = true
+    return componentGroup
+  }
 
   const deferCellBuild = preserveVoxelCells && component.length > CUSTOM_INSTANCE_RENDER_LIMIT
   if (deferCellBuild) {
@@ -10154,6 +10230,12 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
     // reintroduce a synchronous O(n log n) confirmation hitch.
     const componentId = entityId
     const cellChunkSize = 16_384
+    // Resolve one real source color before the progressive upload starts.
+    // The instance color buffer must never begin with zeroes: a large entity
+    // can be rendered before its first animation-frame upload, and zero
+    // instance colors multiply the material to black.
+    const initialColorKey = customVoxelRenderColorKey(component[0], materialMap, componentColor)
+    const initialColor = new THREE.Color(initialColorKey)
     for (let start = 0; start < component.length; start += cellChunkSize) {
       const end = Math.min(component.length, start + cellChunkSize)
       const meshMaterial = new THREE.MeshStandardMaterial({ color: '#ffffff', vertexColors: true, roughness: 0.72, metalness: 0.03 })
@@ -10163,11 +10245,18 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
       // The large-cell path uploads matrices and colors over several animation
       // frames. Allocate the instance-color attribute before the first render
       // so the material program is compiled with USE_INSTANCING_COLOR from
-      // the start. Initialize it to white until the real per-voxel colors are
-      // uploaded; an uninitialized attribute otherwise presents as black or
-      // makes the result depend on which frame first compiled the material.
-      mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array((end - start) * 3).fill(1), 3)
+      // the start. Initialize it to a real source color; an uninitialized
+      // attribute otherwise presents as black or makes the result depend on
+      // which frame first compiled the material.
+      const initialColors = new Float32Array((end - start) * 3)
+      for (let index = 0; index < end - start; index += 1) {
+        initialColors[index * 3] = initialColor.r
+        initialColors[index * 3 + 1] = initialColor.g
+        initialColors[index * 3 + 2] = initialColor.b
+      }
+      mesh.instanceColor = new THREE.InstancedBufferAttribute(initialColors, 3)
       mesh.instanceColor.setUsage(THREE.DynamicDrawUsage)
+      mesh.instanceColor.needsUpdate = true
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
       // Bounds are invalid until the final instance is uploaded. Keep the
       // batch visible during progressive construction and let the completion
@@ -10198,6 +10287,7 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
       target.copy(next)
     }
     scheduleInstancedVoxelMatrices(componentGroup, cellBatches, origin, resolveColor)
+    componentGroup.userData.cellBuildPending = true
     return componentGroup
   }
 
