@@ -549,6 +549,26 @@ describe('莫测造境体素核心数据', () => {
     expect(uniqueAssetName(project.assets, '全新实体')).toBe('全新实体')
   })
 
+  it('avoids scene-name collisions when a template instance is added after a custom entity', () => {
+    const project = makeDefaultProject()
+    project.instances = []
+    project.customVoxels = [{ x: 0, y: 0, z: 0, materialId: 'jade', entityId: 'manual-entity' }]
+    project.entityNames = { 'voxel:manual-entity': '街角树' }
+    project.entityNameModes = { 'voxel:manual-entity': 'custom' }
+    project.instances.push({ id: 'placed-tree', assetId: 'tree-basic', x: 30, y: 0, z: 30, rotation: 0, style: '基础件', visible: true, overrides: [] })
+
+    const normalized = normalizeProjectNaming(project)
+    const rootParts = sceneEntityParts(normalized).filter((part) => !part.assemblyIds?.length)
+    const rootNames = rootParts.map((part) => normalized.entityNames?.[part.memberKey] ?? '')
+
+    expect(new Set(rootNames).size).toBe(rootNames.length)
+    expect(normalized.entityNames?.['voxel:manual-entity']).toBe('街角树')
+    expect(rootParts
+      .filter((part) => part.instanceId === 'placed-tree')
+      .map((part) => normalized.entityNames?.[part.memberKey]))
+      .toContain('街角树 2')
+  })
+
   it('uses parenthesized suffixes for template asset name collisions', () => {
     const project = makeDefaultProject()
     expect(uniqueTemplateAssetName(project.assets, '街角树')).toBe('街角树 (1)')

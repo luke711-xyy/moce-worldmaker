@@ -1109,6 +1109,18 @@ export function normalizeProjectNaming(project: ProjectState, options: { clone?:
   const entityCounters = { ...childCounters, ...(next.entitySequenceCounters ?? {}) }
   const usedEntitySequences = new Map<string, Set<number>>()
   const usedStandaloneNames = new Set<string>()
+  const directParentOf = (part: SceneEntityPart) => part.assemblyIds?.[0] ?? part.assemblyId
+  // Parts are emitted in instance order followed by custom voxel entities;
+  // that is not necessarily their creation order. Reserve every persisted
+  // root name before assigning names to newly added parts, otherwise a newly
+  // dragged template instance can claim a name that belongs to a custom part
+  // visited later in the traversal.
+  const persistedStandaloneNames = new Set(
+    parts
+      .filter((part) => !directParentOf(part))
+      .map((part) => names[part.memberKey]?.trim())
+      .filter((name): name is string => Boolean(name)),
+  )
   const assetMap = new Map(next.assets.map((asset) => [asset.id, asset]))
   const scopeForParent = (parentId?: string) => parentId ? `assembly:${parentId}` : 'root'
   const partBaseName = (part: SceneEntityPart) => {
@@ -1118,20 +1130,22 @@ export function normalizeProjectNaming(project: ProjectState, options: { clone?:
     const sourceName = asset?.name?.trim() ?? ''
     return /^装配体\s+\d+$/.test(sourceName) || /^子装配体\s+\d+(?:-\d+)*$/.test(sourceName) ? '子实体' : (sourceName || '子实体')
   }
-  const directParentOf = (part: SceneEntityPart) => part.assemblyIds?.[0] ?? part.assemblyId
   parts.forEach((part) => {
     const parentId = directParentOf(part)
     const scope = scopeForParent(parentId)
     if (!parentId) {
-      const current = names[part.memberKey]
-      if (!current) {
-        const base = partBaseName(part)
-        let candidate = base
+      const current = names[part.memberKey]?.trim()
+      let candidate = current
+      if (!candidate || usedStandaloneNames.has(candidate)) {
+        const base = candidate || partBaseName(part)
         let suffix = 2
-        while (usedStandaloneNames.has(candidate)) candidate = `${base} ${suffix++}`
+        candidate = base
+        while (usedStandaloneNames.has(candidate) || persistedStandaloneNames.has(candidate)) {
+          candidate = `${base} ${suffix++}`
+        }
         names[part.memberKey] = candidate
       }
-      usedStandaloneNames.add(names[part.memberKey])
+      usedStandaloneNames.add(candidate)
       parents[part.memberKey] = ''
       if (!modes[part.memberKey]) modes[part.memberKey] = 'auto'
       return
