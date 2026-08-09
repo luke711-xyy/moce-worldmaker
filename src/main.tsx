@@ -7553,7 +7553,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     if (!group) return
     const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
     const existingAssetGroups = new Map<string, THREE.Group>()
-    group.children.filter((child): child is THREE.Group => child instanceof THREE.Group && typeof child.userData.instanceId === 'string')
+    group.children.filter((child): child is THREE.Group => child instanceof THREE.Group && typeof child.userData.instanceId === 'string' && !child.userData.assetRebuildPending)
       .forEach((child) => existingAssetGroups.set(child.userData.instanceId as string, child))
     const retainedAssetIds = new Set<string>()
     for (const instance of project.instances) {
@@ -7562,8 +7562,16 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       if (!asset) continue
       const variant = asset.templateColor ? undefined : styleMaterialVariants[instance.style]
       const renderAsset = variant ? { ...asset, color: variant.color, accent: variant.accent } : asset
-      const renderSignature = sceneInstanceRenderSignature(instance)
-      const geometrySignature = sceneInstanceGeometrySignature(instance)
+      const incrementalAdds = asset.kind === 'imported' && asset.voxels.length > CUSTOM_INSTANCE_RENDER_LIMIT
+        ? addOnlyAssetOverrides(instance.overrides)
+        : null
+      // Large imported models keep their original mesh as a stable base while
+      // additive edits are rendered by a small overlay. The full override
+      // array is still used by sceneEntityParts() for hit testing and export;
+      // this split only changes the viewport's render path.
+      const baseInstance: SceneInstance = incrementalAdds ? { ...instance, overrides: [] } : instance
+      const renderSignature = sceneInstanceRenderSignature(baseInstance)
+      const geometrySignature = sceneInstanceGeometrySignature(baseInstance)
       const existing = existingAssetGroups.get(instance.id)
       const canReuseGeometry = existing
         && existing.userData.assetRef === asset
@@ -7572,13 +7580,40 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         ? existing
         : existing && existing.userData.renderSignature === renderSignature && existing.userData.assetRef === asset
           ? existing
-          : buildAssetGroup(renderAsset, materialMap, instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ, true, `asset:${assetGreedyCacheToken(asset)}:${renderSignature}`, instance.rotationPivot)
+          : buildAssetGroup(renderAsset, materialMap, incrementalAdds ? [] : instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ, true, `asset:${assetGreedyCacheToken(asset)}:${renderSignature}`, instance.rotationPivot)
       if (instanceGroup !== existing) {
-        if (existing) {
-          group.remove(existing)
-          disposeThreeObject(existing)
+        // A large imported asset is built by the chunk worker. Keep the old
+        // group visible until every replacement mesh is ready; removing it
+        // first caused the characteristic disappear/reappear flash after
+        // every edit. Small/cell-rendered assets can still swap immediately.
+        const pendingGreedyGroups: THREE.Group[] = []
+        instanceGroup.traverse((object) => {
+          if (object instanceof THREE.Group && object.userData.greedyVoxels && !object.userData.prebuiltGreedyMesh) pendingGreedyGroups.push(object)
+        })
+        if (existing && pendingGreedyGroups.length) {
+          const pendingSignature = `${geometrySignature}|${incrementalAdds ? assetOverrideSignature(incrementalAdds) : ''}`
+          const alreadyPending = group.children.find((child): child is THREE.Group => child instanceof THREE.Group
+            && child.userData.assetRebuildPending
+            && child.userData.instanceId === instance.id
+            && child.userData.assetRebuildSignature === pendingSignature)
+          if (alreadyPending) {
+            // The previous frame already scheduled this exact rebuild.
+            disposeThreeObject(instanceGroup)
+          } else {
+            instanceGroup.visible = false
+            instanceGroup.userData.assetRebuildPending = true
+            instanceGroup.userData.assetRebuildSignature = pendingSignature
+            instanceGroup.userData.assetRebuildPrevious = existing
+            instanceGroup.userData.assetRebuildPendingCount = pendingGreedyGroups.length
+            group.add(instanceGroup)
+          }
+        } else {
+          if (existing) {
+            group.remove(existing)
+            disposeThreeObject(existing)
+          }
+          group.add(instanceGroup)
         }
-        group.add(instanceGroup)
       }
       retainedAssetIds.add(instance.id)
       const pivot = instance.rotationPivot ?? { x: 0, y: 0, z: 0 }
@@ -7587,6 +7622,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       instanceGroup.userData.renderSignature = renderSignature
       instanceGroup.userData.geometrySignature = geometrySignature
       instanceGroup.userData.assetRef = asset
+      syncAssetAdditionsOverlay(instanceGroup, renderAsset, materialMap, incrementalAdds ?? [], instance.partOffsets, instance.colorOverride, instance.mirror, instance.rotationPivot)
       syncAssetPartOffsets(instanceGroup, instance.partOffsets, instance.mirror)
       instanceGroup.traverse((object) => {
         object.userData.instanceId = instance.id
@@ -7791,6 +7827,22 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         addVoxelHighlight(greedyMesh)
       }
       if (renderSignature) object.userData.greedyMeshBuiltSignature = renderSignature
+      const replacementRoot = object.parent?.userData.assetRebuildPending ? object.parent as THREE.Group : undefined
+      if (replacementRoot) {
+        const remaining = Math.max(0, Number(replacementRoot.userData.assetRebuildPendingCount ?? 1) - 1)
+        replacementRoot.userData.assetRebuildPendingCount = remaining
+        if (remaining === 0) {
+          const previous = replacementRoot.userData.assetRebuildPrevious as THREE.Group | undefined
+          replacementRoot.visible = true
+          replacementRoot.userData.assetRebuildPending = false
+          delete replacementRoot.userData.assetRebuildPrevious
+          delete replacementRoot.userData.assetRebuildSignature
+          if (previous?.parent) {
+            previous.parent.remove(previous)
+            disposeThreeObject(previous)
+          }
+        }
+      }
       invalidateRenderRef.current()
     }
     group.traverse((object) => {
@@ -7811,7 +7863,19 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       const renderSignature = object.userData.renderSignature as string | undefined
       if (renderSignature && object.userData.greedyMeshBuiltSignature === renderSignature) return
       void client.build(scenePartId, revision, voxels, object.userData.greedyMeshCacheKey as string | undefined).then((payload) => {
-        if (cancelled || !payload || !object.parent) return
+        if (cancelled || !object.parent) return
+        if (!payload) {
+          const pendingRoot = object.parent.userData.assetRebuildPending ? object.parent as THREE.Group : undefined
+          if (pendingRoot) {
+            const previous = pendingRoot.userData.assetRebuildPrevious as THREE.Group | undefined
+            pendingRoot.visible = true
+            pendingRoot.userData.assetRebuildPending = false
+            if (pendingRoot.parent) pendingRoot.parent.remove(pendingRoot)
+            disposeThreeObject(pendingRoot)
+            if (previous?.parent) previous.visible = true
+          }
+          return
+        }
         // The worker emits coordinates in voxel units. Keep the transferable
         // buffers intact and let the shared attach path install the result.
         attachGreedyMesh(object, payload, colors, scenePartId, renderSignature, true)
@@ -9318,6 +9382,17 @@ function customComponentRenderOrigin(component: ReadonlyArray<Pick<Voxel, 'x' | 
 const CUSTOM_INSTANCE_RENDER_LIMIT = 16_384
 const assetBaseComponentsCache = new WeakMap<VoxelAsset, Array<{ partId: string; voxels: Voxel[] }>>()
 const assetGreedyCacheTokens = new WeakMap<VoxelAsset, number>()
+
+function addOnlyAssetOverrides(overrides: VoxelOverride[] | undefined): VoxelOverride[] | null {
+  if (!overrides?.length || overrides.some((override) => (override.mode ?? 'add') !== 'add')) return null
+  return overrides
+}
+
+function assetOverrideSignature(overrides: VoxelOverride[]): string {
+  return overrides
+    .map((voxel) => `${voxel.x},${voxel.y},${voxel.z},${voxel.materialId},${voxel.paintMaterialId ?? ''}`)
+    .join(';')
+}
 let nextAssetGreedyCacheToken = 1
 
 function assetGreedyCacheToken(asset: VoxelAsset): number {
@@ -9722,6 +9797,53 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
     group.add(partGroup)
   }
   return group
+}
+
+function syncAssetAdditionsOverlay(
+  instanceGroup: THREE.Group,
+  asset: VoxelAsset,
+  materialMap: Map<string, THREE.MeshStandardMaterial>,
+  additions: VoxelOverride[],
+  partOffsets: SceneInstance['partOffsets'],
+  colorOverride: string | undefined,
+  mirror: SceneInstance['mirror'],
+  rotationPivot: SceneInstance['rotationPivot'],
+): void {
+  const existing = instanceGroup.children.find((child) => child.name === 'asset-edit-additions')
+  if (!additions.length) {
+    if (existing) {
+      instanceGroup.remove(existing)
+      disposeThreeObject(existing)
+    }
+    instanceGroup.userData.assetAdditionsSignature = ''
+    return
+  }
+  const signature = assetOverrideSignature(additions)
+  if (existing && instanceGroup.userData.assetAdditionsSignature === signature) return
+  if (existing) {
+    instanceGroup.remove(existing)
+    disposeThreeObject(existing)
+  }
+  const partId = asset.parts[0] ?? '导入模型'
+  // Use the normal asset renderer for the small delta, but provide a
+  // synthetic asset containing only the newly added cells. It deliberately
+  // keeps the original dimensions and transform rules, so mirror, rotation,
+  // pivot and part offsets match the unchanged base mesh exactly.
+  const overlayAsset: VoxelAsset = {
+    ...asset,
+    id: `${asset.id}:edit-additions`,
+    source: 'moce-edit-additions',
+    parts: [partId],
+    partVoxels: undefined,
+    assembly: undefined,
+    voxels: additions.map((voxel) => ({ ...voxel, mode: undefined })),
+  }
+  const overlay = buildAssetGroup(overlayAsset, materialMap, [], partOffsets, 0, colorOverride, mirror, 0, 0, 0, false, undefined, rotationPivot)
+  overlay.name = 'asset-edit-additions'
+  overlay.userData.assetEditOverlay = true
+  overlay.userData.assetAdditionsSignature = signature
+  instanceGroup.add(overlay)
+  instanceGroup.userData.assetAdditionsSignature = signature
 }
 
 const rootElement = document.getElementById('root')!
