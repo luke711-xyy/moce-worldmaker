@@ -147,7 +147,15 @@ export function computeShell(input: GeometryVoxel[], thickness: number): VoxelGe
   shellKeys.forEach((cell) => {
     const [x, y, z] = cell.split(',').map(Number)
     const source = sourceMap.get(cell) ?? input[0]
-    output.push({ x, y, z, materialId: source.materialId, ...(source.paintMaterialId ? { paintMaterialId: source.paintMaterialId } : {}), ...(source.sourcePartId ? { sourcePartId: source.sourcePartId } : {}) })
+    output.push({
+      x,
+      y,
+      z,
+      materialId: source.materialId,
+      ...(source.paintMaterialId ? { paintMaterialId: source.paintMaterialId } : {}),
+      ...(source.entityId ? { entityId: source.entityId } : {}),
+      ...(source.sourcePartId ? { sourcePartId: source.sourcePartId } : {}),
+    })
   })
   const warnings = iterations <= thicknessInt ? ['模型厚度不足，当前结果退化为完整实体'] : []
   return result(output, warnings)

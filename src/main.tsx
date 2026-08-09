@@ -6926,8 +6926,8 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   // Position, custom-entity offsets and partial part offsets are applied by a
   // small transform pass; this key changes only when a mesh must be rebuilt.
   const sceneGeometryRenderKey = useMemo(
-    () => project.instances.map((instance) => `${instance.id}:${sceneInstanceGeometrySignature(instance)}`).join('\u001e'),
-    [project.instances],
+    () => `${project.instances.map((instance) => `${instance.id}:${sceneInstanceGeometrySignature(instance)}`).join('\u001e')}\u001fcustom:${project.customVoxels.length}`,
+    [project.instances, project.customVoxels, project.customVoxels.length],
   )
 
   useEffect(() => {
@@ -7869,7 +7869,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       // entities to visibly brighten or darken during a stroke.
     })
     invalidateRenderRef.current()
-  }, [sceneGeometryRenderKey, project.assemblies, selectedPartIds, checkedPartIds, editEntityId])
+  }, [sceneGeometryRenderKey, project.customVoxels, project.customVoxels.length, project.customColors, project.customVoxelRenderModes, project.assemblies, selectedPartIds, checkedPartIds, editEntityId])
 
   // HSL dragging is a render-only transaction. Instanced batches can update
   // their material color directly; worker-generated greedy meshes use the GPU
@@ -9457,6 +9457,18 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
       // rather than rebuilding the same large component after commit.
       componentGroup.userData.prebuiltGreedyMesh = prebuiltGeometry.mesh
       componentGroup.userData.prebuiltGreedyColors = prebuiltGeometry.mesh.materialKeys
+      // The prebuilt branch used to return before recording canonical local
+      // voxel coordinates. That left the selection pass without source cells,
+      // so a shell entity could render correctly but lose its outline after
+      // the preview mesh was attached.
+      componentGroup.userData.greedyVoxels = component.map((voxel) => ({
+        gx: voxel.x - origin.x,
+        gy: voxel.z - origin.z,
+        gz: voxel.y - origin.y,
+        materialId: 0,
+      }))
+      componentGroup.userData.greedyColors = prebuiltGeometry.mesh.materialKeys
+      componentGroup.userData.greedyDisabled = false
       pendingGeometryMeshCache.delete(entityId)
       return componentGroup
     }

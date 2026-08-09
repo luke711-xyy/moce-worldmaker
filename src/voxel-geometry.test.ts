@@ -41,13 +41,13 @@ describe('voxel geometry', () => {
 
   it('preserves local colors and source part ownership through shell generation', () => {
     const source = [
-      { ...voxel(0, 0, 0), materialId: '#111111', paintMaterialId: '#ff0000', sourcePartId: 'part-a' },
-      { ...voxel(1, 0, 0), materialId: '#222222', paintMaterialId: '#00ff00', sourcePartId: 'part-b' },
+      { ...voxel(0, 0, 0), materialId: '#111111', paintMaterialId: '#ff0000', entityId: 'entity-a', sourcePartId: 'part-a' },
+      { ...voxel(1, 0, 0), materialId: '#222222', paintMaterialId: '#00ff00', entityId: 'entity-a', sourcePartId: 'part-b' },
     ]
     const result = computeShell(source, 1)
     expect(result.voxels).toEqual(expect.arrayContaining([
-      expect.objectContaining({ x: 0, y: 0, z: 0, paintMaterialId: '#ff0000', sourcePartId: 'part-a' }),
-      expect.objectContaining({ x: 1, y: 0, z: 0, paintMaterialId: '#00ff00', sourcePartId: 'part-b' }),
+      expect.objectContaining({ x: 0, y: 0, z: 0, paintMaterialId: '#ff0000', entityId: 'entity-a', sourcePartId: 'part-a' }),
+      expect.objectContaining({ x: 1, y: 0, z: 0, paintMaterialId: '#00ff00', entityId: 'entity-a', sourcePartId: 'part-b' }),
     ]))
   })
 
