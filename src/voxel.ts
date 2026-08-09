@@ -338,6 +338,11 @@ export function voxelToWorld(value: number): number {
   return roundWorld(value * VOXEL_WORLD_SIZE)
 }
 
+/** Translate a stored world-space transform by an integer voxel delta. */
+export function translateWorldByVoxels(value: number, deltaVoxels: number): number {
+  return roundWorld(value + voxelToWorld(deltaVoxels))
+}
+
 export function voxelCenterToWorld(value: number): number {
   return roundWorld((value + 0.5) * VOXEL_WORLD_SIZE)
 }

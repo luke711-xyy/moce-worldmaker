@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceRotationPivot, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceRotationPivot, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, deleteAsset as deleteStoredAsset, deleteScene as deleteLibraryScene, duplicateScene, importScene, loadLibrary, loadScene, loadScenePreview, saveAsset, saveAssetCategories, saveScene, validateEntityFile } from './persistence'
 import { createAssetFile, createEntityFile, MoceAssetFile, MoceEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
@@ -2661,16 +2661,16 @@ function App() {
     const requestedZ = assetOriginGridCoordinate(z, asset?.depth ?? 1) - currentZ
     const bounds = sceneBoundsForProject(projectRef.current)
     const result = resolveGridMove(requestedX, requestedY, requestedZ, (deltaX, deltaY, deltaZ) => {
-      const candidate = { ...instance, x: snapAssetOrigin(instance.x + voxelToWorld(deltaX), asset?.width ?? 1), y: voxelToWorld(currentY + deltaY), z: snapAssetOrigin(instance.z + voxelToWorld(deltaZ), asset?.depth ?? 1) }
+      const candidate = { ...instance, x: translateWorldByVoxels(instance.x, deltaX), y: voxelToWorld(currentY + deltaY), z: translateWorldByVoxels(instance.z, deltaZ) }
       return (!asset || sceneVoxelsWithinBounds(resolveInstanceSceneVoxels(candidate, asset), bounds)) && !hasInstanceCollisionAt(instanceId, candidate.x, candidate.y ?? 0, candidate.z)
     })
     if (!result.moved) {
       if (result.blocked) setNotice('资产已抵达碰撞边界 · 该方向无法继续')
       return false
     }
-    const nextX = snapAssetOrigin(instance.x + voxelToWorld(result.deltaX), asset?.width ?? 1)
+    const nextX = translateWorldByVoxels(instance.x, result.deltaX)
     const nextY = voxelToWorld(currentY + result.deltaY)
-    const nextZ = snapAssetOrigin(instance.z + voxelToWorld(result.deltaZ), asset?.depth ?? 1)
+    const nextZ = translateWorldByVoxels(instance.z, result.deltaZ)
     updateProject((draft) => {
       const next = draft.instances.find((item) => item.id === instanceId)
       if (next) {
@@ -2867,9 +2867,9 @@ function App() {
       const movesWholeInstance = allParts.length > 0 && selectedParts.length === allParts.length && allParts.every((part) => movingIds?.has(part.id))
       if (movesWholeInstance) {
         const asset = nextProject.assets.find((item) => item.id === instance.assetId)
-        instance.x = snapAssetOrigin(instance.x + voxelToWorld(result.deltaX), asset?.width ?? 1)
+        instance.x = translateWorldByVoxels(instance.x, result.deltaX)
         instance.y = voxelToWorld(worldToVoxel(instance.y ?? 0) + result.deltaY)
-        instance.z = snapAssetOrigin(instance.z + voxelToWorld(result.deltaZ), asset?.depth ?? 1)
+        instance.z = translateWorldByVoxels(instance.z, result.deltaZ)
         return
       }
       const offsets = { ...(instance.partOffsets ?? {}) }
@@ -8970,7 +8970,6 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
           : [hitPart]
         const instanceId = hitPart.instanceId
         const instance = instanceId ? project.instances.find((item) => item.id === instanceId) : undefined
-        const asset = instance ? project.assets.find((item) => item.id === instance.assetId) : undefined
 
         const hitAssemblyIds = hitPart.assemblyIds ?? (hitPart.assemblyId ? [hitPart.assemblyId] : [])
         const selectedAssemblyRootIds = new Set(selectedParts.flatMap((part) => {
@@ -8995,7 +8994,6 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
             : !explicitMultiSelection
               && hitPart.kind === 'asset'
               && instanceId
-              && asset?.kind === 'imported'
               ? sceneParts.filter((part) => part.kind === 'asset' && part.instanceId === instanceId)
               : selectedParts
         const dragContainsAssembly = dragParts.some((part) => {
