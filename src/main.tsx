@@ -10000,6 +10000,18 @@ function scheduleInstancedVoxelMatrices(
       frameId = requestAnimationFrame(fillFrame)
       return
     }
+    // InstancedMesh caches its bounds after the first render. During the
+    // progressive upload the instance count grows from zero, so allowing
+    // Three.js to compute a bounding sphere in an intermediate frame would
+    // permanently cache a sphere around only the first uploaded slice. A
+    // later camera zoom/rotation could then frustum-cull the body while the
+    // independent selection outline remained visible. Recompute bounds only
+    // after every matrix has been written, then re-enable culling.
+    batches.forEach(({ mesh }) => {
+      mesh.computeBoundingBox()
+      mesh.computeBoundingSphere()
+      mesh.frustumCulled = true
+    })
     delete componentGroup.userData.cancelCellBuild
     const onComplete = componentGroup.userData.onCellBuildComplete as (() => void) | undefined
     onComplete?.()
@@ -10148,6 +10160,19 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
       configureInstancedVoxelPreviewMaterial(meshMaterial)
       const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, meshMaterial, end - start)
       mesh.count = 0
+      // The large-cell path uploads matrices and colors over several animation
+      // frames. Allocate the instance-color attribute before the first render
+      // so the material program is compiled with USE_INSTANCING_COLOR from
+      // the start. Initialize it to white until the real per-voxel colors are
+      // uploaded; an uninitialized attribute otherwise presents as black or
+      // makes the result depend on which frame first compiled the material.
+      mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array((end - start) * 3).fill(1), 3)
+      mesh.instanceColor.setUsage(THREE.DynamicDrawUsage)
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+      // Bounds are invalid until the final instance is uploaded. Keep the
+      // batch visible during progressive construction and let the completion
+      // callback compute a correct sphere before restoring frustum culling.
+      mesh.frustumCulled = false
       mesh.userData.customVoxels = component
       mesh.userData.customVoxelStart = start
       mesh.userData.customVoxelEnd = end
