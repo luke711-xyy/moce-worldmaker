@@ -794,7 +794,13 @@ function updateEditingBoundsVisuals(scene: THREE.Scene, bounds: SceneBounds) {
   scene.add(createGroundGrid(bounds), createGroundBoundary(bounds), createBoundaryBox(bounds))
 }
 
-function resolveGridMove(deltaX: number, deltaY: number, deltaZ: number, canOccupy: (deltaX: number, deltaY: number, deltaZ: number) => boolean): GridMoveResult {
+function resolveGridMove(
+  deltaX: number,
+  deltaY: number,
+  deltaZ: number,
+  canOccupy: (deltaX: number, deltaY: number, deltaZ: number) => boolean,
+  allowAxisSlide = true,
+): GridMoveResult {
   const requestedX = Math.round(deltaX)
   const requestedY = Math.round(deltaY)
   const requestedZ = Math.round(deltaZ)
@@ -815,6 +821,14 @@ function resolveGridMove(deltaX: number, deltaY: number, deltaZ: number, canOccu
       appliedZ = nextZ
       continue
     }
+
+    // Scene dragging must stop at the first blocked requested position. The
+    // old fallback below tried an alternate horizontal axis, which made a
+    // dragged entity appear to slip sideways through another entity and also
+    // caused a small release-time "flight" away from the cursor. Other
+    // callers (asset placement/custom movement) retain the legacy slide
+    // behavior through the default value.
+    if (!allowAxisSlide) break
 
     const candidates = [
       { axis: 'x', allowed: nextX !== appliedX && canOccupy(nextX, appliedY, appliedZ), remaining: Math.abs(requestedX - appliedX) },
@@ -2731,7 +2745,7 @@ function App() {
     const result = resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => {
       return translatedVoxelBoundsWithinScene(cachedBounds, bounds, stepX, stepY, stepZ)
         && !sceneOccupancyRef.current!.collidesTranslatedSceneParts(movableParts, { x: stepX, y: stepY, z: stepZ }, movingIds)
-    })
+    }, false)
     sceneMoveValidationRef.current = { project: currentProject, parts, deltaX, deltaY, deltaZ, result }
     return result
   }
@@ -6300,8 +6314,17 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
     const customGreedyVoxels = typeof mesh.userData.scenePartId === 'string' && mesh.userData.scenePartId.startsWith('custom:')
       ? greedyVoxels
       : undefined
-    edgeGeometry = customGreedyVoxels
-      ? createGreedyVoxelOutlineGeometry(customGreedyVoxels)
+    const importedAssetRoot = mesh.parent?.parent
+    const importedGreedyVoxels = importedAssetRoot?.userData.assetRef?.kind === 'imported'
+      ? greedyVoxels
+      : undefined
+    // Imported model voxel assets are editable cell fields, not a single
+    // smooth surface. Their selection frame must preserve every exposed unit
+    // voxel just like hand-drawn entities. The visible model can stay greedy
+    // meshed; only the selection/edit overlay uses the cell-accurate path.
+    const cellAccurateVoxels = customGreedyVoxels ?? importedGreedyVoxels
+    edgeGeometry = cellAccurateVoxels
+      ? createGreedyVoxelOutlineGeometry(cellAccurateVoxels)
       : workerOutlinePositions
       ? (() => {
           const geometry = new THREE.BufferGeometry()
@@ -8613,14 +8636,72 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     const group = groupRef.current
     if (!group) return []
     const requestedIds = new Set(partIds)
-    const roots: SelectGesture['visualRoots'] = []
+    const allPartRoots = new Map<string, THREE.Object3D>()
     group.traverse((object) => {
       const scenePartId = object.userData.scenePartId as string | undefined
       const parentPartId = object.parent?.userData.scenePartId as string | undefined
-      if (!scenePartId || !requestedIds.has(scenePartId) || parentPartId === scenePartId || object.userData.selectionGlow) return
-      roots.push({ object, startPosition: object.position.clone() })
+      if (!scenePartId || parentPartId === scenePartId || object.userData.selectionGlow) return
+      allPartRoots.set(scenePartId, object)
+    })
+    const partRoots = [...allPartRoots.entries()].filter(([scenePartId]) => requestedIds.has(scenePartId))
+    const findInstanceRoot = (partRoot: THREE.Object3D) => {
+      let current: THREE.Object3D | null = partRoot
+      while (current) {
+        if (typeof current.userData.instanceId === 'string') return current
+        current = current.parent
+      }
+      return undefined
+    }
+    const roots: SelectGesture['visualRoots'] = []
+    const seenRoots = new Set<THREE.Object3D>()
+    partRoots.forEach(([scenePartId, partRoot]) => {
+      const instanceRoot = findInstanceRoot(partRoot)
+      // A complete asset instance is committed by changing its root
+      // transform. Move that same root during the preview; moving a child
+      // part here and the instance root on pointer-up applies the delta twice.
+      // Partial part moves still use the part group because their commit is
+      // stored in instance.partOffsets.
+      const instancePartIds = instanceRoot
+        ? [...allPartRoots.entries()]
+          .filter(([, root]) => findInstanceRoot(root) === instanceRoot)
+          .map(([id]) => id)
+        : []
+      const visualRoot = instanceRoot && instancePartIds.every((id) => requestedIds.has(id))
+        ? instanceRoot
+        : partRoot
+      if (seenRoots.has(visualRoot)) return
+      seenRoots.add(visualRoot)
+      roots.push({ object: visualRoot, startPosition: visualRoot.position.clone() })
     })
     return roots
+  }
+
+  const updateSelectGestureAtPointer = (gesture: SelectGesture, event: { clientX: number; clientY: number }) => {
+    if (Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) > 5) gesture.moved = true
+    if (!gesture.moved) return
+    if (dragAxis === 'vertical') {
+      if (!setPointerRay(event)) return
+      const verticalPoint = getVerticalPoint(gesture.verticalPlane)
+      if (!verticalPoint) return
+      const deltaY = worldToVoxel(verticalPoint.z - gesture.startVerticalZ)
+      if (deltaY === gesture.lastDeltaY) return
+      const moveResult = onPreviewScenePartsMove(gesture.parts, 0, deltaY, 0)
+      gesture.lastDeltaX = moveResult.deltaX
+      gesture.lastDeltaY = moveResult.deltaY
+      gesture.lastDeltaZ = moveResult.deltaZ
+      setDragVisualOffset(gesture, moveResult.deltaX, moveResult.deltaY, moveResult.deltaZ)
+      return
+    }
+    const floorPoint = pointerFloorPoint(event)
+    if (!floorPoint) return
+    const deltaX = worldToVoxel(floorPoint.x - gesture.startGroundX)
+    const deltaZ = worldToVoxel(floorPoint.y - gesture.startGroundY)
+    if (deltaX === gesture.lastDeltaX && deltaZ === gesture.lastDeltaZ) return
+    const moveResult = onPreviewScenePartsMove(gesture.parts, deltaX, 0, deltaZ)
+    gesture.lastDeltaX = moveResult.deltaX
+    gesture.lastDeltaY = moveResult.deltaY
+    gesture.lastDeltaZ = moveResult.deltaZ
+    setDragVisualOffset(gesture, moveResult.deltaX, moveResult.deltaY, moveResult.deltaZ)
   }
 
   const setDragVisualOffset = (gesture: SelectGesture, deltaX: number, deltaY: number, deltaZ: number) => {
@@ -9063,32 +9144,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     }
     const selectGesture = selectGestureRef.current
     if (selectGesture?.pointerId === event.pointerId) {
-      if (Math.hypot(event.clientX - selectGesture.startX, event.clientY - selectGesture.startY) > 5) selectGesture.moved = true
-      if (!selectGesture.moved) return
-      const parts = selectGesture.parts
-      if (dragAxis === 'vertical') {
-        if (!setPointerRay(event)) return
-        const verticalPoint = getVerticalPoint(selectGesture.verticalPlane)
-        if (!verticalPoint) return
-        const deltaZ = worldToVoxel(verticalPoint.z - selectGesture.startVerticalZ)
-        if (deltaZ === selectGesture.lastDeltaY) return
-        const moveResult = onPreviewScenePartsMove(parts, 0, deltaZ, 0)
-        selectGesture.lastDeltaX = moveResult.deltaX
-        selectGesture.lastDeltaY = moveResult.deltaY
-        selectGesture.lastDeltaZ = moveResult.deltaZ
-        setDragVisualOffset(selectGesture, moveResult.deltaX, moveResult.deltaY, moveResult.deltaZ)
-        return
-      }
-      const floorPoint = pointerFloorPoint(event)
-      if (!floorPoint) return
-      const deltaX = worldToVoxel(floorPoint.x - selectGesture.startGroundX)
-      const deltaZ = worldToVoxel(floorPoint.y - selectGesture.startGroundY)
-      if (deltaX === selectGesture.lastDeltaX && deltaZ === selectGesture.lastDeltaZ) return
-      const moveResult = onPreviewScenePartsMove(parts, deltaX, 0, deltaZ)
-      selectGesture.lastDeltaX = moveResult.deltaX
-      selectGesture.lastDeltaY = moveResult.deltaY
-      selectGesture.lastDeltaZ = moveResult.deltaZ
-      setDragVisualOffset(selectGesture, moveResult.deltaX, moveResult.deltaY, moveResult.deltaZ)
+      updateSelectGestureAtPointer(selectGesture, event)
       return
     }
     const drawingGesture = drawingGestureRef.current
@@ -9206,6 +9262,11 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     const selectGesture = selectGestureRef.current
     if (selectGesture?.pointerId === event.pointerId) {
       selectGestureRef.current = null
+      // React pointerup can arrive before the final pointermove. Recompute
+      // from the release coordinate so the committed position is exactly the
+      // position represented by the mouse-up, not the previous animation
+      // frame's position.
+      updateSelectGestureAtPointer(selectGesture, event)
       commitDragGesture(selectGesture)
       setViewportInteraction(false)
       if (controlsRef.current) controlsRef.current.enabled = true
@@ -9271,6 +9332,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       if (selectGestureRef.current?.pointerId === event.pointerId) {
         const selectGesture = selectGestureRef.current
         selectGestureRef.current = null
+        updateSelectGestureAtPointer(selectGesture, event)
         commitDragGesture(selectGesture)
         setViewportInteraction(false)
         if (controlsRef.current) controlsRef.current.enabled = true
