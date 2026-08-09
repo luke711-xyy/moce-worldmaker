@@ -114,6 +114,14 @@ function validateSceneState(value: unknown): asserts value is PortableSceneState
       }
     })
   }
+  if (scene.customEntitySources !== undefined) {
+    const sources = requirePlainObject(scene.customEntitySources, 'scene.customEntitySources')
+    Object.entries(sources).forEach(([entityId, source]) => {
+      const item = requirePlainObject(source, `scene.customEntitySources.${entityId}`)
+      requireString(item.assetId, `scene.customEntitySources.${entityId}.assetId`)
+      if (item.categoryPath !== undefined) requireArray(item.categoryPath, `scene.customEntitySources.${entityId}.categoryPath`).forEach((value, index) => requireString(value, `scene.customEntitySources.${entityId}.categoryPath[${index}]`))
+    })
+  }
   if (scene.assemblies !== undefined) requireArray(scene.assemblies, 'scene.assemblies').forEach((assembly, index) => {
     const item = requirePlainObject(assembly, `scene.assemblies[${index}]`) as SceneAssembly
     requireString(item.id, `scene.assemblies[${index}].id`)

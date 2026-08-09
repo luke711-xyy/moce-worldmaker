@@ -59,6 +59,24 @@ describe('SceneOccupancyIndex', () => {
     expect(index.collidesTranslatedProjectVoxels(dense, { x: 1, y: 0, z: 0 }, ['dense'])).toBe(true)
   })
 
+  it('includes both owners base offsets and lazy translations in dense collision scans', () => {
+    const movingTopology = Array.from({ length: 5000 }, (_, x) => voxel(x, 0, 0))
+    const moving = { ...part('moving', movingTopology), sceneOffset: { x: 100, y: 0, z: 0 } }
+    const stationary = { ...part('stationary', [voxel(0, 0, 0)]), sceneOffset: { x: 5101, y: 0, z: 0 } }
+    const index = SceneOccupancyIndex.fromParts([moving, stationary])
+
+    // The moving entity occupies scene X=100..5099. A +2 move reaches X=5101.
+    // Because the moving side is larger, the optimized collision path scans
+    // the stationary side, whose voxel reference is already in scene space.
+    expect(index.collidesTranslatedSceneParts([moving], { x: 2, y: 0, z: 0 }, ['moving'])).toBe(true)
+    expect(index.collidesTranslatedSceneParts([moving], { x: 1, y: 0, z: 0 }, ['moving'])).toBe(false)
+
+    index.translateOwner('stationary', { x: 3, y: 0, z: 0 })
+    // The same check remains correct after the stationary owner has also been
+    // moved through the lazy transform path.
+    expect(index.collidesTranslatedSceneParts([moving], { x: 5, y: 0, z: 0 }, ['moving'])).toBe(true)
+  })
+
   it('checks canonical scene parts with lazy scene offsets without remapping their voxels', () => {
     const moving = { ...part('moving', [voxel(0, 0, 0)]), sceneOffset: { x: 10, y: 2, z: 3 } }
     const index = SceneOccupancyIndex.fromParts([moving, part('stationary', [voxel(12, 2, 3)])])

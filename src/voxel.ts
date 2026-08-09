@@ -95,6 +95,12 @@ export type ProjectState = {
   customVoxelRenderModes?: Record<string, 'cells' | 'greedy'>
   customColors?: Record<string, string>
   /**
+   * Provenance for scene-owned voxel entities created from a library template.
+   * This is metadata only: the scene geometry itself remains fully materialized
+   * in customVoxels and never reads the template at render or move time.
+   */
+  customEntitySources?: Record<string, { assetId: string; categoryPath?: string[] }>
+  /**
    * Lazy scene-space translation for manually authored entities. The voxel
    * arrays remain canonical and are only translated when a consumer needs
    * effective scene coordinates.

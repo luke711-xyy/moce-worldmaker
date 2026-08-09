@@ -378,6 +378,197 @@ type NormalizeStoredProjectOptions = {
   normalizeNaming?: boolean
 }
 
+/**
+ * Materialize an asset instance into scene-owned voxel entities.
+ *
+ * The asset library is a template catalog. Once an item enters a scene it
+ * must not retain the asset-instance transform semantics: those semantics use
+ * a centered asset origin, a separate part offset and a lazy scene mapping,
+ * while hand-drawn entities use one integer scene grid. Keeping both formats
+ * alive is what allowed a rendered drag position and the occupancy position to
+ * disagree. This conversion deliberately bakes the complete effective scene
+ * coordinate and the displayed color into customVoxels.
+ */
+function materializeProjectInstances(project: ProjectState): ProjectState {
+  if (!project.instances.length) return project
+
+  const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
+  const nextCustomVoxels = [...project.customVoxels]
+  const nextCustomColors = { ...(project.customColors ?? {}) }
+  const nextCustomSources = { ...(project.customEntitySources ?? {}) }
+  const nextCustomOffsets = { ...(project.customEntityOffsets ?? {}) }
+  const nextAssemblies = (project.assemblies ?? []).map((assembly) => ({ ...assembly, memberKeys: [...assembly.memberKeys] }))
+  const usedEntityIds = new Set(nextCustomVoxels.map((voxel) => voxelEntityId(voxel)))
+  const consumedNonTemplateAssetIds = new Set<string>()
+  const instancePartKeys = new Map<string, Map<string, string[]>>()
+  const remappedNames = { ...(project.entityNames ?? {}) }
+  const remappedNameModes = { ...(project.entityNameModes ?? {}) }
+  const remappedNameSequences = { ...(project.entityNameSequences ?? {}) }
+  const remappedNameParents = { ...(project.entityNameParents ?? {}) }
+  const remappedLockedKeys = new Set(project.lockedMemberKeys ?? [])
+  let generatedIndex = 1
+
+  const uniqueEntityId = (instanceId: string, partId: string) => {
+    const base = `voxel-${instanceId}-${partId.replace(/[^a-zA-Z0-9_-]+/g, '-') || 'entity'}`
+    let candidate = base
+    while (usedEntityIds.has(candidate)) candidate = `${base}-${generatedIndex++}`
+    usedEntityIds.add(candidate)
+    return candidate
+  }
+
+  const colorForInstanceVoxel = (instance: SceneInstance, asset: VoxelAsset, voxel: Voxel) => {
+    const variant = !asset.templateColor ? styleMaterialVariants[instance.style] : undefined
+    const renderAsset = variant ? { ...asset, color: variant.color, accent: variant.accent } : asset
+    const paintedColor = voxel.paintMaterialId
+      ? materialColorForVoxel(project, { ...voxel, materialId: voxel.paintMaterialId }, renderAsset)
+      : undefined
+    return paintedColor
+      ?? instance.colorOverride
+      ?? renderAsset.templateColor
+      ?? materialColorForVoxel(project, voxel, renderAsset)
+  }
+
+  const copyNameMetadata = (oldKey: string, newKey: string) => {
+    if (project.entityNames?.[oldKey] !== undefined) remappedNames[newKey] = project.entityNames[oldKey]
+    if (project.entityNameModes?.[oldKey] !== undefined) remappedNameModes[newKey] = project.entityNameModes[oldKey]
+    if (project.entityNameSequences?.[oldKey] !== undefined) remappedNameSequences[newKey] = project.entityNameSequences[oldKey]
+    if (project.entityNameParents?.[oldKey] !== undefined) remappedNameParents[newKey] = project.entityNameParents[oldKey]
+    if (remappedLockedKeys.has(oldKey)) {
+      remappedLockedKeys.delete(oldKey)
+      remappedLockedKeys.add(newKey)
+    }
+  }
+
+  project.instances.forEach((instance) => {
+    const asset = assetMap.get(instance.assetId)
+    if (!asset) return
+    if (asset.isTemplate !== true) consumedNonTemplateAssetIds.add(asset.id)
+
+    const resolvedPairs = instanceVoxelPairs(instance, asset)
+    // A non-assembly asset is one scene entity, regardless of how many
+    // internal component arrays the source asset used. Keeping those arrays
+    // separate here was one of the remaining differences between a hand
+    // drawn entity and a dragged template. Assemblies retain their explicit
+    // part boundaries below.
+    const componentPairs = new Map<string, Array<{ local: Voxel; scene: Voxel }>>()
+    if (asset.assembly) {
+      resolvedPairs.forEach((pair) => {
+        const list = componentPairs.get(pair.partId) ?? []
+        list.push(pair)
+        componentPairs.set(pair.partId, list)
+      })
+    } else {
+      componentPairs.set('__asset__', resolvedPairs)
+    }
+    const partKeyMap = new Map<string, string[]>()
+    instancePartKeys.set(instance.id, partKeyMap)
+    componentPairs.forEach((pairs, partId) => {
+      const entityId = uniqueEntityId(instance.id, partId)
+      const customVoxels = pairs.map(({ local, scene }) => {
+        // Paint is an asset-instance override. Once the instance is
+        // materialized, its displayed color is baked into materialId and the
+        // lazy override field must not survive into the custom-voxel path.
+        const { paintMaterialId: _paintMaterialId, ...sceneVoxel } = scene
+        return {
+          ...sceneVoxel,
+          materialId: colorForInstanceVoxel(instance, asset, local),
+          entityId,
+        }
+      })
+      nextCustomVoxels.push(...customVoxels)
+      partKeyMap.set(partId, [entityId])
+
+      const sourceAssetId = asset.isTemplate === true
+        ? asset.id
+        : asset.templateSourceId && project.assets.some((candidate) => candidate.id === asset.templateSourceId && candidate.isTemplate === true)
+          ? asset.templateSourceId
+          : undefined
+      if (sourceAssetId) {
+        const sourceAsset = assetMap.get(sourceAssetId)
+        nextCustomSources[entityId] = {
+          assetId: sourceAssetId,
+          ...(sourceAsset?.categoryPath ? { categoryPath: normalizeAssetCategoryPath(sourceAsset.categoryPath) } : {}),
+        }
+      }
+
+      copyNameMetadata(`asset:${instance.id}:${partId}`, `voxel:${entityId}`)
+      const previousRootNameKey = `asset:${instance.id}`
+      if (project.entityNames?.[previousRootNameKey] !== undefined && !remappedNames[`voxel:${entityId}`]) {
+        remappedNames[`voxel:${entityId}`] = project.entityNames[previousRootNameKey]
+      }
+      if (project.entityNameModes?.[previousRootNameKey] !== undefined && !remappedNameModes[`voxel:${entityId}`]) {
+        remappedNameModes[`voxel:${entityId}`] = project.entityNameModes[previousRootNameKey]
+      }
+    })
+
+    // Materialize an embedded asset assembly as ordinary scene assemblies and
+    // remap its part/child references to voxel:* keys.
+    if (asset.assembly) {
+      const assemblyMap = new Map<string, string>()
+      asset.assembly.nodes.forEach((node) => assemblyMap.set(node.id, `assembly-materialized-${instance.id}-${node.id}`))
+      asset.assembly.nodes.forEach((node) => {
+        const memberKeys = [...new Set(node.memberKeys.flatMap((memberKey) => {
+          if (memberKey.startsWith('assembly:')) {
+            const mapped = assemblyMap.get(memberKey.slice('assembly:'.length))
+            return mapped ? [`assembly:${mapped}`] : []
+          }
+          if (memberKey.startsWith('part:')) {
+            return (partKeyMap.get(memberKey.slice('part:'.length)) ?? []).map((entityId) => `voxel:${entityId}`)
+          }
+          return []
+        }))]
+        if (memberKeys.length >= 2) {
+          nextAssemblies.push({ id: assemblyMap.get(node.id)!, name: node.name || asset.assembly?.name || '装配体', memberKeys })
+        }
+      })
+    }
+  })
+
+  const remapAssetMemberKey = (memberKey: string): string[] => {
+    for (const [instanceId, partMap] of instancePartKeys) {
+      const prefix = `asset:${instanceId}:`
+      if (memberKey.startsWith(prefix)) {
+        const partId = memberKey.slice(prefix.length)
+        return (partMap.get(partId) ?? []).map((entityId) => `voxel:${entityId}`)
+      }
+      if (memberKey === `asset:${instanceId}`) {
+        return [...partMap.values()].flat().map((entityId) => `voxel:${entityId}`)
+      }
+    }
+    return [memberKey]
+  }
+  for (const assembly of nextAssemblies) {
+    assembly.memberKeys = [...new Set(assembly.memberKeys.flatMap(remapAssetMemberKey))]
+  }
+  for (const instanceId of instancePartKeys.keys()) {
+    const oldKeys = [`asset:${instanceId}`, ...[...instancePartKeys.get(instanceId)!.keys()].map((partId) => `asset:${instanceId}:${partId}`)]
+    oldKeys.forEach((oldKey) => {
+      const mapped = remapAssetMemberKey(oldKey)
+      if (remappedLockedKeys.has(oldKey)) {
+        remappedLockedKeys.delete(oldKey)
+        mapped.forEach((key) => remappedLockedKeys.add(key))
+      }
+    })
+  }
+
+  const assets = project.assets.filter((asset) => !consumedNonTemplateAssetIds.has(asset.id))
+  return {
+    ...project,
+    assets,
+    instances: [],
+    customVoxels: nextCustomVoxels,
+    customColors: nextCustomColors,
+    customEntitySources: nextCustomSources,
+    customEntityOffsets: nextCustomOffsets,
+    assemblies: nextAssemblies.filter((assembly) => assembly.memberKeys.length >= 2),
+    entityNames: remappedNames,
+    entityNameModes: remappedNameModes,
+    entityNameSequences: remappedNameSequences,
+    entityNameParents: remappedNameParents,
+    lockedMemberKeys: [...remappedLockedKeys],
+  }
+}
+
 function normalizeStoredProject(loaded: ProjectState, options: NormalizeStoredProjectOptions = {}): ProjectState {
   const migrated = isLegacyDefaultSampleProject(loaded) ? migrateLegacyDefaultSampleProject(loaded) : loaded
   const defaultAssets = new Map(makeDefaultProject().assets.map((asset) => [asset.id, asset]))
@@ -405,6 +596,10 @@ function normalizeStoredProject(loaded: ProjectState, options: NormalizeStoredPr
       return renderModes
     })(),
     customColors: { ...(migrated.customColors ?? {}) },
+    customEntitySources: Object.fromEntries(Object.entries(migrated.customEntitySources ?? {}).map(([entityId, source]) => [entityId, {
+      assetId: source.assetId,
+      ...(source.categoryPath ? { categoryPath: normalizeAssetCategoryPath(source.categoryPath) } : {}),
+    }])),
     customEntityOffsets: Object.fromEntries(Object.entries(migrated.customEntityOffsets ?? {}).map(([entityId, offset]) => [entityId, {
       x: Math.round(offset.x),
       y: Math.round(offset.y),
@@ -438,6 +633,19 @@ function normalizeStoredProject(loaded: ProjectState, options: NormalizeStoredPr
       }])),
     }
   })
+  const materialized = materializeProjectInstances(normalized)
+  normalized.assets = materialized.assets
+  normalized.instances = materialized.instances
+  normalized.customVoxels = materialized.customVoxels
+  normalized.customColors = materialized.customColors
+  normalized.customEntitySources = materialized.customEntitySources
+  normalized.customEntityOffsets = materialized.customEntityOffsets
+  normalized.assemblies = materialized.assemblies
+  normalized.entityNames = materialized.entityNames
+  normalized.entityNameModes = materialized.entityNameModes
+  normalized.entityNameSequences = materialized.entityNameSequences
+  normalized.entityNameParents = materialized.entityNameParents
+  normalized.lockedMemberKeys = materialized.lockedMemberKeys
   // Scene-library previews are read-only. Avoid the expensive deep clone and
   // full naming traversal there; the stored scene already contains its tree
   // names, while the editable project path still keeps the full normalization.
@@ -456,6 +664,9 @@ function normalizeStoredProject(loaded: ProjectState, options: NormalizeStoredPr
  * scene collections.
  */
 function finalizeVoxelStrokeProject(project: ProjectState): ProjectState {
+  // The live editor has one scene-entity representation only. Never publish
+  // an obsolete instance payload from a stroke transaction.
+  if (project.instances.length) return normalizeStoredProject(project, { normalizeNaming: false })
   if (isLegacyDefaultSampleProject(project)) return normalizeStoredProject(project)
   const customVoxels = project.customVoxels.some((voxel) => !voxel.entityId)
     ? project.customVoxels.map((voxel, index) => ({ ...voxel, entityId: voxel.entityId ?? `legacy-${voxel.x}-${voxel.y}-${voxel.z}-${index}` }))
@@ -494,6 +705,9 @@ function cloneProjectForMutation(source: ProjectState, options: { shareCatalogs?
     customVoxels: [...source.customVoxels],
     customVoxelRenderModes: source.customVoxelRenderModes ? { ...source.customVoxelRenderModes } : undefined,
     customColors: source.customColors ? { ...source.customColors } : undefined,
+    customEntitySources: source.customEntitySources
+      ? Object.fromEntries(Object.entries(source.customEntitySources).map(([entityId, source]) => [entityId, { ...source, categoryPath: source.categoryPath ? [...source.categoryPath] : undefined }]))
+      : undefined,
     customEntityOffsets: source.customEntityOffsets
       ? Object.fromEntries(Object.entries(source.customEntityOffsets).map(([entityId, offset]) => [entityId, { ...offset }]))
       : undefined,
@@ -1276,6 +1490,16 @@ function App() {
   }, [editEntityId, project.assemblies, sceneParts])
   const assetTransformCacheRef = useRef<AssetTransformCache | null>(null)
   if (!assetTransformCacheRef.current) assetTransformCacheRef.current = new AssetTransformCache()
+  // Placement used to validate against AssetTransformCache while the final
+  // commit used instanceVoxelPairs(). Those are different representations:
+  // one is centered/render-oriented and the other is scene-grid oriented.
+  // Keep one canonical, scene-grid pair list per asset for the whole drag.
+  const placementGeometryCacheRef = useRef(new WeakMap<VoxelAsset, {
+    originX: number
+    originZ: number
+    pairs: Array<{ partId: string; local: Voxel; scene: Voxel }>
+    bounds: GridVoxelBounds | null
+  }>())
   const sceneOccupancyRef = useRef<SceneOccupancyIndex | null>(null)
   if (!sceneOccupancyRef.current) sceneOccupancyRef.current = SceneOccupancyIndex.fromParts(sceneParts)
   const skipSceneOccupancySyncRef = useRef(false)
@@ -1333,11 +1557,20 @@ function App() {
     .map((instance) => [instance.assetId, project.assets.find((asset) => asset.id === instance.assetId)])
     .filter((entry): entry is [string, VoxelAsset] => Boolean(entry[1]))).values()]
   const selectedSourceAsset = selectedAsset ?? (selectedSourceAssets.length === 1 ? selectedSourceAssets[0] : undefined)
-  const selectedTemplateSource = selectedSourceAsset?.isTemplate === true
-    ? selectedSourceAsset
-    : selectedSourceAsset?.templateSourceId
-      ? project.assets.find((asset) => asset.id === selectedSourceAsset.templateSourceId && asset.isTemplate === true)
-      : undefined
+  const selectedCustomSourceAssets = [...new Map(selectedEntityParts
+    .filter((part) => part.kind === 'custom')
+    .map((part) => project.customEntitySources?.[part.partId]?.assetId)
+    .filter((assetId): assetId is string => Boolean(assetId))
+    .map((assetId) => [assetId, project.assets.find((asset) => asset.id === assetId && asset.isTemplate === true)])
+    .filter((entry): entry is [string, VoxelAsset] => Boolean(entry[1]))).values()]
+  const selectedTemplateSources = [...new Map([
+    ...(selectedSourceAsset?.isTemplate === true ? [[selectedSourceAsset.id, selectedSourceAsset] as [string, VoxelAsset]] : []),
+    ...(selectedSourceAsset?.templateSourceId
+      ? [[selectedSourceAsset.templateSourceId, project.assets.find((asset) => asset.id === selectedSourceAsset.templateSourceId && asset.isTemplate === true)] as [string, VoxelAsset]]
+      : []),
+    ...selectedCustomSourceAssets.map((asset) => [asset.id, asset] as [string, VoxelAsset]),
+  ].filter((entry): entry is [string, VoxelAsset] => Boolean(entry[1]))).values()]
+  const selectedTemplateSource = selectedTemplateSources.length === 1 ? selectedTemplateSources[0] : undefined
   const selectedSource = multipleSelected
     ? '多个来源'
     : selectedTemplateSource
@@ -1644,18 +1877,25 @@ function App() {
 
   const commitScenePartsMoveFast = (nextProject: ProjectState, movableParts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => {
     if (geometryApplyingRef.current) return
+    // Large custom moves intentionally bypass the normalizer. Keep the
+    // materialized-scene invariant explicit for any obsolete caller that
+    // might still hand this fast path an instance payload.
+    const publishedProject = nextProject.instances.length
+      ? normalizeStoredProject(nextProject, { normalizeNaming: false })
+      : nextProject
     pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(projectRef.current))
     historyRef.current.future = []
-    movableParts.forEach((part) => {
+    if (publishedProject === nextProject) movableParts.forEach((part) => {
       // A move preserves the owner's topology. Let the occupancy index keep
       // its existing chunk data and record only the transform; this removes
       // the release-time O(n) voxel remove/reinsert for large entities.
       sceneOccupancyRef.current?.translateOwner(part.id, { x: deltaX, y: deltaY, z: deltaZ })
     })
+    if (publishedProject !== nextProject) sceneOccupancyRef.current?.syncParts(sceneEntityParts(publishedProject))
     // We already updated only the moved owners above. Avoid a second full
     // scene synchronization when the new React project reaches the effect.
     skipSceneOccupancySyncRef.current = true
-    projectRef.current = nextProject
+    projectRef.current = publishedProject
     markSceneDirty()
     // The Three.js drag preview already moved the scene graph imperatively and
     // the occupancy index/history are updated above. Publishing the React
@@ -1664,7 +1904,7 @@ function App() {
     // large entity. A normal synchronous update here made release latency grow
     // with the selected model even though no voxel geometry was rebuilt.
     startTransition(() => {
-      setProject(nextProject)
+      setProject(publishedProject)
       setHistoryRevision((value) => value + 1)
     })
   }
@@ -2180,6 +2420,9 @@ function App() {
         if (draft.customEntityOffsets) {
           draft.customEntityOffsets = Object.fromEntries(Object.entries(draft.customEntityOffsets).filter(([entityId]) => remainingEntityIds.has(entityId)))
         }
+        if (draft.customEntitySources) {
+          draft.customEntitySources = Object.fromEntries(Object.entries(draft.customEntitySources).filter(([entityId]) => remainingEntityIds.has(entityId)))
+        }
         // Removing one child must not remove the whole assembly. The previous
         // implementation filtered an assembly out whenever the erased child
         // no longer had voxels, even when the assembly still contained its
@@ -2445,6 +2688,73 @@ function App() {
     return sceneOccupancyRef.current!.collidesTranslatedProjectVoxels(transformed.localVoxels, translation, excludedOwnerIds)
   }
 
+  const placementGeometryFor = (asset: VoxelAsset) => {
+    const cached = placementGeometryCacheRef.current.get(asset)
+    if (cached) return cached
+    const originX = snapAssetOrigin(0, asset.width)
+    const originZ = snapAssetOrigin(0, asset.depth)
+    const canonicalInstance: SceneInstance = {
+      id: 'placement-canonical',
+      assetId: asset.id,
+      x: originX,
+      y: 0,
+      z: originZ,
+      rotation: 0,
+      style: asset.style,
+      visible: true,
+      overrides: [],
+    }
+    const pairs = instanceVoxelPairs(canonicalInstance, asset)
+    const next = {
+      originX,
+      originZ,
+      pairs,
+      bounds: gridVoxelBounds(pairs.map((pair) => pair.scene)),
+    }
+    placementGeometryCacheRef.current.set(asset, next)
+    return next
+  }
+
+  const placementDeltaFor = (asset: VoxelAsset, x: number, y: number, z: number) => {
+    const geometry = placementGeometryFor(asset)
+    return {
+      x: assetOriginGridCoordinate(x, asset.width) - assetOriginGridCoordinate(geometry.originX, asset.width),
+      y: worldToVoxel(y),
+      z: assetOriginGridCoordinate(z, asset.depth) - assetOriginGridCoordinate(geometry.originZ, asset.depth),
+    }
+  }
+
+  const placementPairsAt = (asset: VoxelAsset, x: number, y: number, z: number) => {
+    const geometry = placementGeometryFor(asset)
+    const delta = placementDeltaFor(asset, x, y, z)
+    return geometry.pairs.map((pair) => ({
+      ...pair,
+      scene: {
+        ...pair.scene,
+        x: pair.scene.x + delta.x,
+        y: pair.scene.y + delta.y,
+        z: pair.scene.z + delta.z,
+      },
+    }))
+  }
+
+  const placementAssetWithinSceneBoundary = (asset: VoxelAsset, x: number, y: number, z: number) => {
+    const geometry = placementGeometryFor(asset)
+    const bounds = sceneBoundsForProject(projectRef.current)
+    if (!geometry.bounds) return true
+    const delta = placementDeltaFor(asset, x, y, z)
+    return translatedVoxelBoundsWithinScene(geometry.bounds, bounds, delta.x, delta.y, delta.z)
+  }
+
+  const hasPlacementAssetCollisionAt = (asset: VoxelAsset, x: number, y: number, z: number) => {
+    const geometry = placementGeometryFor(asset)
+    const delta = placementDeltaFor(asset, x, y, z)
+    return sceneOccupancyRef.current!.collidesTranslatedProjectVoxels(
+      geometry.pairs.map((pair) => pair.scene),
+      delta,
+    )
+  }
+
   const hasInstanceCollisionAt = (instanceId: string, x: number, y: number, z: number) => {
     const currentProject = projectRef.current
     const movingInstance = currentProject.instances.find((instance) => instance.id === instanceId)
@@ -2553,46 +2863,64 @@ function App() {
     setPendingEntityImport(null)
   }
 
-  const assetWithinSceneBoundary = (asset: VoxelAsset, x: number, y: number, z: number) => {
-    const bounds = sceneBoundsForProject(projectRef.current)
-    const previewInstance: SceneInstance = { id: 'placement-preview', assetId: asset.id, x, y, z, rotation: 0, style: asset.style, visible: true, overrides: [] }
-    return sceneVoxelsWithinBounds(assetTransformCacheRef.current!.resolve(previewInstance, asset), bounds)
-  }
-
   const previewPlacementAt = (assetId: string, x: number, z: number): PlacementPreview | null => {
     const asset = projectRef.current.assets.find((item) => item.id === assetId) ?? (pendingEntityImport?.asset.id === assetId ? pendingEntityImport.asset : undefined)
     if (!asset) return null
     const position = { assetId, x: snapAssetOrigin(x, asset.width), y: 0, z: snapAssetOrigin(z, asset.depth) }
-    return { ...position, valid: assetWithinSceneBoundary(asset, position.x, position.y, position.z) && !hasAssetCollisionAt(asset, position.x, position.y, position.z) }
+    return { ...position, valid: placementAssetWithinSceneBoundary(asset, position.x, position.y, position.z) && !hasPlacementAssetCollisionAt(asset, position.x, position.y, position.z) }
   }
 
   const placeAssetAt = (assetId: string, x: number, z: number) => {
     const asset = projectRef.current.assets.find((item) => item.id === assetId) ?? (pendingEntityImport?.asset.id === assetId ? pendingEntityImport.asset : undefined)
     if (!asset) return
     const position = { x: snapAssetOrigin(x, asset.width), y: 0, z: snapAssetOrigin(z, asset.depth) }
-    const outsideBoundary = !assetWithinSceneBoundary(asset, position.x, position.y, position.z)
-    if (outsideBoundary || hasAssetCollisionAt(asset, position.x, position.y, position.z)) {
+    const outsideBoundary = !placementAssetWithinSceneBoundary(asset, position.x, position.y, position.z)
+    if (outsideBoundary || hasPlacementAssetCollisionAt(asset, position.x, position.y, position.z)) {
       setNotice(outsideBoundary ? `无法放置资产 · ${asset.name} 超出场景边界` : `无法放置资产 · ${asset.name} 与已有实体重叠`)
       endPlacement()
       return
     }
     const instanceId = `instance-${asset.id}-${Date.now()}`
-    // A placed scene instance must own an immutable snapshot. Otherwise later
-    // edits to the template asset (name, color, or geometry) leak into entities
-    // that already exist in the scene.
-    const sceneAsset: VoxelAsset = {
-      // Asset voxel arrays are treated as immutable throughout ProjectState.
-      // Share the read-only topology when creating a scene snapshot instead
-      // of structured-cloning every voxel on the pointer-up path; subsequent
-      // updateProject() calls clone the project before any mutation.
-      ...asset,
-      parts: asset.parts ? [...asset.parts] : asset.parts,
-      partVoxels: asset.partVoxels ? { ...asset.partVoxels } : asset.partVoxels,
-      id: `scene-asset-${instanceId}`,
-      source: asset.isTemplate === true ? '资产库实例快照' : (asset.source ?? '场景实体实例快照'),
-      isTemplate: false,
-      templateSourceId: asset.isTemplate === true ? asset.id : asset.templateSourceId,
-    }
+    // Do not create a SceneInstance here. Resolve the asset once at placement
+    // time and store the effective scene cells as ordinary custom voxels. This
+    // makes a dragged template, a model import and a hand-drawn entity share
+    // exactly the same render, hit-test, move and collision representation.
+    const placementInstance: SceneInstance = { id: instanceId, assetId: asset.id, ...position, rotation: 0, style: asset.style, visible: true, overrides: [] }
+    // Use the exact pair list that powered the placement boundary and
+    // collision checks. This removes the last preview/commit coordinate split.
+    const allPairs = placementPairsAt(asset, position.x, position.y, position.z)
+    const groupedPairs = asset.assembly
+      ? [...allPairs.reduce((groups, pair) => {
+        const list = groups.get(pair.partId) ?? []
+        list.push(pair)
+        groups.set(pair.partId, list)
+        return groups
+      }, new Map<string, Array<{ local: Voxel; scene: Voxel }>>()).entries()]
+      : [['__asset__', allPairs] as const]
+    const usedEntityIds = new Set(projectRef.current.customVoxels.map((voxel) => voxelEntityId(voxel)))
+    const materializedParts = groupedPairs.map(([partId, pairs], index) => {
+      const baseId = `voxel-${instanceId}-${index + 1}`
+      let entityId = baseId
+      let suffix = 2
+      while (usedEntityIds.has(entityId)) entityId = `${baseId}-${suffix++}`
+      usedEntityIds.add(entityId)
+      const voxels = pairs.map(({ local, scene }) => {
+        const variant = !asset.templateColor ? styleMaterialVariants[placementInstance.style] : undefined
+        const renderAsset = variant ? { ...asset, color: variant.color, accent: variant.accent } : asset
+        const paintedColor = local.paintMaterialId
+          ? materialColorForVoxel(projectRef.current, { ...local, materialId: local.paintMaterialId }, renderAsset)
+          : undefined
+        const { paintMaterialId: _paintMaterialId, ...sceneVoxel } = scene
+        return {
+          ...sceneVoxel,
+          materialId: paintedColor
+            ?? asset.templateColor
+            ?? materialColorForVoxel(projectRef.current, local, renderAsset),
+          entityId,
+        }
+      })
+      return { partId, entityId, voxels }
+    })
     let placedRootAssemblyId = ''
     let placedMemberKeys: string[] = []
     let editTargetAfterPlacement = editEntityId ?? ''
@@ -2603,27 +2931,76 @@ function App() {
       ? editEntityId.slice('assembly:'.length)
       : editingPart?.assemblyIds?.[0]
     updateProject((draft) => {
-      draft.assets.push(sceneAsset)
-      draft.instances.push({ id: instanceId, assetId: sceneAsset.id, ...position, rotation: 0, style: sceneAsset.style, visible: true, overrides: [] })
-      if (sceneAsset.assembly) {
-        const nodeIds = new Map(sceneAsset.assembly.nodes.map((node) => [node.id, `assembly-${instanceId}-${node.id}`]))
-        sceneAsset.assembly.nodes.forEach((node) => {
+      draft.customVoxels.push(...materializedParts.flatMap((part) => part.voxels))
+      // The scene representation is intentionally the same ordinary voxel
+      // representation used by hand-drawn entities, but that must not erase
+      // the source asset's identity. Imported models carry their filename in
+      // VoxelAsset.name; persist it on the new scene entity before the naming
+      // normalizer runs so it survives later edits, save/open, and reload.
+      // Assembly children keep the assembly naming scheme below, while a
+      // non-assembly asset is one scene entity and uses the asset name as its
+      // initial display name.
+      if (!asset.assembly && materializedParts.length === 1) {
+        const memberKey = `voxel:${materializedParts[0].entityId}`
+        draft.entityNames = { ...(draft.entityNames ?? {}), [memberKey]: asset.name }
+        // Imported model assets may be added while another entity is being
+        // edited, which places the new part under an assembly. Mark only this
+        // model-derived name as explicit so the hierarchical auto-namer does
+        // not turn it back into “手动体素实体 …”. Hand-drawn entities and
+        // ordinary template entities keep the established auto-name rules.
+        const importedModel = asset.kind === 'imported'
+          && asset.isTemplate !== true
+          && asset.source !== undefined
+          && asset.source !== '场景实体保存'
+          && !asset.source.includes('拆分子实体')
+        if (importedModel) draft.entityNameModes = { ...(draft.entityNameModes ?? {}), [memberKey]: 'custom' }
+      }
+      if (draft.customEntitySources) {
+        const sourceAsset = asset.isTemplate === true
+          ? asset
+          : asset.templateSourceId
+            ? draft.assets.find((candidate) => candidate.id === asset.templateSourceId && candidate.isTemplate === true)
+            : undefined
+        if (sourceAsset) {
+          materializedParts.forEach((part) => {
+            draft.customEntitySources![part.entityId] = {
+              assetId: sourceAsset.id,
+              categoryPath: normalizeAssetCategoryPath(sourceAsset.categoryPath),
+            }
+          })
+        }
+      } else if (asset.isTemplate === true) {
+        draft.customEntitySources = Object.fromEntries(materializedParts.map((part) => [part.entityId, {
+          assetId: asset.id,
+          categoryPath: normalizeAssetCategoryPath(asset.categoryPath),
+        }]))
+      }
+      // Imported model assets are transient placement sources. Remove them
+      // after materialization; template assets remain in the library.
+      if (asset.isTemplate !== true) draft.assets = draft.assets.filter((candidate) => candidate.id !== asset.id)
+      if (asset.assembly) {
+        const nodeIds = new Map(asset.assembly.nodes.map((node) => [node.id, `assembly-${instanceId}-${node.id}`]))
+        const partIds = new Map(materializedParts.map((part) => [part.partId, part.entityId]))
+        asset.assembly.nodes.forEach((node) => {
           const memberKeys = [...new Set(node.memberKeys.flatMap((memberKey) => {
             if (memberKey.startsWith('assembly:')) {
               const mapped = nodeIds.get(memberKey.slice('assembly:'.length))
               return mapped ? [`assembly:${mapped}`] : []
             }
-            if (memberKey.startsWith('part:')) return [`asset:${instanceId}:${memberKey.slice('part:'.length)}`]
+            if (memberKey.startsWith('part:')) {
+              const entityId = partIds.get(memberKey.slice('part:'.length))
+              return entityId ? [`voxel:${entityId}`] : []
+            }
             return []
           }))]
           if (memberKeys.length < 2) return
           const sceneAssemblyId = nodeIds.get(node.id)!
-          draft.assemblies = [...(draft.assemblies ?? []), { id: sceneAssemblyId, name: node.name || sceneAsset.assembly?.name || '装配体', memberKeys }]
+          draft.assemblies = [...(draft.assemblies ?? []), { id: sceneAssemblyId, name: node.name || asset.assembly?.name || '装配体', memberKeys }]
         })
-        placedRootAssemblyId = nodeIds.get(sceneAsset.assembly.rootId) ?? ''
+        placedRootAssemblyId = nodeIds.get(asset.assembly.rootId) ?? ''
         placedMemberKeys = placedRootAssemblyId ? [`assembly:${placedRootAssemblyId}`] : []
       } else {
-        placedMemberKeys = resolveInstanceComponents(asset, []).map(({ partId }) => `asset:${instanceId}:${partId}`)
+        placedMemberKeys = materializedParts.map((part) => `voxel:${part.entityId}`)
       }
       if (editEntityId && placedMemberKeys.length) {
         let targetAssemblyId = existingEditAssemblyId
@@ -2644,7 +3021,7 @@ function App() {
       setEditEntityId(editTargetAfterPlacement)
       setCheckedTreePartIds([editTargetAfterPlacement])
       setSelectedId(editTargetAfterPlacement)
-    } else setSelectedId(placedRootAssemblyId ? `assembly:${placedRootAssemblyId}` : instanceId)
+    } else setSelectedId(placedRootAssemblyId ? `assembly:${placedRootAssemblyId}` : materializedParts.length === 1 ? `custom:${materializedParts[0].entityId}` : `custom:${materializedParts[0]?.entityId ?? ''}`)
     setNotice(`已放置资产 · ${asset.name}`)
     endPlacement()
   }
@@ -2726,7 +3103,13 @@ function App() {
       && sceneMoveBoundsRef.current.sourceParts === parts
       ? sceneMoveBoundsRef.current
       : null
+    const currentSceneParts = sceneEntityParts(currentProject)
     const currentParts = resolveCurrentSceneParts(parts)
+    // The index keeps pure moves as lazy owner translations. Reconcile those
+    // translations against the latest project offsets before every drag
+    // validation so a transition/undo cannot leave collision coordinates one
+    // move behind the rendered scene.
+    sceneOccupancyRef.current?.syncOwnerTransforms(currentSceneParts)
     const movableParts = currentParts.filter((part) => !scenePartIsLocked(currentProject, part))
     if (!movableParts.length) {
       const result = { moved: false, blocked: true, deltaX: 0, deltaY: 0, deltaZ: 0 }
@@ -2773,6 +3156,7 @@ function App() {
       && sceneMoveBoundsRef.current.sourceParts === parts
       ? sceneMoveBoundsRef.current.parts
       : resolveCurrentSceneParts(parts)
+    sceneOccupancyRef.current?.syncOwnerTransforms(sceneEntityParts(projectRef.current))
     const movableParts = effectiveParts.filter((part) => !scenePartIsLocked(projectRef.current, part))
     // The preview result is only a proposal. Re-check against the current
     // project/index immediately before mutating either one. This closes the
@@ -3176,7 +3560,8 @@ function App() {
     requestSceneReplace(async () => {
       const next = normalizeStoredProject(makeDefaultProject())
       replaceProject(next)
-      setSelectedId('inst-chinese')
+      const firstPart = sceneEntityParts(next)[0]
+      setSelectedId(firstPart?.id ?? '')
       setEditEntityId(null)
       setCheckedTreePartIds([])
       markSceneSaved(next, null)
@@ -3511,6 +3896,7 @@ function App() {
         instances: source.instances.filter((instance) => !removedInstanceIds.has(instance.id)),
         customVoxels: source.customVoxels.filter((voxel) => !removedVoxelEntityIds.has(voxelEntityId(voxel))),
         customEntityOffsets: Object.fromEntries(Object.entries(source.customEntityOffsets ?? {}).filter(([entityId]) => !removedVoxelEntityIds.has(entityId))),
+        customEntitySources: Object.fromEntries(Object.entries(source.customEntitySources ?? {}).filter(([entityId]) => !removedVoxelEntityIds.has(entityId))),
         assemblies: (source.assemblies ?? [])
           .filter((assembly) => !removedAssemblyIds.has(assembly.id))
           .map((assembly) => ({
@@ -4013,6 +4399,7 @@ function App() {
     const nextCustomVoxels = [...sourceProject.customVoxels]
     const nextCustomColors = { ...(sourceProject.customColors ?? {}) }
     const nextCustomVoxelRenderModes = { ...(sourceProject.customVoxelRenderModes ?? {}) }
+    const nextCustomEntitySources = { ...(sourceProject.customEntitySources ?? {}) }
     const nextAssemblies = [...(sourceProject.assemblies ?? [])]
     let nextAssemblySequence = sourceProject.assemblySequence ?? 1
     const createdInstanceIds = new Set<string>()
@@ -4056,6 +4443,8 @@ function App() {
           if (sourceProject.customColors?.[oldId]) nextCustomColors[newId] = sourceProject.customColors[oldId]
           const renderMode = sourceProject.customVoxelRenderModes?.[oldId]
           if (renderMode) nextCustomVoxelRenderModes[newId] = renderMode
+          const source = sourceProject.customEntitySources?.[oldId]
+          if (source) nextCustomEntitySources[newId] = { ...source, categoryPath: source.categoryPath ? [...source.categoryPath] : undefined }
         })
         const assemblyMapForCopy = new Map<string, string>(); [...assemblyTreeIds].forEach((oldId) => assemblyMapForCopy.set(oldId, `assembly-${copyBatchId}-${copyIndex + 1}-${oldId}`))
         const mapLeafKey = (memberKey: string) => { for (const [oldId, newId] of instanceMap) if (memberKey === `asset:${oldId}` || memberKey.startsWith(`asset:${oldId}:`)) return memberKey.replace(`asset:${oldId}`, `asset:${newId}`); for (const [oldId, newId] of customMap) if (memberKey === `voxel:${oldId}`) return `voxel:${newId}`; return memberKey }
@@ -4063,7 +4452,7 @@ function App() {
         ;[...assemblyTreeIds].forEach((oldId) => { const sourceAssembly = assemblyMap.get(oldId); if (!sourceAssembly) return; const number = Math.max(1, nextAssemblySequence++); nextAssemblies.push({ ...sourceAssembly, id: assemblyMapForCopy.get(oldId)!, nameMode: 'auto', sequence: undefined, parentAssemblyId: undefined, name: `装配体 ${number}`, memberKeys: sourceAssembly.memberKeys.map(mapMemberKey) }) })
         if (!firstSelection) firstSelection = rootAssemblyIds[0] ? `assembly:${assemblyMapForCopy.get(rootAssemblyIds[0])}` : clonedInstanceIds[0] ? clonedInstanceIds[0] : currentPreview.sourceCustomIds[0] ? `custom:${customMap.get(currentPreview.sourceCustomIds[0])}` : ''
     }
-    const unnormalizedNext: ProjectState = { ...sourceProject, instances: nextInstances, customVoxels: nextCustomVoxels, customColors: nextCustomColors, customVoxelRenderModes: nextCustomVoxelRenderModes, assemblies: nextAssemblies, assemblySequence: nextAssemblySequence }
+    const unnormalizedNext: ProjectState = { ...sourceProject, instances: nextInstances, customVoxels: nextCustomVoxels, customColors: nextCustomColors, customVoxelRenderModes: nextCustomVoxelRenderModes, customEntitySources: nextCustomEntitySources, assemblies: nextAssemblies, assemblySequence: nextAssemblySequence }
     const normalizedNext = normalizeProjectNaming(normalizeStoredProject(unnormalizedNext, { normalizeNaming: false }), { clone: false })
     const newOwnerIds = new Set<string>([...createdCustomIds].map((entityId) => `custom:${entityId}`))
     sceneEntityParts(normalizedNext).filter((part) => part.instanceId && createdInstanceIds.has(part.instanceId)).forEach((part) => newOwnerIds.add(part.id))
@@ -4102,6 +4491,9 @@ function App() {
       if (draft.customVoxelRenderModes) draft.customVoxelRenderModes = Object.fromEntries(Object.entries(draft.customVoxelRenderModes).filter(([entityId]) => !removedCustomIds.has(entityId)))
       if (draft.customEntityOffsets) {
         draft.customEntityOffsets = Object.fromEntries(Object.entries(draft.customEntityOffsets).filter(([entityId]) => !removedCustomIds.has(entityId)))
+      }
+      if (draft.customEntitySources) {
+        draft.customEntitySources = Object.fromEntries(Object.entries(draft.customEntitySources).filter(([entityId]) => !removedCustomIds.has(entityId)))
       }
       draft.instances = draft.instances.filter((instance) => !removedInstanceIds.has(instance.id))
       draft.assemblies = (draft.assemblies ?? []).filter((assembly) => !assembly.memberKeys.some((memberKey) => removedMemberKeys.has(memberKey) || (memberKey.startsWith('asset:') && removedInstanceIds.has(memberKey.split(':')[1])) || (memberKey.startsWith('voxel:') && removedCustomIds.has(memberKey.slice('voxel:'.length)))))
@@ -4295,12 +4687,19 @@ function App() {
     const remainingCustomVoxels = sourceProject.customVoxels.filter((voxel) => !selectedCustomIds.has(voxelEntityId(voxel)))
     const nextCustomColors = { ...(sourceProject.customColors ?? {}) }
     const nextCustomVoxelRenderModes = { ...(sourceProject.customVoxelRenderModes ?? {}) }
+    const nextCustomEntitySources = { ...(sourceProject.customEntitySources ?? {}) }
     selectedCustomIds.forEach((entityId) => { delete nextCustomColors[entityId] })
     selectedCustomIds.forEach((entityId) => { delete nextCustomVoxelRenderModes[entityId] })
+    selectedCustomIds.forEach((entityId) => { delete nextCustomEntitySources[entityId] })
     const preservedCustomColor = selectedCustomIds.size === 1 && firstResultEntityId === [...selectedCustomIds][0]
       ? sourceProject.customColors?.[[...selectedCustomIds][0]]
       : undefined
     if (preservedCustomColor && firstResultEntityId) nextCustomColors[firstResultEntityId] = preservedCustomColor
+    groupEntries.forEach(({ entityId, sourcePart }) => {
+      const sourceEntityId = sourcePart?.partId
+      const source = sourceEntityId ? sourceProject.customEntitySources?.[sourceEntityId] : undefined
+      if (source) nextCustomEntitySources[entityId] = { ...source, categoryPath: source.categoryPath ? [...source.categoryPath] : undefined }
+    })
     const nextProject: ProjectState = {
       ...sourceProject,
       // Geometry result data is already normalized by the worker. Reuse all
@@ -4310,6 +4709,7 @@ function App() {
       customVoxels: [...remainingCustomVoxels, ...transformed],
       customVoxelRenderModes: nextCustomVoxelRenderModes,
       customColors: nextCustomColors,
+      customEntitySources: nextCustomEntitySources,
       customEntityOffsets: Object.fromEntries(Object.entries(sourceProject.customEntityOffsets ?? {}).filter(([entityId]) => !selectedCustomIds.has(entityId))),
       assemblies: (sourceProject.assemblies ?? []).map((assembly) => {
         const memberKeys = assembly.memberKeys.flatMap((memberKey) => selectedReplacementKeys.get(memberKey) ?? [memberKey])
@@ -4892,6 +5292,9 @@ function App() {
     }
   })
   const stableViewportRaycast = useStableEvent(raycastSceneVoxel)
+  const stableViewportSyncOccupancyTransforms = useStableEvent(() => {
+    sceneOccupancyRef.current?.syncOwnerTransforms(sceneEntityParts(projectRef.current))
+  })
   const stableViewportSelect = useStableEvent(selectScenePart)
   const stableViewportSelectMultiple = useStableEvent(updateSceneCheckedSelection)
   const stableViewportCancelPending = useStableEvent(() => {
@@ -4976,7 +5379,7 @@ function App() {
               </div>}
             </div>
           </div>
-          <MemoizedVoxelViewport project={project} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} geometryApplying={geometryApplying} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onCancelScenePartsMove={stableViewportCancelMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
+          <MemoizedVoxelViewport project={project} authoritativeProjectRef={projectRef} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} geometryApplying={geometryApplying} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSyncSceneOccupancyTransforms={stableViewportSyncOccupancyTransforms} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onCancelScenePartsMove={stableViewportCancelMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
           <ToolboxPopover open={toolboxOpen} onClose={() => setToolboxOpen(false)} tool={tool} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} onToolChange={changeTool} onPlaneChange={setDrawingPlane} onOperationChange={setDrawOperation} onBrushSizeChange={setBrushSize} />
           <div className="viewport-footer">
             <div className="tool-group">
@@ -6657,7 +7060,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   </div>
 }
 
-function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCache, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, geometryApplying, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, activeMaterial, materials, dragAxis, placementAsset, copyPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onCancelScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; sceneParts: SceneEntityPart[]; occupancyIndex: SceneOccupancyIndex | null; assetTransformCache: AssetTransformCache; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; geometryApplying: boolean; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCancelScenePartsMove: () => void; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
+function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancyIndex, assetTransformCache, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, geometryApplying, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, activeMaterial, materials, dragAxis, placementAsset, copyPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSyncSceneOccupancyTransforms, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onCancelScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; authoritativeProjectRef: React.MutableRefObject<ProjectState>; sceneParts: SceneEntityPart[]; occupancyIndex: SceneOccupancyIndex | null; assetTransformCache: AssetTransformCache; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; geometryApplying: boolean; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSyncSceneOccupancyTransforms: () => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCancelScenePartsMove: () => void; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.Camera | null>(null)
@@ -6712,6 +7115,11 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   // transform effect still reconciles state, but its extra render is
   // redundant for this path and can make a large model pause after mouse-up.
   const skipNextTransformRenderRef = useRef(false)
+  // A transition can publish one render of the pre-drag project after the
+  // imperative drag preview has already reached its destination. Keep the
+  // final object positions until the render whose projectRef is authoritative
+  // has run; this prevents the visible flash-back/flash-forward on release.
+  const pendingDragVisualRootsRef = useRef(new Map<THREE.Object3D, THREE.Vector3>())
   const finishDragRenderBurstRef = useRef<() => void>(() => {})
   const previewTouchPointersRef = useRef(new Set<number>())
   const previewTouchGestureRef = useRef<{ pointerId: number; startX: number; startY: number; moved: boolean } | null>(null)
@@ -7792,7 +8200,14 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       })
     }
     if (skipNextTransformRenderRef.current) skipNextTransformRenderRef.current = false
-    else invalidateRenderRef.current()
+    const pendingDragVisualRoots = pendingDragVisualRootsRef.current
+    pendingDragVisualRoots.forEach((position, object) => {
+      if (object.parent) object.position.copy(position)
+    })
+    // `project` can be one stale transition render behind projectRef. Only
+    // release the guard once the effect is processing the committed snapshot.
+    if (pendingDragVisualRoots.size && project === authoritativeProjectRef.current) pendingDragVisualRoots.clear()
+    invalidateRenderRef.current()
   }, [project.instances, project.customEntityOffsets, sceneParts])
 
   useEffect(() => {
@@ -8548,7 +8963,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     if (tool !== 'select' || placementAsset || editEntityId) return
     const context = getPointerContext(event)
     const hitPartId = context?.voxelHit?.ownerIds[0]
-    const hitPart = hitPartId ? sceneParts.find((part) => part.id === hitPartId) : undefined
+    const hitPart = hitPartId ? sceneEntityParts(authoritativeProjectRef.current).find((part) => part.id === hitPartId) : undefined
     if (!hitPart) return
     onEnterEditMode(hitPart.id)
   }
@@ -8598,7 +9013,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         maxY: Math.max(result.maxY, point.y),
       }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity })
     }
-    for (const part of sceneParts) {
+    for (const part of sceneEntityParts(authoritativeProjectRef.current)) {
       const bounds = gridVoxelBounds(part.voxels)
       if (!bounds) continue
       const offset = scenePartGridOffset(part)
@@ -8720,12 +9135,31 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
   }
 
   const commitDragGesture = (gesture: SelectGesture) => {
+    pendingDragVisualRootsRef.current.clear()
     if (!gesture.moved || (!gesture.lastDeltaX && !gesture.lastDeltaY && !gesture.lastDeltaZ)) {
       skipNextTransformRenderRef.current = false
       resetDragVisuals(gesture)
       onCancelScenePartsMove()
       return
     }
+    // Publish the visual destination before asking the parent to commit the
+    // project.  The parent intentionally commits large moves inside a React
+    // transition; an effect from the transition can therefore run between
+    // the callback and the next paint.  If the guard is installed only after
+    // the callback returns, that effect briefly applies the old scene offset
+    // and the dragged entity flashes back (the next frame then moves it out
+    // again).  The same grid delta is used by validation, rendering and the
+    // persisted customEntityOffsets, so this is a safe optimistic guard.
+    const worldOffset = new THREE.Vector3(
+      voxelToWorld(gesture.lastDeltaX),
+      voxelToWorld(gesture.lastDeltaZ),
+      voxelToWorld(gesture.lastDeltaY),
+    )
+    gesture.visualRoots.forEach(({ object, startPosition }) => {
+      const destination = startPosition.clone().add(worldOffset)
+      object.position.copy(destination)
+      pendingDragVisualRootsRef.current.set(object, destination)
+    })
     // Keep the imperative preview at the final position while the authoritative
     // project snapshot is committed. Resetting it first makes the released
     // entity visibly jump back to its start position; the following React
@@ -8735,7 +9169,17 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     const result = onCommitScenePartsMove(gesture.parts, gesture.lastDeltaX, gesture.lastDeltaY, gesture.lastDeltaZ)
     if (!result.moved) {
       skipNextTransformRenderRef.current = false
+      pendingDragVisualRootsRef.current.clear()
       resetDragVisuals(gesture)
+    } else {
+      // The roots are already at the exact validated grid destination. Store
+      // that destination so a stale transition render cannot move them back
+      // to the pre-drag coordinates for one frame.
+      gesture.visualRoots.forEach(({ object, startPosition }) => {
+        const destination = startPosition.clone().add(worldOffset)
+        object.position.copy(destination)
+        pendingDragVisualRootsRef.current.set(object, destination)
+      })
     }
     finishDragRenderBurstRef.current()
   }
@@ -8935,6 +9379,11 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
     // A right-button gesture is camera panning and does not query occupancy;
     // left-button scene edits stay locked until the background index is ready.
     if (geometryApplying && event.button === 0) return
+    // Hit testing must use the same absolute owner transforms as rendering.
+    // This is a metadata-only reconciliation for ordinary custom entities;
+    // it prevents an old lazy drag offset from making a visible asset miss the
+    // next click or from making collision appear before visual contact.
+    onSyncSceneOccupancyTransforms()
     if (event.button === 0 || event.button === 2) setSceneContextMenu(null)
     if (event.button === 0 || event.button === 2) event.currentTarget.setPointerCapture(event.pointerId)
     if (event.button === 2) {
@@ -8942,7 +9391,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       if (tool === 'select') onCancelPendingEntityOperation()
       const context = geometryApplying ? null : getPointerContext(event)
       const hitPartId = context?.voxelHit?.ownerIds[0]
-      const hitPart = hitPartId ? sceneParts.find((part) => part.id === hitPartId) : undefined
+      const hitPart = hitPartId ? sceneEntityParts(authoritativeProjectRef.current).find((part) => part.id === hitPartId) : undefined
       const explicitMultiSelection = selectedPartIds.length > 1 && (checkedPartIds.length > 1 || (checkedPartIds.length === 1 && !checkedPartIds[0].startsWith('assembly:')))
       const targetPartIds = !editEntityId && hitPart
         ? explicitMultiSelection && selectedPartIds.includes(hitPart.id) ? selectedPartIds : hitSelectionPartIds(hitPart)
@@ -8962,14 +9411,16 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
       const floorPoint = context?.floorPoint
       const dragGroundPoint = pointerFloorPoint(event) ?? floorPoint
       const hitPartId = context?.voxelHit?.ownerIds[0]
-      const hitPart = hitPartId ? sceneParts.find((part) => part.id === hitPartId) : undefined
+      const currentProject = authoritativeProjectRef.current
+      const currentSceneParts = sceneEntityParts(currentProject)
+      const hitPart = hitPartId ? currentSceneParts.find((part) => part.id === hitPartId) : undefined
       if (hitPart) {
         const explicitMultiSelection = selectedPartIds.length > 1 && (checkedPartIds.length > 1 || (checkedPartIds.length === 1 && !checkedPartIds[0].startsWith('assembly:')))
         const selectedParts = explicitMultiSelection && selectedPartIds.includes(hitPart.id)
-          ? sceneParts.filter((part) => selectedPartIds.includes(part.id))
+          ? currentSceneParts.filter((part) => selectedPartIds.includes(part.id))
           : [hitPart]
         const instanceId = hitPart.instanceId
-        const instance = instanceId ? project.instances.find((item) => item.id === instanceId) : undefined
+        const instance = instanceId ? currentProject.instances.find((item) => item.id === instanceId) : undefined
 
         const hitAssemblyIds = hitPart.assemblyIds ?? (hitPart.assemblyId ? [hitPart.assemblyId] : [])
         const selectedAssemblyRootIds = new Set(selectedParts.flatMap((part) => {
@@ -8986,7 +9437,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
         // the outermost assembly id so nested assemblies move with their
         // parent as well.
         const dragParts = selectedAssemblyRootIds.size
-            ? sceneParts.filter((part) => {
+            ? currentSceneParts.filter((part) => {
                 const assemblyIds = part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])
                 return selectedParts.some((selected) => selected.id === part.id)
                   || assemblyIds.some((assemblyId) => selectedAssemblyRootIds.has(assemblyId))
@@ -8994,7 +9445,7 @@ function VoxelViewport({ project, sceneParts, occupancyIndex, assetTransformCach
             : !explicitMultiSelection
               && hitPart.kind === 'asset'
               && instanceId
-              ? sceneParts.filter((part) => part.kind === 'asset' && part.instanceId === instanceId)
+              ? currentSceneParts.filter((part) => part.kind === 'asset' && part.instanceId === instanceId)
               : selectedParts
         const dragContainsAssembly = dragParts.some((part) => {
           const assemblyIds = part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])

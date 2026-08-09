@@ -478,6 +478,44 @@ export class SceneOccupancyIndex {
     })
   }
 
+  /**
+   * Reconcile the absolute transforms of owners whose topology did not
+   * change.  A drag is intentionally represented as a lazy translation in
+   * this index, while React stores the same translation in
+   * customEntityOffsets.  If a transition, undo, or a library placement
+   * publishes a new project before the next pointer event, relying on the
+   * previous lazy value can make the hit test and the rendered object disagree
+   * by the previous drag delta.  This pass updates only the owner metadata
+   * (O(number of parts)); it never walks the voxel payload for ordinary
+   * custom entities.
+   *
+   * Legacy asset owners are deliberately rebuilt through syncParts because
+   * their resolved scene geometry can change without changing part.voxels.
+   * New placements are custom owners and use the cheap path below.
+   */
+  syncOwnerTransforms(parts: ReadonlyArray<SceneEntityPart>): void {
+    parts.forEach((part) => {
+      const ownerHandle = this.ownerIdToHandle.get(part.id)
+      if (ownerHandle === undefined) {
+        this.insertPart(part)
+        return
+      }
+      if (part.kind !== 'custom' || this.ownerSourceRefs.get(part.id) !== part.voxels) {
+        this.syncOwnerParts([part], [part.id])
+        return
+      }
+      const currentOffset = projectVoxelToRuntime(scenePartOffset(part))
+      const baseOffset = this.ownerBaseOffsets.get(part.id) ?? { gx: 0, gy: 0, gz: 0 }
+      const translation = {
+        gx: currentOffset.gx - baseOffset.gx,
+        gy: currentOffset.gy - baseOffset.gy,
+        gz: currentOffset.gz - baseOffset.gz,
+      }
+      if (translation.gx || translation.gy || translation.gz) this.ownerTranslations.set(ownerHandle, translation)
+      else this.ownerTranslations.delete(ownerHandle)
+    })
+  }
+
   queryProjectVoxel(voxel: Pick<Voxel, 'x' | 'y' | 'z'>): OccupancyHit {
     return this.queryRuntimeVoxel(projectVoxelToRuntime(voxel))
   }
@@ -665,6 +703,8 @@ export class SceneOccupancyIndex {
       this.projectVoxelKeyCache.set(cacheKey, movingKeys)
       for (const [ownerVoxels, translation] of candidates) {
         for (const voxel of ownerVoxels) {
+          // ownerVoxels are already stored in effective scene coordinates;
+          // only a deferred drag translation remains to apply here.
           const currentX = voxel.x + (translation?.gx ?? 0)
           const currentY = voxel.y + (translation?.gz ?? 0)
           const currentZ = voxel.z + (translation?.gy ?? 0)
