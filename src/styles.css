@@ -560,3 +560,27 @@ button { border: 0; cursor: pointer; color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
 }
+
+/* Local-first cloud library state. Cloud-only rows stay visibly distinct from
+   editable local objects, while transfers remain compact enough for narrow
+   desktop windows. */
+.cloud-usage-strip, .cloud-error-strip { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 7px 20px; color: #9aa6a3; background: #182022; border-bottom: 1px solid #303b3d; font: 9px 'DM Mono', monospace; }
+.cloud-error-strip { color: #efb0a2; }
+.cloud-scene-list { margin-top: 10px; padding: 8px; background: rgba(17,23,25,.35); border: 1px dashed #414c4e; }
+.cloud-list-title, .asset-cloud-heading { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; color: #7f8b89; font: 9px 'DM Mono', monospace; }
+.cloud-row { color: #899391; background: #151b1d; border-color: #303a3c; }
+.cloud-row strong, .cloud-asset-row strong { display: flex; align-items: center; gap: 6px; color: #9aa5a2; }
+.cloud-row span, .cloud-asset-row span { color: #65716f; }
+.cloud-row em { display: block; margin-top: 4px; color: #c78570; font-style: normal; font: 8px 'DM Mono', monospace; }
+.cloud-row button, .cloud-asset-row button { display: grid; place-items: center; width: 24px; height: 24px; color: #a8b2af; background: transparent; border: 1px solid #3c484a; }
+.cloud-row button:hover, .cloud-asset-row button:hover { color: #fff0df; border-color: #b45a43; background: #3b2926; }
+.cloud-delete-button { color: #c77868 !important; }
+.cloud-asset-section { margin: 14px 0 12px; padding: 9px; background: rgba(18,24,26,.4); border: 1px dashed #414c4e; }
+.cloud-asset-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 6px; color: #899391; background: #151b1d; border: 1px solid #303a3c; }
+.cloud-asset-row + .cloud-asset-row { margin-top: 5px; }
+.cloud-asset-row > div:first-child { min-width: 0; display: grid; grid-template-columns: 15px minmax(0, 1fr); align-items: center; column-gap: 5px; }
+.cloud-asset-row > div:first-child span { grid-column: 2; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font: 8px 'DM Mono', monospace; }
+.cloud-asset-row > div:first-child svg { grid-row: 1 / span 2; color: #7d8987; }
+.cloud-progress-label { flex-shrink: 0; color: #c88672 !important; font: 8px 'DM Mono', monospace; }
+.asset-card.cloud-uploading { border-color: #b45a43; }
+.asset-cloud-progress { display: flex; align-items: center; gap: 3px; color: #c88672; font: 8px 'DM Mono', monospace; }
