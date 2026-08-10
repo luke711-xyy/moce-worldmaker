@@ -28,6 +28,20 @@ describe('莫测造境实体传播文件', () => {
     expect(parsed.entities).toHaveLength(file.entities.length)
   })
 
+  it('导出普通实体时保留每个体素的最终显示颜色', () => {
+    const project = makeDefaultProject()
+    project.customVoxels = [
+      { x: 0, y: 0, z: 0, materialId: 'terracotta', entityId: 'color-entity' },
+      { x: 1, y: 0, z: 0, materialId: 'jade', entityId: 'color-entity' },
+    ]
+    const part = sceneEntityParts(project).find((candidate) => candidate.kind === 'custom')
+    expect(part).toBeDefined()
+    const file = createEntityFile(project, [part!], '彩色实体', (voxel) => voxel.x === 0 ? '#ef6b4d' : '#53c995')
+    const voxels = file.entities[0].asset.voxels
+    expect(voxels.map((voxel) => voxel.paintMaterialId)).toEqual(['#ef6b4d', '#53c995'])
+    expect(parseEntityFile(JSON.parse(JSON.stringify(file))).entities[0].asset.voxels.map((voxel) => voxel.paintMaterialId)).toEqual(['#ef6b4d', '#53c995'])
+  })
+
   it('拒绝把一种实体文件当成另一种格式打开', () => {
     const project = makeDefaultProject()
     const file = createAssetFile([project.assets[0]])

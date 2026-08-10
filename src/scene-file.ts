@@ -1,4 +1,4 @@
-import { ProjectState, SceneAssembly, SceneBounds, SceneInstance, Voxel, VoxelAsset, VoxelOverride, sceneBoundsForProject } from './voxel'
+import { DEFAULT_VOXEL_SIZE_MM, MAX_VOXEL_SIZE_MM, MIN_VOXEL_SIZE_MM, ProjectState, SceneAssembly, SceneBounds, SceneInstance, Voxel, VoxelAsset, VoxelOverride, normalizeVoxelSizeMm, sceneBoundsForProject } from './voxel'
 
 export const MOCE_SCENE_FORMAT = 'moce-scene' as const
 export const MOCE_SCENE_FORMAT_VERSION = 1 as const
@@ -80,7 +80,7 @@ function validateSceneState(value: unknown): asserts value is PortableSceneState
   if (scene.version !== 1) throw new SceneFileError('scene.version不受支持')
   requireString(scene.name, 'scene.name')
   const voxelSizeMm = requireNumber(scene.voxelSizeMm, 'scene.voxelSizeMm')
-  if (voxelSizeMm !== 1) throw new SceneFileError('当前只支持1mm体素场景')
+  if (voxelSizeMm < MIN_VOXEL_SIZE_MM || voxelSizeMm > MAX_VOXEL_SIZE_MM) throw new SceneFileError(`scene.voxelSizeMm必须在${MIN_VOXEL_SIZE_MM}到${MAX_VOXEL_SIZE_MM}mm之间`)
   requireNumber(scene.sceneSizeCm, 'scene.sceneSizeCm')
   const bounds = requirePlainObject(scene.sceneBounds, 'scene.sceneBounds') as unknown as SceneBounds
   for (const axis of ['x', 'y', 'z'] as const) {
@@ -104,6 +104,24 @@ function validateSceneState(value: unknown): asserts value is PortableSceneState
     requireArray(item.overrides, `scene.instances[${index}].overrides`).forEach((voxel, voxelIndex) => validateVoxel(voxel, `scene.instances[${index}].overrides[${voxelIndex}]`, true))
   })
   requireArray(scene.customVoxels, 'scene.customVoxels').forEach((voxel, index) => validateVoxel(voxel, `scene.customVoxels[${index}]`))
+  if (scene.customEntityOffsets !== undefined) {
+    const offsets = requirePlainObject(scene.customEntityOffsets, 'scene.customEntityOffsets')
+    Object.entries(offsets).forEach(([entityId, offset]) => {
+      const item = requirePlainObject(offset, `scene.customEntityOffsets.${entityId}`)
+      for (const axis of ['x', 'y', 'z'] as const) {
+        const value = requireNumber(item[axis], `scene.customEntityOffsets.${entityId}.${axis}`)
+        if (!Number.isInteger(value)) throw new SceneFileError(`scene.customEntityOffsets.${entityId}.${axis}必须是整数`)
+      }
+    })
+  }
+  if (scene.customEntitySources !== undefined) {
+    const sources = requirePlainObject(scene.customEntitySources, 'scene.customEntitySources')
+    Object.entries(sources).forEach(([entityId, source]) => {
+      const item = requirePlainObject(source, `scene.customEntitySources.${entityId}`)
+      requireString(item.assetId, `scene.customEntitySources.${entityId}.assetId`)
+      if (item.categoryPath !== undefined) requireArray(item.categoryPath, `scene.customEntitySources.${entityId}.categoryPath`).forEach((value, index) => requireString(value, `scene.customEntitySources.${entityId}.categoryPath[${index}]`))
+    })
+  }
   if (scene.assemblies !== undefined) requireArray(scene.assemblies, 'scene.assemblies').forEach((assembly, index) => {
     const item = requirePlainObject(assembly, `scene.assemblies[${index}]`) as SceneAssembly
     requireString(item.id, `scene.assemblies[${index}].id`)
@@ -136,10 +154,21 @@ function isLegacyProject(value: unknown): value is ProjectState {
 
 export function createSceneFile(project: ProjectState): MoceSceneFile {
   const usedAssetIds = new Set(project.instances.map((instance) => instance.assetId))
-  const sceneAssets = project.assets.filter((asset) => usedAssetIds.has(asset.id)).map((asset) => ({ ...structuredClone(asset), isTemplate: false }))
-  const missingAssetId = project.instances.find((instance) => !project.assets.some((asset) => asset.id === instance.assetId))?.assetId
+  const assetsById = new Map(project.assets.map((asset) => [asset.id, asset]))
+  const missingAssetId = project.instances.find((instance) => !assetsById.has(instance.assetId))?.assetId
   if (missingAssetId) throw new SceneFileError(`当前场景引用了不存在的资产：${missingAssetId}`)
-  const { assets: _assets, ...scene } = structuredClone(project)
+  // Do not clone the global asset library as part of the scene snapshot. A
+  // library can contain several large imported models that are not used by
+  // this scene; cloning them here only to discard them below made Save and
+  // page-exit recovery scale with the whole library instead of this scene.
+  const { assets: _assets, ...sceneSource } = project
+  const scene = structuredClone(sceneSource) as PortableSceneState
+  // Keep the historical asset-library order so exported scene files remain
+  // stable for callers that display or diff their embedded dependencies.
+  const sceneAssets = project.assets
+    .filter((asset) => usedAssetIds.has(asset.id))
+    .map((asset) => ({ ...structuredClone(asset), isTemplate: false }))
+  scene.voxelSizeMm = normalizeVoxelSizeMm(scene.voxelSizeMm ?? DEFAULT_VOXEL_SIZE_MM)
   scene.sceneBounds = scene.sceneBounds ?? sceneBoundsForProject(project)
   scene.materials = scene.materials ?? []
   scene.customVoxels = scene.customVoxels ?? []
@@ -184,5 +213,41 @@ export function parseSceneFileText(text: string): MoceSceneFile {
 }
 
 export function sceneContentSignature(project: ProjectState): string {
-  return JSON.stringify(createSceneFile(project))
+  // Dirty-state checks run after every scene commit, including a transform
+  // only move. Serializing a portable scene here used to structured-clone all
+  // imported voxel arrays on every release, which made large entities pause
+  // the UI for seconds. The portable file path still uses createSceneFile;
+  // this signature only needs deterministic content equality.
+  const arraySignatureCache = sceneSignatureArrayCache
+  const signatureForArray = (values: unknown[]): string => {
+    const cached = arraySignatureCache.get(values)
+    if (cached) return cached
+    const signature = JSON.stringify(values)
+    arraySignatureCache.set(values, signature)
+    return signature
+  }
+  const assetSignatures = project.assets
+    .filter((asset) => project.instances.some((instance) => instance.assetId === asset.id))
+    .map((asset) => [asset.id, signatureForAsset(asset)] as const)
+  const { assets: _assets, materials, customVoxels, ...scene } = project
+  return JSON.stringify({
+    scene: {
+      ...scene,
+      instances: project.instances.map((instance) => ({ ...instance, y: instance.y ?? 0, overrides: instance.overrides ?? [], partOffsets: instance.partOffsets ?? {} })),
+      materials: signatureForArray(materials),
+      customVoxels: signatureForArray(customVoxels),
+    },
+    sceneAssets: assetSignatures,
+  })
+}
+
+const sceneSignatureArrayCache = new WeakMap<object, string>()
+const sceneSignatureAssetCache = new WeakMap<object, string>()
+
+function signatureForAsset(asset: VoxelAsset): string {
+  const cached = sceneSignatureAssetCache.get(asset)
+  if (cached) return cached
+  const signature = JSON.stringify(asset)
+  sceneSignatureAssetCache.set(asset, signature)
+  return signature
 }

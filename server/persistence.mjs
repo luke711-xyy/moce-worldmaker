@@ -152,7 +152,13 @@ function sceneRecordFromFile(sceneFile, id) {
   return { ...sceneFile, id, updatedAt: new Date().toISOString() }
 }
 
-function projectFromScene(database, scene) {
+function projectFromScene(database, scene, previewOnly = false) {
+  // Keep legacy direct ProjectState records readable by the scene library.
+  // They must be converted to the embedded scene shape before rebuilding the
+  // project, otherwise the entity pane receives no instances.
+  if (scene.format !== 'moce-scene' && Array.isArray(scene.assets) && Array.isArray(scene.instances)) {
+    scene = sceneFileFromPayload(scene)
+  }
   if (scene.format === 'moce-scene') {
     const sceneAssets = structuredClone(scene.sceneAssets ?? []).map((asset) => {
       const libraryAsset = database.assets[asset.id]
@@ -163,7 +169,9 @@ function projectFromScene(database, scene) {
       }
     })
     const sceneAssetIds = new Set(sceneAssets.map((asset) => asset.id))
-    const libraryAssets = Object.values(database.assets).filter((asset) => !sceneAssetIds.has(asset.id)).map((asset) => ({ ...structuredClone(asset), isTemplate: asset.isTemplate !== false }))
+    const libraryAssets = previewOnly
+      ? []
+      : Object.values(database.assets).filter((asset) => !sceneAssetIds.has(asset.id)).map((asset) => ({ ...structuredClone(asset), isTemplate: asset.isTemplate !== false }))
     return {
       ...structuredClone(scene.scene),
       assets: [...sceneAssets, ...libraryAssets],
@@ -220,13 +228,88 @@ function uniqueStoredAssetName(database, asset) {
   return `${baseName} (${index})`
 }
 
+function voxelKey(voxel) {
+  return `${voxel.x},${voxel.y},${voxel.z}`
+}
+
+// Keep the library summary consistent with the editor's voxelComponents()
+// rule. Counting asset.partVoxels entries directly is incorrect for old
+// imported GLB/OBJ/STL snapshots: those files may retain source mesh parts,
+// while the editor intentionally exposes the imported model as one entity.
+function connectedComponentCount(voxels) {
+  const remaining = new Set(voxels.map(voxelKey))
+  let count = 0
+  while (remaining.size) {
+    count += 1
+    const first = remaining.values().next().value
+    remaining.delete(first)
+    const queue = [first.split(',').map(Number)]
+    for (let index = 0; index < queue.length; index += 1) {
+      const [x, y, z] = queue[index]
+      for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+        const nextKey = `${x + dx},${y + dy},${z + dz}`
+        if (!remaining.has(nextKey)) continue
+        remaining.delete(nextKey)
+        queue.push(nextKey.split(',').map(Number))
+      }
+    }
+  }
+  return count
+}
+
 function sceneSummary(scene) {
+  const state = scene.scene && typeof scene.scene === 'object' ? scene.scene : scene
+  const sceneAssets = Array.isArray(scene.sceneAssets) ? scene.sceneAssets : []
+  const instances = Array.isArray(state.instances) ? state.instances : []
+  const customVoxels = Array.isArray(state.customVoxels) ? state.customVoxels : []
+  const assemblies = Array.isArray(state.assemblies) ? state.assemblies : []
+  const assetMap = new Map(sceneAssets.map((asset) => [asset.id, asset]))
+  const partCountForInstance = (instance) => {
+    if (instance.visible === false) return 0
+    const asset = assetMap.get(instance.assetId)
+    if (!asset || !Array.isArray(asset.voxels)) return 1
+    const resolved = new Map(asset.voxels.map((voxel) => [`${voxel.x},${voxel.y},${voxel.z}`, voxel]))
+    for (const override of Array.isArray(instance.overrides) ? instance.overrides : []) {
+      const key = `${override.x},${override.y},${override.z}`
+      if (override.mode === 'remove') resolved.delete(key)
+      else resolved.set(key, override)
+    }
+    const partVoxels = asset.partVoxels && typeof asset.partVoxels === 'object' ? asset.partVoxels : null
+    const isImportedModel = asset.kind === 'imported'
+      && /\.(?:glb|gltf|obj|stl)$/i.test(String(asset.source ?? ''))
+      && !asset.assembly
+    if (isImportedModel || (asset.kind === 'imported' && !partVoxels && !asset.assembly)) return resolved.size ? 1 : 0
+    if (!partVoxels || !Object.keys(partVoxels).length) return connectedComponentCount([...resolved.values()])
+    const claimed = new Set()
+    let count = 0
+    for (const part of Object.values(partVoxels)) {
+      if (!Array.isArray(part)) continue
+      const present = []
+      for (const voxel of part) {
+        const key = `${voxel.x},${voxel.y},${voxel.z}`
+        if (resolved.has(key)) present.push(resolved.get(key))
+        claimed.add(key)
+      }
+      count += connectedComponentCount(present)
+    }
+    const additions = [...resolved.values()].filter((voxel) => !claimed.has(voxelKey(voxel)))
+    // This mirrors resolveInstanceComponents(): unclaimed overrides are kept
+    // as one additional component, even if they contain disconnected islands.
+    if (additions.length) count += 1
+    return count || (resolved.size ? 1 : 0)
+  }
+  const logicalEntityCount = instances.reduce((total, instance) => total + partCountForInstance(instance), 0)
+  const customEntityIds = new Set(customVoxels.map((voxel, index) => typeof voxel?.entityId === 'string' ? voxel.entityId : `legacy-${voxel?.x},${voxel?.y},${voxel?.z}-${index}`))
   return {
     id: scene.id,
-    name: scene.scene?.name ?? scene.name,
-    assetCount: scene.sceneAssets?.length ?? scene.assetIds?.length ?? 0,
-    instanceCount: scene.scene?.instances?.length ?? scene.instances?.length ?? 0,
-    customVoxelCount: scene.scene?.customVoxels?.length ?? scene.customVoxels?.length ?? 0,
+    name: state.name ?? scene.name,
+    assetCount: Array.isArray(scene.sceneAssets) ? sceneAssets.length : typeof scene.assetCount === 'number' ? scene.assetCount : scene.assetIds?.length ?? 0,
+    instanceCount: Array.isArray(state.instances) ? instances.length : typeof scene.instanceCount === 'number' ? scene.instanceCount : 0,
+    customVoxelCount: Array.isArray(state.customVoxels) ? customVoxels.length : typeof scene.customVoxelCount === 'number' ? scene.customVoxelCount : 0,
+    assemblyCount: Array.isArray(state.assemblies) ? assemblies.length : typeof scene.assemblyCount === 'number' ? scene.assemblyCount : 0,
+    entityCount: Array.isArray(state.instances) || Array.isArray(state.customVoxels)
+      ? logicalEntityCount + customEntityIds.size
+      : typeof scene.entityCount === 'number' ? scene.entityCount : (typeof scene.instanceCount === 'number' ? scene.instanceCount : 0) + (typeof scene.customVoxelCount === 'number' && scene.customVoxelCount > 0 ? 1 : 0),
     updatedAt: scene.updatedAt,
   }
 }
@@ -307,7 +390,7 @@ export function createPersistenceMiddleware() {
       const sceneMatch = route.match(/^\/api\/scenes\/([^/]+)$/)
       if (sceneMatch && request.method === 'GET') {
         const scene = database.scenes[decodeURIComponent(sceneMatch[1])]
-        return scene ? sendJson(response, 200, projectFromScene(database, scene)) : sendJson(response, 404, { error: '场景不存在' })
+        return scene ? sendJson(response, 200, projectFromScene(database, scene, url.searchParams.get('preview') === '1')) : sendJson(response, 404, { error: '场景不存在' })
       }
 
       if (sceneMatch && (request.method === 'PUT' || request.method === 'POST')) {

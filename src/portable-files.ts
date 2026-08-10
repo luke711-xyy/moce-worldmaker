@@ -1,5 +1,5 @@
 import { MoceSceneFile, parseSceneFile } from './scene-file'
-import { AssetAssembly, SceneAssembly, SceneEntityPart, Voxel, VoxelAsset, ProjectState, makeAssetFromSceneParts, normalizeAssetCategoryPath } from './voxel'
+import { AssetAssembly, SceneAssembly, SceneEntityPart, Voxel, VoxelAsset, ProjectState, makeAssetFromSceneParts, normalizeAssetCategoryPath, scenePartVoxels, voxelBounds } from './voxel'
 
 export const MOCE_ASSET_FORMAT = 'moce-asset' as const
 export const MOCE_ENTITY_FORMAT = 'moce-entity' as const
@@ -71,6 +71,7 @@ function validateVoxel(value: unknown, label: string) {
   integer(voxel.y, `${label}.y`)
   integer(voxel.z, `${label}.z`)
   text(voxel.materialId, `${label}.materialId`)
+  if (voxel.paintMaterialId !== undefined) text(voxel.paintMaterialId, `${label}.paintMaterialId`)
 }
 
 function validateAsset(value: unknown, label: string): asserts value is VoxelAsset {
@@ -164,7 +165,7 @@ function partMatchesMemberKey(part: SceneEntityPart, storedKey: string): boolean
   return part.memberKey === storedKey || (storedKey.startsWith('asset:') && part.memberKey.startsWith(`${storedKey}:`))
 }
 
-export function createEntityFile(project: ProjectState, parts: SceneEntityPart[], name = '莫测造境实体'): MoceEntityFile {
+export function createEntityFile(project: ProjectState, parts: SceneEntityPart[], name = '莫测造境实体', voxelColorResolver?: (voxel: Voxel, part: SceneEntityPart) => string) : MoceEntityFile {
   const groups = new Map<string, SceneEntityPart[]>()
   parts.forEach((part) => {
     // A selected plain instance is exported as one entity. Once its parts take
@@ -176,11 +177,30 @@ export function createEntityFile(project: ProjectState, parts: SceneEntityPart[]
   const entities: PortableEntity[] = []
   const groupMemberKeys = new Map<string, string[]>()
   for (const [groupKey, groupParts] of groups) {
-    const sourceVoxels = groupParts.flatMap((part) => part.voxels)
+    // A portable entity must carry the final displayed color, not only the
+    // material key used by the source scene. Material keys can resolve to a
+    // different palette after import, while paintMaterialId also supports
+    // per-voxel colors. Keep the original materialId for compatibility and
+    // write the resolved display color into paintMaterialId when a caller
+    // provides the scene renderer's color resolver.
+    const exportParts = voxelColorResolver
+      ? groupParts.map((part) => ({
+        ...part,
+        sceneOffset: undefined,
+        voxels: scenePartVoxels(part).map((voxel) => {
+          const color = voxelColorResolver(voxel, part)
+          return /^#[0-9a-f]{6}$/i.test(color)
+            ? { ...voxel, paintMaterialId: color }
+            : voxel
+        }),
+      }))
+      : groupParts
+    const sourceVoxels = exportParts.flatMap((part) => scenePartVoxels(part))
     if (!sourceVoxels.length) continue
-    const minX = Math.min(...sourceVoxels.map((voxel) => voxel.x))
-    const minY = Math.min(...sourceVoxels.map((voxel) => voxel.y))
-    const minZ = Math.min(...sourceVoxels.map((voxel) => voxel.z))
+    const bounds = voxelBounds(sourceVoxels)!
+    const minX = bounds.min.x
+    const minY = bounds.min.y
+    const minZ = bounds.min.z
     const entityId = `entity-${entities.length + 1}`
     const first = groupParts[0]
     const entityName = first ? (first.displayLabel ?? first.label ?? (first.kind === 'custom' ? '手动体素实体' : '场景实体')) : '场景实体'
@@ -188,11 +208,11 @@ export function createEntityFile(project: ProjectState, parts: SceneEntityPart[]
       ? project.assets.find((asset) => asset.id === project.instances.find((instance) => instance.id === first.instanceId)?.assetId)
       : undefined
     const entityColor = first?.colorOverride ?? project.customColors?.[first?.partId ?? ''] ?? sourceAsset?.templateColor ?? sourceAsset?.color ?? '#6c827d'
-    const asset = makeAssetFromSceneParts(entityId, entityName, groupParts, entityColor, sourceAsset?.accent ?? '#d2a354')
+    const asset = makeAssetFromSceneParts(entityId, entityName, exportParts, entityColor, sourceAsset?.accent ?? '#d2a354')
     asset.templateColor = entityColor
     const partVoxels: Record<string, Voxel[]> = {}
-    groupParts.forEach((part, index) => {
-      partVoxels[`part-${index + 1}`] = part.voxels.map((voxel) => ({ x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ, materialId: voxel.materialId }))
+    exportParts.forEach((part, index) => {
+      partVoxels[`part-${index + 1}`] = scenePartVoxels(part).map((voxel) => ({ x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ, materialId: voxel.materialId, ...(voxel.paintMaterialId ? { paintMaterialId: voxel.paintMaterialId } : {}) }))
     })
     asset.parts = Object.keys(partVoxels)
     asset.partVoxels = partVoxels
