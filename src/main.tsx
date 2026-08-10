@@ -6000,7 +6000,7 @@ function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSce
           {!library.scenes.length && !cloudScenes.length && <div className="empty-panel">尚无本地或云端场景</div>}
           </div>
           <div className="library-scene-preview" aria-label="选中场景完整预览">
-            {selectedSceneProject && scenePreviewVoxels.length ? <SceneLibraryPreview cacheKey={selectedSceneId ?? selectedSceneProject.name} voxels={scenePreviewVoxels} maxVoxels={SCENE_LIBRARY_PREVIEW_MAX_VOXELS} /> : selectedSceneId && busy ? <div className="empty-panel">正在加载场景预览…</div> : <div className="empty-panel">请选择场景查看完整预览</div>}
+            {selectedSceneProject && scenePreviewVoxels.length ? <SceneLibraryPreview key={selectedSceneId ?? selectedSceneProject.name} cacheKey={selectedSceneId ?? selectedSceneProject.name} voxels={scenePreviewVoxels} maxVoxels={SCENE_LIBRARY_PREVIEW_MAX_VOXELS} /> : selectedSceneId && busy ? <div className="empty-panel">正在加载场景预览…</div> : <div className="empty-panel">请选择场景查看完整预览</div>}
           </div>
         </div>
         <div className="library-column"><div className="library-column-title">实体</div>{!selectedSceneId ? <div className="empty-panel">请选择场景查看实体</div> : busy && !selectedSceneProject ? <div className="empty-panel">正在加载场景实体…</div> : selectedSceneEntities.length ? selectedSceneEntities.map((entity) => <button className="library-row" key={entity.id} onClick={(event) => openEntityMenu(event, entity.id)} onContextMenu={(event) => openEntityMenu(event, entity.id)}><div><strong>{entity.name}</strong><span>{entity.subtitle}</span></div><ChevronRight size={15} /></button>) : <div className="empty-panel">当前场景没有可显示的实体</div>}</div>
@@ -6478,7 +6478,13 @@ const SceneLibraryPreview = React.memo(function SceneLibraryPreview({ cacheKey, 
 
   useEffect(() => {
     const worker = workerRef.current
-    if (!worker || !voxels.length) return
+    if (!worker || !voxels.length) {
+      requestRef.current += 1
+      setLoading(false)
+      setFailed(false)
+      setPayload(null)
+      return
+    }
     const requestId = ++requestRef.current
     const resolvedCacheKey = `${cacheKey}:${exteriorOnly ? 'exterior' : 'all-faces'}`
     const cached = resultCacheRef.current.get(resolvedCacheKey)
