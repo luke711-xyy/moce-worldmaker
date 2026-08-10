@@ -1357,6 +1357,7 @@ function App() {
   const [cloudUsage, setCloudUsage] = useState<CloudUsage | null>(null)
   const [cloudError, setCloudError] = useState<string | null>(null)
   const [cloudTransfers, setCloudTransfers] = useState<Record<string, CloudProgress>>({})
+  const [cloudTransferErrors, setCloudTransferErrors] = useState<Record<string, string>>({})
   const [sceneFileRef, setSceneFileRef] = useState<SceneFileRef | null>(null)
   const [savedSceneSignature, setSavedSceneSignature] = useState<string | null>(null)
   const [unsavedDialogOpen, setUnsavedDialogOpen] = useState(false)
@@ -3763,6 +3764,31 @@ function App() {
   const setCloudTransferProgress = (progress: CloudProgress) => {
     const key = `${progress.transfer.direction}:${progress.transfer.objectKind}:${progress.transfer.objectId}`
     setCloudTransfers((current) => ({ ...current, [key]: progress }))
+    if (progress.status === 'failed') {
+      setCloudTransferErrors((current) => ({ ...current, [key]: progress.error ?? '传输失败，请重试' }))
+    } else {
+      setCloudTransferErrors((current) => {
+        if (!(key in current)) return current
+        const next = { ...current }
+        delete next[key]
+        return next
+      })
+    }
+  }
+
+  const clearCloudTransfer = (key: string) => {
+    setCloudTransfers((current) => {
+      if (!(key in current)) return current
+      const next = { ...current }
+      delete next[key]
+      return next
+    })
+    setCloudTransferErrors((current) => {
+      if (!(key in current)) return current
+      const next = { ...current }
+      delete next[key]
+      return next
+    })
   }
 
   const clearCompletedCloudTransfers = (objectKind: 'asset' | 'scene', direction: 'upload' | 'download') => {
@@ -3836,6 +3862,8 @@ function App() {
 
   const downloadCloudAssetToLocal = async (summary: CloudAssetSummary) => {
     const key = `download:asset:${summary.id}`
+    clearCloudTransfer(key)
+    let saved = false
     try {
       const result = await downloadCloudObject('asset', summary.id, undefined, setCloudTransferProgress)
       const asset = JSON.parse(new TextDecoder().decode(result.bytes)) as VoxelAsset
@@ -3848,6 +3876,7 @@ function App() {
           nextAsset.name = uniqueTemplateAssetName(projectRef.current.assets, nextAsset.name)
         } else if (choice !== '覆盖' && choice !== 'replace' && choice !== '1') {
           setNotice('已取消下载云端实体')
+          clearCloudTransfer(key)
           return
         } else nextAsset.id = existing.id
       }
@@ -3860,15 +3889,20 @@ function App() {
       })
       await refreshLibrary()
       setNotice(`已下载云端实体 · ${nextAsset.name}`)
+      saved = true
     } catch (error) {
-      setNotice(`下载云端实体失败 · ${error instanceof Error ? error.message : '请检查网络连接'}`)
+      const message = error instanceof Error ? error.message : '请检查网络连接'
+      setCloudTransferErrors((current) => ({ ...current, [key]: message }))
+      setNotice(`下载云端实体失败 · ${message}`)
     } finally {
-      setCloudTransfers((current) => { const next = { ...current }; delete next[key]; return next })
+      if (saved) clearCloudTransfer(key)
     }
   }
 
   const downloadCloudSceneToLocal = async (summary: CloudSceneSummary) => {
     const key = `download:scene:${summary.id}`
+    clearCloudTransfer(key)
+    let saved = false
     try {
       const result = await downloadCloudObject('scene', summary.id, summary.currentVersionId, setCloudTransferProgress)
       const sceneFile = JSON.parse(new TextDecoder().decode(result.bytes)) as MoceSceneFile
@@ -3883,6 +3917,7 @@ function App() {
           while (names.has(name)) name = `${base} (${index++})`
         } else if (choice !== '覆盖' && choice !== 'replace' && choice !== '1') {
           setNotice('已取消下载云端场景')
+          clearCloudTransfer(key)
           return
         }
       }
@@ -3890,10 +3925,13 @@ function App() {
       await saveLocalScene(sceneFile)
       await refreshLibrary()
       setNotice(`已下载云端场景 · ${name}`)
+      saved = true
     } catch (error) {
-      setNotice(`下载云端场景失败 · ${error instanceof Error ? error.message : '请检查网络连接'}`)
+      const message = error instanceof Error ? error.message : '请检查网络连接'
+      setCloudTransferErrors((current) => ({ ...current, [key]: message }))
+      setNotice(`下载云端场景失败 · ${message}`)
     } finally {
-      setCloudTransfers((current) => { const next = { ...current }; delete next[key]; return next })
+      if (saved) clearCloudTransfer(key)
     }
   }
 
@@ -5503,7 +5541,7 @@ function App() {
       </header>
 
       <main className={`workspace ${assetSidebarCollapsed ? 'asset-sidebar-collapsed' : ''}`} onClick={() => { if (treeContextMenu) setTreeContextMenu(null); if (assetContextMenu) setAssetContextMenu(null); if (assetCategoryContextMenu) setAssetCategoryContextMenu(null); if (sceneLibraryContextMenu) setSceneLibraryContextMenu(null); if (voxelSizeOpen) setVoxelSizeOpen(false) }}>
-        <MemoizedAssetSidebar assets={filteredAssets} categoryPaths={assetCategoryPaths} query={query} setQuery={setQuery} selectedAssetIds={selectedAssetIds} onToggleAssetSelection={assetToggleSelection} onClearAssetSelection={assetClearSelection} onExportAssets={stableAssetExport} collapsed={assetSidebarCollapsed} onToggleCollapsed={assetToggleCollapsed} onNotice={stableAssetNotice} onBeginPlacement={stableAssetBeginPlacement} onEndPlacement={stableAssetEndPlacement} onContextMenu={assetContextMenuHandler} contextMenu={assetContextMenu} categoryContextMenu={assetCategoryContextMenu} onCategoryContextMenu={assetCategoryContextMenuHandler} onCreateCategory={stableAssetCreateCategory} onDeleteCategory={stableAssetDeleteCategory} onRenameAsset={stableAssetRename} onDuplicateAsset={stableAssetDuplicate} onDeleteAsset={stableAssetDelete} onChangeAssetColor={stableAssetChangeColor} onBackupAsset={backupAssetToCloud} cloudAssets={cloudAssets} cloudTransfers={cloudTransfers} onDownloadCloudAsset={downloadCloudAssetToLocal} onDeleteCloudAsset={removeCloudAsset} />
+        <MemoizedAssetSidebar assets={filteredAssets} categoryPaths={assetCategoryPaths} query={query} setQuery={setQuery} selectedAssetIds={selectedAssetIds} onToggleAssetSelection={assetToggleSelection} onClearAssetSelection={assetClearSelection} onExportAssets={stableAssetExport} collapsed={assetSidebarCollapsed} onToggleCollapsed={assetToggleCollapsed} onNotice={stableAssetNotice} onBeginPlacement={stableAssetBeginPlacement} onEndPlacement={stableAssetEndPlacement} onContextMenu={assetContextMenuHandler} contextMenu={assetContextMenu} categoryContextMenu={assetCategoryContextMenu} onCategoryContextMenu={assetCategoryContextMenuHandler} onCreateCategory={stableAssetCreateCategory} onDeleteCategory={stableAssetDeleteCategory} onRenameAsset={stableAssetRename} onDuplicateAsset={stableAssetDuplicate} onDeleteAsset={stableAssetDelete} onChangeAssetColor={stableAssetChangeColor} onBackupAsset={backupAssetToCloud} cloudAssets={cloudAssets} cloudTransfers={cloudTransfers} cloudTransferErrors={cloudTransferErrors} onDownloadCloudAsset={downloadCloudAssetToLocal} onDeleteCloudAsset={removeCloudAsset} />
         <section className="viewport-panel">
           <div className="viewport-toolbar">
             <div className="view-toggle">{(['正交', '透视'] as const).map((mode) => <button key={mode} className={viewMode === mode ? 'active' : ''} onClick={() => { setViewMode(mode); setNotice(`已切换视图 · ${mode}`) }}>{mode}</button>)}</div>
@@ -5552,7 +5590,7 @@ function App() {
         </section>
         <MemoizedInspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} geometryPreview={geometryPreview} shellThicknessOptions={geometryShellThicknessOptions} scaleOptions={geometryScaleOptions} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onPreviewHsl={previewSelectedHsl} onCommitHsl={commitSelectedHsl} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportGlb={exportSelectedPartGlb} onExportVox={exportSelectedPartVox} onExportEntityFile={exportSelectedEntityFile} onOpenSlicer={() => setSliceDialogOpen(true)} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => setCopyPreview(null)} onStartShell={startShellPreview} onStartScale={startScalePreview} onChangeShellThickness={changeGeometryShellThickness} onChangeScale={changeGeometryScale} onConfirmGeometry={confirmGeometryPreview} onCancelGeometry={cancelGeometryPreview} onDelete={deleteSelected} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
       </main>
-      {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} error={libraryError} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} cloudAssets={cloudAssets} cloudScenes={cloudScenes} cloudUsage={cloudUsage} cloudError={cloudError} cloudTransfers={cloudTransfers} onRefreshCloud={refreshCloudLibrary} onBackupCurrentScene={() => backupCurrentSceneToCloud()} onDownloadCloudScene={downloadCloudSceneToLocal} onDeleteCloudScene={removeCloudScene} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null) }} onImportScene={() => sceneLibraryImportInputRef.current?.click()} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} />}
+      {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} error={libraryError} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} cloudAssets={cloudAssets} cloudScenes={cloudScenes} cloudUsage={cloudUsage} cloudError={cloudError} cloudTransfers={cloudTransfers} cloudTransferErrors={cloudTransferErrors} onRefreshCloud={refreshCloudLibrary} onBackupCurrentScene={() => backupCurrentSceneToCloud()} onDownloadCloudScene={downloadCloudSceneToLocal} onDeleteCloudScene={removeCloudScene} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null) }} onImportScene={() => sceneLibraryImportInputRef.current?.click()} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} />}
       {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
       {modelImportDialog && <ModelImportDialog state={modelImportDialog} targetSizeVoxels={modelImportTargetVoxels} mode={modelImportMode} onTargetSizeChange={setModelImportTargetVoxels} onModeChange={setModelImportMode} onStart={runModelImport} onConfirm={confirmModelImport} onCancel={() => setModelImportDialog(null)} />}
       {sliceDialogOpen && selectedEntityParts.length > 0 && <SliceDialog parts={selectedEntityParts} project={project} name={selectedDisplayName || '选中实体'} onClose={() => setSliceDialogOpen(false)} onNotice={setNotice} />}
@@ -5668,7 +5706,7 @@ function formatBytesUi(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-function AssetSidebar({ assets, categoryPaths, query, setQuery, selectedAssetIds, onToggleAssetSelection, onClearAssetSelection, onExportAssets, collapsed, onToggleCollapsed, onNotice, onBeginPlacement, onEndPlacement, contextMenu, onContextMenu, categoryContextMenu, onCategoryContextMenu, onCreateCategory, onDeleteCategory, onRenameAsset, onDuplicateAsset, onDeleteAsset, onChangeAssetColor, onBackupAsset, cloudAssets, cloudTransfers, onDownloadCloudAsset, onDeleteCloudAsset }: { assets: VoxelAsset[]; categoryPaths: string[][]; query: string; setQuery: (value: string) => void; selectedAssetIds: string[]; onToggleAssetSelection: (assetId: string) => void; onClearAssetSelection: () => void; onExportAssets: (assetIds: string[]) => void; collapsed: boolean; onToggleCollapsed: () => void; onNotice: (value: string) => void; onBeginPlacement: (asset: VoxelAsset) => void; onEndPlacement: () => void; contextMenu: AssetContextMenuState; onContextMenu: (assetId: string, x: number, y: number) => void; categoryContextMenu: AssetCategoryContextMenuState; onCategoryContextMenu: (path: string[], x: number, y: number) => void; onCreateCategory: (parentPath: string[] | null) => void; onDeleteCategory: (path: string[]) => void; onRenameAsset: (assetId: string) => void; onDuplicateAsset: (assetId: string) => void; onDeleteAsset: (assetId: string) => void; onChangeAssetColor: (assetId: string, color: string) => void; onBackupAsset: (assetId: string) => void; cloudAssets: CloudAssetSummary[]; cloudTransfers: Record<string, CloudProgress>; onDownloadCloudAsset: (asset: CloudAssetSummary) => void; onDeleteCloudAsset: (asset: CloudAssetSummary) => void }) {
+function AssetSidebar({ assets, categoryPaths, query, setQuery, selectedAssetIds, onToggleAssetSelection, onClearAssetSelection, onExportAssets, collapsed, onToggleCollapsed, onNotice, onBeginPlacement, onEndPlacement, contextMenu, onContextMenu, categoryContextMenu, onCategoryContextMenu, onCreateCategory, onDeleteCategory, onRenameAsset, onDuplicateAsset, onDeleteAsset, onChangeAssetColor, onBackupAsset, cloudAssets, cloudTransfers, cloudTransferErrors, onDownloadCloudAsset, onDeleteCloudAsset }: { assets: VoxelAsset[]; categoryPaths: string[][]; query: string; setQuery: (value: string) => void; selectedAssetIds: string[]; onToggleAssetSelection: (assetId: string) => void; onClearAssetSelection: () => void; onExportAssets: (assetIds: string[]) => void; collapsed: boolean; onToggleCollapsed: () => void; onNotice: (value: string) => void; onBeginPlacement: (asset: VoxelAsset) => void; onEndPlacement: () => void; contextMenu: AssetContextMenuState; onContextMenu: (assetId: string, x: number, y: number) => void; categoryContextMenu: AssetCategoryContextMenuState; onCategoryContextMenu: (path: string[], x: number, y: number) => void; onCreateCategory: (parentPath: string[] | null) => void; onDeleteCategory: (path: string[]) => void; onRenameAsset: (assetId: string) => void; onDuplicateAsset: (assetId: string) => void; onDeleteAsset: (assetId: string) => void; onChangeAssetColor: (assetId: string, color: string) => void; onBackupAsset: (assetId: string) => void; cloudAssets: CloudAssetSummary[]; cloudTransfers: Record<string, CloudProgress>; cloudTransferErrors: Record<string, string>; onDownloadCloudAsset: (asset: CloudAssetSummary) => void; onDeleteCloudAsset: (asset: CloudAssetSummary) => void }) {
   const categoryTree = assetCategoryTreeFromAssetsAndPaths(assets, categoryPaths)
   const [expandedCategoryKeys, setExpandedCategoryKeys] = useState<Record<string, boolean>>({})
   const draggedAssetRef = useRef(false)
@@ -5706,8 +5744,13 @@ function AssetSidebar({ assets, categoryPaths, query, setQuery, selectedAssetIds
     <div className="asset-scroll">
       {categoryTree.length ? categoryTree.map((node) => renderCategoryNode(node)) : <div className="asset-category-empty">资产库暂无类别</div>}
       {cloudAssets.length > 0 && <div className="cloud-asset-section"><div className="asset-cloud-heading"><span>云端实体</span><small>{cloudAssets.length}</small></div>{cloudAssets.map((asset) => {
-        const progress = cloudTransfers[`download:asset:${asset.id}`]
-        return <div className={`cloud-asset-row ${progress ? 'transferring' : ''}`} key={asset.id}><div><Cloud size={13} /><strong>{asset.name}</strong><span>{formatBytesUi(asset.sizeBytes)} · {asset.categoryPath.join(' / ') || '未命名类别'}</span></div>{progress ? <span className="cloud-progress-label">{Math.round((progress.transferredBytes / Math.max(1, progress.transfer.totalBytes)) * 100)}%</span> : <><button onClick={() => onDownloadCloudAsset(asset)} title="下载云端实体"><Download size={13} /></button><button className="cloud-delete-button" onClick={() => onDeleteCloudAsset(asset)} title="删除云端副本"><Trash2 size={13} /></button></>}</div>
+        const key = `download:asset:${asset.id}`
+        const progress = cloudTransfers[key]
+        const error = cloudTransferErrors[key] ?? progress?.error
+        const active = progress && ['queued', 'transferring', 'reconnecting'].includes(progress.status)
+        const failed = Boolean(error) || progress?.status === 'failed'
+        const label = failed ? `失败 · ${error ?? '下载失败'}` : progress?.status === 'reconnecting' ? '正在重连…' : progress ? `${Math.round((progress.transferredBytes / Math.max(1, progress.transfer.totalBytes)) * 100)}%` : null
+        return <div className={`cloud-asset-row ${active ? 'transferring' : ''} ${failed ? 'failed' : ''}`} key={asset.id}><div><Cloud size={13} /><strong>{asset.name}</strong><span>{formatBytesUi(asset.sizeBytes)} · {asset.categoryPath.join(' / ') || '未命名类别'}</span>{label && <em>{label}</em>}</div>{active ? <span className="cloud-progress-label">{label}</span> : <><button onClick={() => onDownloadCloudAsset(asset)} title={failed ? '重试下载' : '下载云端实体'}><Download size={13} /></button><button className="cloud-delete-button" onClick={() => onDeleteCloudAsset(asset)} title="删除云端副本"><Trash2 size={13} /></button></>}</div>
       })}</div>}
     </div>
     </>}
@@ -5844,7 +5887,7 @@ function previewVoxelsForParts(parts: SceneEntityPart[]): Voxel[] {
   })
 }
 
-function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSceneProject, cloudAssets, cloudScenes, cloudUsage, cloudError, cloudTransfers, onRefreshCloud, onBackupCurrentScene, onDownloadCloudScene, onDeleteCloudScene, onClose, onImportScene, onLoadScene, onSelectScene, onSaveSceneEntity, onAddSceneEntityToCurrentScene, onDeleteSceneEntity, contextMenu, onContextMenu, onCloseContextMenu, onDuplicateScene, onDeleteScene }: { library: LibraryResponse; busy: boolean; error: string | null; selectedSceneId: string | null; selectedSceneProject: ProjectState | null; cloudAssets: CloudAssetSummary[]; cloudScenes: CloudSceneSummary[]; cloudUsage: CloudUsage | null; cloudError: string | null; cloudTransfers: Record<string, CloudProgress>; onRefreshCloud: () => void; onBackupCurrentScene: () => void; onDownloadCloudScene: (scene: CloudSceneSummary) => void; onDeleteCloudScene: (scene: CloudSceneSummary) => void; onClose: () => void; onImportScene: () => void; onLoadScene: (id: string, name: string) => void; onSelectScene: (id: string, name: string, x: number, y: number) => void; onSaveSceneEntity: (asset: VoxelAsset) => void; onAddSceneEntityToCurrentScene: (asset: VoxelAsset) => void; onDeleteSceneEntity: (sceneId: string, entity: SceneLibraryEntity) => void | Promise<void>; contextMenu: SceneLibraryContextMenuState; onContextMenu: (sceneId: string, x: number, y: number) => void; onCloseContextMenu: () => void; onDuplicateScene: (sceneId: string, name: string) => void; onDeleteScene: (sceneId: string, name: string) => void }) {
+function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSceneProject, cloudAssets, cloudScenes, cloudUsage, cloudError, cloudTransfers, cloudTransferErrors, onRefreshCloud, onBackupCurrentScene, onDownloadCloudScene, onDeleteCloudScene, onClose, onImportScene, onLoadScene, onSelectScene, onSaveSceneEntity, onAddSceneEntityToCurrentScene, onDeleteSceneEntity, contextMenu, onContextMenu, onCloseContextMenu, onDuplicateScene, onDeleteScene }: { library: LibraryResponse; busy: boolean; error: string | null; selectedSceneId: string | null; selectedSceneProject: ProjectState | null; cloudAssets: CloudAssetSummary[]; cloudScenes: CloudSceneSummary[]; cloudUsage: CloudUsage | null; cloudError: string | null; cloudTransfers: Record<string, CloudProgress>; cloudTransferErrors: Record<string, string>; onRefreshCloud: () => void; onBackupCurrentScene: () => void; onDownloadCloudScene: (scene: CloudSceneSummary) => void; onDeleteCloudScene: (scene: CloudSceneSummary) => void; onClose: () => void; onImportScene: () => void; onLoadScene: (id: string, name: string) => void; onSelectScene: (id: string, name: string, x: number, y: number) => void; onSaveSceneEntity: (asset: VoxelAsset) => void; onAddSceneEntityToCurrentScene: (asset: VoxelAsset) => void; onDeleteSceneEntity: (sceneId: string, entity: SceneLibraryEntity) => void | Promise<void>; contextMenu: SceneLibraryContextMenuState; onContextMenu: (sceneId: string, x: number, y: number) => void; onCloseContextMenu: () => void; onDuplicateScene: (sceneId: string, name: string) => void; onDeleteScene: (sceneId: string, name: string) => void }) {
   const [entityContextMenu, setEntityContextMenu] = useState<SceneEntityContextMenuState>(null)
   const menuCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const selectedSceneParts = useMemo(
@@ -5994,8 +6037,13 @@ function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSce
             return <button className={`library-row ${selectedSceneId === scene.id ? 'selected' : ''}`} data-scene-id={scene.id} key={scene.id} onClick={openSceneMenu} onContextMenu={openSceneMenu}><div><strong>{scene.name}</strong><span>{scene.assemblyCount} 个装配体 · {entityCount} 个实体</span></div><div className="library-row-actions"><ChevronRight size={15} /></div></button>
           }) : null}
           {cloudScenes.length > 0 && <div className="cloud-scene-list"><div className="cloud-list-title"><Cloud size={13} /> 云端场景</div>{cloudScenes.map((scene) => {
-            const progress = cloudTransfers[`download:scene:${scene.id}`]
-            return <div className={`library-row cloud-row ${progress ? 'transferring' : ''}`} key={`cloud:${scene.id}`}><div><strong><Cloud size={13} /> {scene.name}</strong><span>{scene.assemblyCount ?? 0} 个装配体 · {scene.entityCount ?? scene.instanceCount ?? 0} 个实体 · {formatBytesUi(scene.sizeBytes)}</span>{progress && <em>{progress.status === 'reconnecting' ? '正在重连…' : `${Math.round((progress.transferredBytes / Math.max(1, progress.transfer.totalBytes)) * 100)}%`}</em>}</div><div className="library-row-actions">{!progress && <><button onClick={() => onDownloadCloudScene(scene)} title="下载云端场景"><Download size={13} /></button><button onClick={() => onDeleteCloudScene(scene)} title="删除云端副本"><Trash2 size={13} /></button></>}</div></div>
+            const key = `download:scene:${scene.id}`
+            const progress = cloudTransfers[key]
+            const error = cloudTransferErrors[key] ?? progress?.error
+            const active = progress && ['queued', 'transferring', 'reconnecting'].includes(progress.status)
+            const failed = Boolean(error) || progress?.status === 'failed'
+            const label = failed ? `失败 · ${error ?? '下载失败'}` : progress?.status === 'reconnecting' ? '正在重连…' : progress ? `${Math.round((progress.transferredBytes / Math.max(1, progress.transfer.totalBytes)) * 100)}%` : null
+            return <div className={`library-row cloud-row ${active ? 'transferring' : ''} ${failed ? 'failed' : ''}`} key={`cloud:${scene.id}`}><div><strong><Cloud size={13} /> {scene.name}</strong><span>{scene.assemblyCount ?? 0} 个装配体 · {scene.entityCount ?? scene.instanceCount ?? 0} 个实体 · {formatBytesUi(scene.sizeBytes)}</span>{label && <em className={failed ? 'cloud-transfer-error' : ''}>{label}</em>}</div><div className="library-row-actions">{active ? <span className="cloud-progress-label">{label}</span> : <><button onClick={() => onDownloadCloudScene(scene)} title={failed ? '重试下载' : '下载云端场景'}><Download size={13} /></button><button onClick={() => onDeleteCloudScene(scene)} title="删除云端副本"><Trash2 size={13} /></button></>}</div></div>
           })}</div>}
           {!library.scenes.length && !cloudScenes.length && <div className="empty-panel">尚无本地或云端场景</div>}
           </div>

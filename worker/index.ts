@@ -480,13 +480,15 @@ async function incrementBlobRef(env: Env & { DB: D1Database }, hash: string, siz
 }
 
 async function cleanupExpiredTransfers(env: Env & { DB: D1Database; BLOBS: R2Bucket }, owner: string) {
-  const rows = await env.DB.prepare('SELECT transfer_id, temp_key, multipart_upload_id FROM cloud_transfers WHERE owner_id = ?1 AND expires_at < ?2 AND status NOT IN (\'completed\', \'cancelled\')')
-    .bind(owner, new Date().toISOString()).all<Pick<CloudTransferRow, 'transfer_id' | 'temp_key' | 'multipart_upload_id'>>()
+  const rows = await env.DB.prepare('SELECT transfer_id, direction, temp_key, multipart_upload_id FROM cloud_transfers WHERE owner_id = ?1 AND expires_at < ?2 AND status NOT IN (\'completed\', \'cancelled\')')
+    .bind(owner, new Date().toISOString()).all<Pick<CloudTransferRow, 'transfer_id' | 'direction' | 'temp_key' | 'multipart_upload_id'>>()
   for (const row of rows.results ?? []) {
-    if (row.multipart_upload_id) {
+    if (row.direction === 'upload' && row.multipart_upload_id) {
       try { await env.BLOBS.resumeMultipartUpload(row.temp_key, row.multipart_upload_id).abort() } catch { /* expired upload may already be gone */ }
     }
-    await env.BLOBS.delete(row.temp_key)
+    // Download sessions point at the permanent content-addressed blob. Only
+    // upload sessions own a temporary R2 object that may be deleted here.
+    if (row.direction === 'upload') await env.BLOBS.delete(row.temp_key)
     await env.DB.prepare('DELETE FROM cloud_transfers WHERE transfer_id = ?1 AND owner_id = ?2').bind(row.transfer_id, owner).run()
   }
 }
@@ -740,10 +742,13 @@ async function handleCloudApi(request: Request, env: Env & { DB: D1Database; BLO
     const row = await env.DB.prepare('SELECT * FROM cloud_transfers WHERE transfer_id = ?1 AND owner_id = ?2').bind(transferId, owner).first<CloudTransferRow>()
     if (!row) return errorResponse(new Error('传输会话不存在'), 404, request, env)
     if (request.method === 'DELETE') {
-      if (row.multipart_upload_id) {
+      if (row.direction === 'upload' && row.multipart_upload_id) {
         try { await env.BLOBS.resumeMultipartUpload(row.temp_key, row.multipart_upload_id).abort() } catch { /* idempotent cleanup */ }
       }
-      await env.BLOBS.delete(row.temp_key)
+      // A download transfer uses the permanent blob key as its read source;
+      // deleting it here would make the object disappear after the first
+      // successful download and fail for every subsequent page refresh.
+      if (row.direction === 'upload') await env.BLOBS.delete(row.temp_key)
       await env.DB.prepare('DELETE FROM cloud_transfers WHERE transfer_id = ?1 AND owner_id = ?2').bind(transferId, owner).run()
       return cloudJsonResponse({ ok: true }, 200, request, env)
     }

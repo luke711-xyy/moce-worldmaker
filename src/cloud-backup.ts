@@ -248,10 +248,18 @@ export async function uploadCloudScene(scene: MoceSceneFile, conflictMode?: 'rep
 
 export async function downloadCloudObject(kind: 'asset' | 'scene', id: string, versionId?: string, onProgress?: (progress: CloudProgress) => void): Promise<{ bytes: Uint8Array; transfer: CloudTransfer }> {
   const started = await startTransfer({ direction: 'download', objectKind: kind, objectId: id, versionId, name: id, blobHash: '0'.repeat(64), totalBytes: 1, totalParts: 1 })
-  const bytes = await downloadBytes(started.transfer, onProgress)
-  onProgress?.({ transfer: { ...started.transfer, status: 'completed' }, transferredBytes: bytes.byteLength, status: 'completed' })
-  await jsonRequest(`/api/cloud/transfers/${encodeURIComponent(started.transfer.transferId)}`, { method: 'DELETE' }).catch(() => undefined)
-  return { bytes, transfer: started.transfer }
+  try {
+    const bytes = await downloadBytes(started.transfer, onProgress)
+    onProgress?.({ transfer: { ...started.transfer, status: 'completed' }, transferredBytes: bytes.byteLength, status: 'completed' })
+    await jsonRequest(`/api/cloud/transfers/${encodeURIComponent(started.transfer.transferId)}`, { method: 'DELETE' }).catch(() => undefined)
+    return { bytes, transfer: started.transfer }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '云端下载失败'
+    onProgress?.({ transfer: { ...started.transfer, status: 'failed' }, transferredBytes: 0, status: 'failed', error: message })
+    await clearTransferCache(started.transfer.transferId)
+    await jsonRequest(`/api/cloud/transfers/${encodeURIComponent(started.transfer.transferId)}`, { method: 'DELETE' }).catch(() => undefined)
+    throw error
+  }
 }
 
 export async function deleteCloudAsset(id: string) {

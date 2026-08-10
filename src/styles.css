@@ -573,6 +573,9 @@ button { border: 0; cursor: pointer; color: inherit; }
 .cloud-row strong, .cloud-asset-row strong { display: flex; align-items: center; gap: 6px; color: #9aa5a2; }
 .cloud-row span, .cloud-asset-row span { color: #65716f; }
 .cloud-row em { display: block; margin-top: 4px; color: #c78570; font-style: normal; font: 8px 'DM Mono', monospace; }
+.cloud-row.failed, .cloud-asset-row.failed { border-color: #9f5544; background: #21191a; }
+.cloud-row .cloud-transfer-error, .cloud-asset-row em { color: #e58a76; font-style: normal; font: 8px 'DM Mono', monospace; }
+.cloud-asset-row em { grid-column: 2; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .cloud-row button, .cloud-asset-row button { display: grid; place-items: center; width: 24px; height: 24px; color: #a8b2af; background: transparent; border: 1px solid #3c484a; }
 .cloud-row button:hover, .cloud-asset-row button:hover { color: #fff0df; border-color: #b45a43; background: #3b2926; }
 .cloud-delete-button { color: #c77868 !important; }
