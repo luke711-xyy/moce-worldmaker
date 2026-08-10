@@ -123,7 +123,15 @@ function wait(ms: number) {
 
 function isRetryable(error: unknown) {
   if (!(error instanceof Error)) return true
-  return !/401|403|400|409|配额|格式|不存在|参数|校验失败/.test(error.message)
+  // HTTP errors are deterministic unless they are a gateway/rate-limit
+  // failure. Retrying a missing R2 object for two minutes only makes the UI
+  // look like the user's network is broken.
+  const status = error.message.match(/[（(](\d{3})[）)]/)?.[1]
+  if (status) {
+    const code = Number(status)
+    return code === 408 || code === 429 || code >= 500
+  }
+  return !/401|403|400|404|409|410|413|415|422|配额|格式|不存在|参数|校验失败/.test(error.message)
 }
 
 async function withReconnect<T>(operation: () => Promise<T>, onStatus: (status: 'transferring' | 'reconnecting', error?: string) => void): Promise<T> {
@@ -200,7 +208,11 @@ async function downloadBytes(transfer: CloudTransfer, onProgress?: (progress: Cl
     }
     const part = await withReconnect(async () => {
       const response = await fetch(`/api/cloud/transfers/${encodeURIComponent(transfer.transferId)}/parts/${partNumber}`, { credentials: 'include' })
-      if (!response.ok) throw new Error(`下载分块失败（${response.status}）`)
+      if (!response.ok) {
+        if (response.status === 404) throw new Error('云端场景内容不存在（404），请重新备份该场景')
+        if (response.status === 401 || response.status === 403) throw new Error(`云端下载未授权（${response.status}），请重新登录`)
+        throw new Error(`下载分块失败（${response.status}）`)
+      }
       return new Uint8Array(await response.arrayBuffer())
     }, (status, error) => onProgress?.({ transfer, transferredBytes: transferred, status, error }))
     await cacheTransferChunk(transfer.transferId, partNumber, part.buffer.slice(part.byteOffset, part.byteOffset + part.byteLength))
