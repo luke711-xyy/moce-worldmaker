@@ -448,6 +448,7 @@ button { border: 0; cursor: pointer; color: inherit; }
 .library-column-title { position: sticky; top: -14px; z-index: 2; margin: -14px -14px 8px; padding: 14px 14px 8px; color: #cbd0ca; background: #202729; font-size: 11px; }
 .library-scene-column > .library-column-title { position: static; flex: 0 0 auto; margin: 0; padding: 14px 14px 8px; }
 .library-scene-list { flex: 1 1 auto; min-height: 0; padding: 0 14px 12px; overflow-y: auto; overflow-x: hidden; }
+.library-scene-list > .empty-panel { min-height: 120px; height: auto; }
 .library-scene-preview { flex: 0 0 168px; min-height: 0; margin: 0 14px 14px; overflow: hidden; border: 1px solid #354043; background: #171d1f; }
 .library-scene-preview .mini-preview { background: radial-gradient(circle at 50% 38%, #293437 0, #171d1f 78%); }
 .scene-preview-canvas { display: block; width: 100%; height: 100%; background: radial-gradient(circle at 50% 38%, #293437 0, #171d1f 78%); }

@@ -3765,6 +3765,16 @@ function App() {
     setCloudTransfers((current) => ({ ...current, [key]: progress }))
   }
 
+  const clearCompletedCloudTransfers = (objectKind: 'asset' | 'scene', direction: 'upload' | 'download') => {
+    setCloudTransfers((current) => {
+      const next = { ...current }
+      Object.entries(next).forEach(([key, progress]) => {
+        if (progress.transfer.objectKind === objectKind && progress.transfer.direction === direction && progress.status === 'completed') delete next[key]
+      })
+      return next
+    })
+  }
+
   const cloudConflictChoice = (label: string): 'replace' | 'copy' | 'cancel' => {
     const choice = window.prompt(`${label}\n请输入：覆盖 / 副本 / 取消`, '覆盖')?.trim().toLowerCase()
     if (choice === '覆盖' || choice === 'replace' || choice === '1') return 'replace'
@@ -3777,6 +3787,7 @@ function App() {
     if (!asset) return
     try {
       await uploadCloudAsset(asset, normalizeAssetCategoryPath(asset.categoryPath), conflictMode, conflictId, setCloudTransferProgress)
+      clearCompletedCloudTransfers('asset', 'upload')
       await refreshCloudLibrary()
       setNotice(`已备份实体到云端 · ${asset.name}`)
     } catch (error) {
@@ -3792,19 +3803,30 @@ function App() {
     }
   }
 
-  const backupCurrentSceneToCloud = async (conflictMode?: 'replace' | 'copy', conflictId?: string) => {
+  const backupCurrentSceneToCloud = async (requestedName?: string, conflictMode?: 'replace' | 'copy', conflictId?: string) => {
     let sceneFile: MoceSceneFile
     try { sceneFile = createSceneFile(projectRef.current) } catch (error) { setNotice(`云端场景备份失败 · ${error instanceof Error ? error.message : '场景数据无效'}`); return }
+    const cloudName = requestedName ?? window.prompt('请输入云端场景名称', sceneFile.scene.name)?.trim()
+    if (!cloudName) {
+      setNotice('已取消云端场景备份')
+      return
+    }
+    // Cloud naming is intentionally independent from the local scene name. The
+    // first backup must be explicitly named, while a later backup can choose a
+    // different cloud copy without mutating the current local scene.
+    const cloudSceneFile = structuredClone(sceneFile)
+    cloudSceneFile.scene.name = cloudName
     try {
-      await uploadCloudScene(sceneFile, conflictMode, conflictId, setCloudTransferProgress)
+      const result = await uploadCloudScene(cloudSceneFile, conflictMode, conflictId, setCloudTransferProgress)
+      clearCompletedCloudTransfers('scene', 'upload')
       await refreshCloudLibrary()
-      setNotice(`已备份场景到云端 · ${sceneFile.scene.name}`)
+      setNotice(`已备份场景到云端 · ${result.effectiveName}`)
     } catch (error) {
       const typed = error as Error & { code?: string; conflicts?: Array<{ id: string; name: string }> }
       if (typed.code === 'CLOUD_CONFLICT' && typed.conflicts?.[0]) {
         const conflict = typed.conflicts[0]
         const next = cloudConflictChoice(`云端已有同名或同 ID 场景“${conflict.name}”`)
-        if (next !== 'cancel') return backupCurrentSceneToCloud(next, next === 'replace' ? conflict.id : undefined)
+        if (next !== 'cancel') return backupCurrentSceneToCloud(cloudName, next, next === 'replace' ? conflict.id : undefined)
         setNotice('已取消云端场景备份')
         return
       }
@@ -5952,7 +5974,7 @@ function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSce
     setEntityContextMenu(null)
   }
   useEffect(() => () => cancelMenuClose(), [])
-  const sceneUploadProgress = cloudTransfers[`upload:scene:${selectedSceneId ?? ''}`] ?? Object.values(cloudTransfers).find((progress) => progress.transfer.direction === 'upload' && progress.transfer.objectKind === 'scene')
+  const sceneUploadProgress = Object.values(cloudTransfers).find((progress) => progress.transfer.direction === 'upload' && progress.transfer.objectKind === 'scene' && ['queued', 'transferring', 'reconnecting'].includes(progress.status))
   return <div className="modal-backdrop" onPointerDown={(event) => event.target === event.currentTarget && onClose()}>
     <section className="library-dialog" role="dialog" aria-modal="true" aria-label="场景库" onPointerDown={(event) => { const target = event.target as HTMLElement; if (!target.closest('button, input, .scene-library-context-menu')) closeMenus() }}>
       <div className="library-dialog-heading"><div><h2>场景库</h2><p>场景文件与场景实体由当前工程自动管理</p></div><button className="icon-button" aria-label="关闭场景库" onClick={onClose}><X size={17} /></button></div>
@@ -5970,11 +5992,12 @@ function SceneLibraryDialog({ library, busy, error, selectedSceneId, selectedSce
             // the corrected count without requiring a re-save.
             const entityCount = selectedSceneId === scene.id && selectedSceneProject ? selectedSceneEntities.length : scene.entityCount
             return <button className={`library-row ${selectedSceneId === scene.id ? 'selected' : ''}`} data-scene-id={scene.id} key={scene.id} onClick={openSceneMenu} onContextMenu={openSceneMenu}><div><strong>{scene.name}</strong><span>{scene.assemblyCount} 个装配体 · {entityCount} 个实体</span></div><div className="library-row-actions"><ChevronRight size={15} /></div></button>
-          }) : <div className="empty-panel">尚无本地场景</div>}
+          }) : null}
           {cloudScenes.length > 0 && <div className="cloud-scene-list"><div className="cloud-list-title"><Cloud size={13} /> 云端场景</div>{cloudScenes.map((scene) => {
             const progress = cloudTransfers[`download:scene:${scene.id}`]
             return <div className={`library-row cloud-row ${progress ? 'transferring' : ''}`} key={`cloud:${scene.id}`}><div><strong><Cloud size={13} /> {scene.name}</strong><span>{scene.assemblyCount ?? 0} 个装配体 · {scene.entityCount ?? scene.instanceCount ?? 0} 个实体 · {formatBytesUi(scene.sizeBytes)}</span>{progress && <em>{progress.status === 'reconnecting' ? '正在重连…' : `${Math.round((progress.transferredBytes / Math.max(1, progress.transfer.totalBytes)) * 100)}%`}</em>}</div><div className="library-row-actions">{!progress && <><button onClick={() => onDownloadCloudScene(scene)} title="下载云端场景"><Download size={13} /></button><button onClick={() => onDeleteCloudScene(scene)} title="删除云端副本"><Trash2 size={13} /></button></>}</div></div>
           })}</div>}
+          {!library.scenes.length && !cloudScenes.length && <div className="empty-panel">尚无本地或云端场景</div>}
           </div>
           <div className="library-scene-preview" aria-label="选中场景完整预览">
             {selectedSceneProject && scenePreviewVoxels.length ? <SceneLibraryPreview cacheKey={selectedSceneId ?? selectedSceneProject.name} voxels={scenePreviewVoxels} maxVoxels={SCENE_LIBRARY_PREVIEW_MAX_VOXELS} /> : selectedSceneId && busy ? <div className="empty-panel">正在加载场景预览…</div> : <div className="empty-panel">请选择场景查看完整预览</div>}
