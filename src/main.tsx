@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronRight, Cloud, Database, Download, Eraser, Eye, FilePlus2, FolderOpen, Grid3X3, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceRotationPivot, instanceVoxelPairs, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceRotationPivot, instanceVoxelPairs, isBundledDefaultSampleProject, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, parseSceneFileText, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, validateEntityFile } from './persistence'
 import { deleteLocalAsset, deleteLocalScene, duplicateLocalScene, initializeLocalLibrary, loadLocalLibrary, loadLocalScene, saveLocalAsset, saveLocalAssetCategories, saveLocalScene } from './local-library'
@@ -1286,7 +1286,7 @@ function assetCategoryTreeFromAssetsAndPaths(assets: VoxelAsset[], paths: string
 }
 
 function App() {
-  const [project, setProject] = useState<ProjectState>(() => normalizeStoredProject(makeDefaultProject()))
+  const [project, setProject] = useState<ProjectState>(() => normalizeStoredProject(makeEmptyProject()))
   const projectRef = useRef(project)
   const historyRef = useRef<{ past: ProjectHistoryEntry[]; future: ProjectHistoryEntry[] }>({ past: [], future: [] })
   const [historyRevision, setHistoryRevision] = useState(0)
@@ -1307,9 +1307,9 @@ function App() {
   const [showGrid, setShowGrid] = useState(true)
   const [showBoundary, setShowBoundary] = useState(true)
   const [boundaryOpen, setBoundaryOpen] = useState(false)
-  const [boundaryDraft, setBoundaryDraft] = useState<SceneBounds>(() => sceneBoundsForProject(makeDefaultProject()))
+  const [boundaryDraft, setBoundaryDraft] = useState<SceneBounds>(() => sceneBoundsForProject(makeEmptyProject()))
   const [voxelSizeOpen, setVoxelSizeOpen] = useState(false)
-  const [voxelSizeDraft, setVoxelSizeDraft] = useState<number>(() => makeDefaultProject().voxelSizeMm)
+  const [voxelSizeDraft, setVoxelSizeDraft] = useState<number>(() => makeEmptyProject().voxelSizeMm)
   const [dragAxis, setDragAxis] = useState<'horizontal' | 'vertical'>('horizontal')
   const [editEntityId, setEditEntityId] = useState<string | null>(null)
   const [placementAssetId, setPlacementAssetId] = useState<string | null>(null)
@@ -1371,7 +1371,7 @@ function App() {
   const [assetContextMenu, setAssetContextMenu] = useState<AssetContextMenuState>(null)
   const [assetCategoryContextMenu, setAssetCategoryContextMenu] = useState<AssetCategoryContextMenuState>(null)
   const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([])
-  const [assetCategoryPaths, setAssetCategoryPaths] = useState<string[][]>(() => collectAssetCategoryPaths(makeDefaultProject().assets))
+  const [assetCategoryPaths, setAssetCategoryPaths] = useState<string[][]>(() => collectAssetCategoryPaths(makeEmptyProject().assets))
   const [assetCategorySave, setAssetCategorySave] = useState<AssetCategorySaveState>(null)
   const [sliceDialogOpen, setSliceDialogOpen] = useState(false)
   const persistenceReadyRef = useRef(false)
@@ -2140,7 +2140,19 @@ function App() {
   useEffect(() => {
     let cancelled = false
     const restoreSession = async () => {
-      const defaultProject = normalizeStoredProject(makeDefaultProject())
+      // Remove only the untouched bundled sample left by older builds. This
+      // is a one-time local cleanup: user-created scenes/assets and all cloud
+      // data are intentionally left alone.
+      const bundledAssetIds = makeDefaultProject().assets
+        .filter((asset) => asset.isTemplate !== false)
+        .map((asset) => asset.id)
+      try {
+        await Promise.all(bundledAssetIds.map((assetId) => deleteLocalAsset(assetId)))
+      } catch {
+        // Local cleanup is best-effort; it must never prevent the editor from
+        // opening an otherwise valid empty project.
+      }
+      const defaultProject = normalizeStoredProject(makeEmptyProject())
       const localWorkspace = await initializeLocalLibrary(defaultProject.assets)
       const localBaseProject = { ...defaultProject, assets: localWorkspace.assets }
       const storedRef = readLocalSceneRef()
@@ -2149,10 +2161,15 @@ function App() {
       if (storedRef?.libraryId?.startsWith('local-scene-')) {
         try {
           const restoredScene = restoreProject(await loadLocalScene(storedRef.libraryId))
-          const embeddedIds = new Set(restoredScene.assets.map((asset) => asset.id))
-          loaded = {
-            ...restoredScene,
-            assets: [...restoredScene.assets, ...localWorkspace.assets.filter((asset) => asset.isTemplate !== false && !embeddedIds.has(asset.id))],
+          if (isBundledDefaultSampleProject(restoredScene) || isLegacyDefaultSampleProject(restoredScene)) {
+            await deleteLocalScene(storedRef.libraryId)
+            writeLocalSceneRef(null)
+          } else {
+            const embeddedIds = new Set(restoredScene.assets.map((asset) => asset.id))
+            loaded = {
+              ...restoredScene,
+              assets: [...restoredScene.assets, ...localWorkspace.assets.filter((asset) => asset.isTemplate !== false && !embeddedIds.has(asset.id))],
+            }
           }
         } catch {
           writeLocalSceneRef(null)
@@ -2174,10 +2191,14 @@ function App() {
       if (draft && sameSceneRef(draft.ref, draftRef)) {
         try {
           const draftProject = normalizeStoredProject(restoreProject(draft.sceneFile))
-          const draftIds = new Set(draftProject.assets.map((asset) => asset.id))
-          const templateAssets = normalized.assets.filter((asset) => asset.isTemplate !== false && !draftIds.has(asset.id))
-          restored = { ...draftProject, assets: [...draftProject.assets, ...structuredClone(templateAssets)] }
-          recoveredDraft = true
+          if (isBundledDefaultSampleProject(draftProject)) {
+            await clearLocalSceneDraft()
+          } else {
+            const draftIds = new Set(draftProject.assets.map((asset) => asset.id))
+            const templateAssets = normalized.assets.filter((asset) => asset.isTemplate !== false && !draftIds.has(asset.id))
+            restored = { ...draftProject, assets: [...draftProject.assets, ...structuredClone(templateAssets)] }
+            recoveredDraft = true
+          }
         } catch {
           await clearLocalSceneDraft()
         }
@@ -2195,7 +2216,7 @@ function App() {
       setSceneFileRef(activeRef)
       if (recoveredDraft) setNotice(`已恢复上次未保存编辑 · ${restored.name}`)
       else if (loaded) setNotice(`已加载场景 · ${normalized.name}`)
-      else setNotice('已加载默认场景 · 尚未保存到场景库')
+      else setNotice('已加载空白场景 · 尚未保存到场景库')
     }
     void restoreSession().catch(() => {
       if (cancelled) return
@@ -3552,7 +3573,7 @@ function App() {
 
   const createNewProject = () => {
     requestSceneReplace(async () => {
-      const next = normalizeStoredProject(makeDefaultProject())
+      const next = normalizeStoredProject(makeEmptyProject())
       replaceProject(next)
       const firstPart = sceneEntityParts(next)[0]
       setSelectedId(firstPart?.id ?? '')
@@ -3960,7 +3981,7 @@ function App() {
     // rebuild that scene. Reload the local catalog at this boundary as well:
     // this makes switching scenes self-healing even if an older editor build
     // previously replaced the in-memory project assets with scene-only data.
-    const localWorkspace = await initializeLocalLibrary(makeDefaultProject().assets)
+    const localWorkspace = await initializeLocalLibrary(makeEmptyProject().assets)
     const embeddedIds = new Set(loaded.assets.map((asset) => asset.id))
     const withLocalTemplates = {
       ...loaded,

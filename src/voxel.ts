@@ -1482,6 +1482,41 @@ export function makeDefaultProject(): ProjectState {
   return { version: 1, sampleRevision: DEFAULT_SAMPLE_REVISION, name: '莫测里·第一街区', voxelSizeMm: DEFAULT_VOXEL_SIZE_MM, sceneSizeCm: 20, sceneBounds: { x: 200, y: 200, z: 200 }, materials: MATERIALS, assets: [...templateAssets, ...sceneAssets], instances, customVoxels: [], customVoxelRenderModes: {}, customColors: {}, customEntityOffsets: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
 }
 
+/**
+ * Create the empty project shown to a first-time user.
+ *
+ * `makeDefaultProject` intentionally remains the bundled sample fixture used
+ * by import/export tests and by the legacy-sample migration. User-facing
+ * initialization must not use that fixture, otherwise the sample templates
+ * and instances silently reappear after a fresh session or when creating a
+ * new scene.
+ */
+export function makeEmptyProject(): ProjectState {
+  const sample = makeDefaultProject()
+  return {
+    ...sample,
+    sampleRevision: undefined,
+    name: '未命名场景',
+    assets: [],
+    instances: [],
+    customVoxels: [],
+    customVoxelRenderModes: {},
+    customColors: {},
+    customEntitySources: {},
+    customEntityOffsets: {},
+    entityNames: {},
+    entityNameModes: {},
+    entityNameSequences: {},
+    entityNameParents: {},
+    entitySequenceCounters: {},
+    assemblySequence: 1,
+    assemblyChildSequence: {},
+    childSequenceCounters: {},
+    assemblies: [],
+    lockedMemberKeys: [],
+  }
+}
+
 function defaultSampleInstanceIds(project: ProjectState): boolean {
   const expected = new Set(['inst-greek', 'inst-indian', 'inst-chinese', 'inst-japanese', 'inst-plaza', 'inst-tree-a', 'inst-tree-b'])
   return project.instances.length === expected.size && project.instances.every((instance) => expected.has(instance.id))
@@ -1492,6 +1527,15 @@ export function isLegacyDefaultSampleProject(project: ProjectState): boolean {
   if (project.sampleRevision === DEFAULT_SAMPLE_REVISION || project.name !== '莫测里·第一街区') return false
   if (project.customVoxels.length || (project.assemblies?.length ?? 0) || !defaultSampleInstanceIds(project)) return false
   return project.instances.every((instance) => /^house-|^plaza-|^tree-/.test(instance.assetId))
+}
+
+/** Return true only for the untouched bundled sample created by this build. */
+export function isBundledDefaultSampleProject(project: ProjectState): boolean {
+  if (project.sampleRevision !== DEFAULT_SAMPLE_REVISION || project.name !== '莫测里·第一街区') return false
+  if (project.customVoxels.length || (project.assemblies?.length ?? 0) || !defaultSampleInstanceIds(project)) return false
+  const expectedAssetIds = new Set(makeDefaultProject().assets.map((asset) => asset.id))
+  if (project.assets.length !== expectedAssetIds.size || project.assets.some((asset) => !expectedAssetIds.has(asset.id))) return false
+  return project.instances.every((instance) => /^scene-sample-/.test(instance.assetId))
 }
 
 /** Rebuild the old sample from current asset definitions while preserving user templates. */
