@@ -95,7 +95,12 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       const end = request.footprintEnd ?? request.current
       voxels = rasterizeCuboid(EDITOR_GROUND_PLANE, request.start, end, request.start.layer, request.current.layer, request.materialId)
     } else if (request.kind === 'sphere') {
-      voxels = rasterizeAnchoredSphere(EDITOR_GROUND_PLANE, request.start, request.current, 0, request.materialId)
+      // Shape tools use the fixed X/Z ground orientation, but a sphere may
+      // start on an elevated existing voxel layer. The main-thread gesture
+      // already resolves that layer into baseHeight; resetting it to zero
+      // here made the worker preview/commit disagree with the local path and
+      // dropped the sphere back onto the floor.
+      voxels = rasterizeAnchoredSphere(EDITOR_GROUND_PLANE, request.start, request.current, request.baseHeight, request.materialId)
     } else {
       const delta = request.extrudeDelta ?? request.current.layer - request.start.layer
       if (request.extrudeSessionId && request.source) extrudeSources.set(request.extrudeSessionId, { source: request.source })

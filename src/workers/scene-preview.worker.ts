@@ -1,9 +1,10 @@
 /// <reference lib="webworker" />
 
 import type { ScenePreviewWorkerRequest, ScenePreviewWorkerResponse } from '../runtime/scene-preview-client'
+import { exteriorAirKeys, toolCellKey } from '../voxel-tools'
 
 type SourceVoxel = { x: number; y: number; z: number; color: number }
-type Face = { orientation: 0 | 1 | 2; plane: number; a: number; b: number; color: number; sortKey: number }
+type Face = { orientation: 0 | 1 | 2 | 3 | 4 | 5; plane: number; a: number; b: number; color: number; sortKey: number }
 
 const key = (x: number, y: number, z: number) => `${x},${y},${z}`
 
@@ -35,10 +36,17 @@ function boundsOf(voxels: SourceVoxel[]): [number, number, number, number, numbe
   return [minX, minY, minZ, maxX, maxY, maxZ]
 }
 
-function selectVoxels(all: SourceVoxel[], occupancy: Set<string>, maxVoxels: number): SourceVoxel[] {
-  if (all.length <= maxVoxels) return all
+function selectVoxels(all: SourceVoxel[], occupancy: Set<string>, maxVoxels: number, exteriorAir: Set<string> | null, exteriorOnly: boolean): SourceVoxel[] {
+  if (!exteriorOnly && all.length <= maxVoxels) return all
   const directions = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
-  const surface = all.filter((voxel) => directions.some(([dx, dy, dz]) => !occupancy.has(key(voxel.x + dx, voxel.y + dy, voxel.z + dz))))
+  const surface = all.filter((voxel) => directions.some(([dx, dy, dz]) => {
+    const neighbor = key(voxel.x + dx, voxel.y + dy, voxel.z + dz)
+    return !occupancy.has(neighbor) && (exteriorAir === null || exteriorAir.has(neighbor))
+  }))
+  // The inspector uses exteriorOnly for a fixed camera thumbnail. Feed that
+  // path only the external surface cells even when the source is below the
+  // sampling limit; otherwise a shell operation changes the preview merely
+  // because the hidden interior cell set changed.
   const source = surface.length ? surface : all
   if (source.length <= maxVoxels) return source
   const bounds = boundsOf(all)
@@ -127,16 +135,22 @@ function buildPreview(request: ScenePreviewWorkerRequest): ScenePreviewWorkerRes
   const all = [...unique.values()]
   if (!all.length) return { type: 'scene-preview-built', requestId: request.requestId, bounds: new Int32Array(6), faces: new Int32Array(), sourceVoxelCount: 0, sampledVoxelCount: 0 }
   const occupancy = new Set(unique.keys())
+  const exteriorAir = request.exteriorOnly ? exteriorAirKeys(all) : null
   const bounds = boundsOf(all)
-  const sampled = selectVoxels(all, occupancy, Math.max(1, request.maxVoxels))
+  const sampled = selectVoxels(all, occupancy, Math.max(1, request.maxVoxels), exteriorAir, Boolean(request.exteriorOnly))
   const sampledKeys = new Set(sampled.map((voxel) => key(voxel.x, voxel.y, voxel.z)))
   const hasVoxel = (x: number, y: number, z: number) => occupancy.has(key(x, y, z))
   const faces: Face[] = []
   sampled.forEach((voxel) => {
     const sortKey = voxel.x + voxel.z + voxel.y * 0.02
-    if (!hasVoxel(voxel.x, voxel.y + 1, voxel.z)) faces.push({ orientation: 0, plane: voxel.y + 1, a: voxel.x, b: voxel.z, color: voxel.color, sortKey })
-    if (!hasVoxel(voxel.x + 1, voxel.y, voxel.z)) faces.push({ orientation: 1, plane: voxel.x + 1, a: voxel.z, b: voxel.y, color: voxel.color, sortKey })
-    if (!hasVoxel(voxel.x, voxel.y, voxel.z + 1)) faces.push({ orientation: 2, plane: voxel.z + 1, a: voxel.x, b: voxel.y, color: voxel.color, sortKey })
+    const visibleFace = (x: number, y: number, z: number) => !hasVoxel(x, y, z) && (!request.exteriorOnly || exteriorAir === null || exteriorAir.has(key(x, y, z)))
+    if (visibleFace(voxel.x, voxel.y + 1, voxel.z)) faces.push({ orientation: 0, plane: voxel.y + 1, a: voxel.x, b: voxel.z, color: voxel.color, sortKey })
+    if (visibleFace(voxel.x + 1, voxel.y, voxel.z)) faces.push({ orientation: 1, plane: voxel.x + 1, a: voxel.z, b: voxel.y, color: voxel.color, sortKey })
+    if (visibleFace(voxel.x, voxel.y, voxel.z + 1)) faces.push({ orientation: 2, plane: voxel.z + 1, a: voxel.x, b: voxel.y, color: voxel.color, sortKey })
+    if (request.exteriorOnly) return
+    if (visibleFace(voxel.x, voxel.y - 1, voxel.z)) faces.push({ orientation: 3, plane: voxel.y, a: voxel.x, b: voxel.z, color: voxel.color, sortKey: sortKey - 0.04 })
+    if (visibleFace(voxel.x - 1, voxel.y, voxel.z)) faces.push({ orientation: 4, plane: voxel.x, a: voxel.z, b: voxel.y, color: voxel.color, sortKey: sortKey - 0.02 })
+    if (visibleFace(voxel.x, voxel.y, voxel.z - 1)) faces.push({ orientation: 5, plane: voxel.z, a: voxel.x, b: voxel.y, color: voxel.color, sortKey: sortKey - 0.01 })
   })
   // Keep this set alive until face generation completes. It also makes the
   // intended sampling boundary explicit for future progressive LOD passes.

@@ -64,6 +64,72 @@ export function toolCellKey(cell: ToolCell): string {
   return `${cell.x},${cell.y},${cell.z}`
 }
 
+/**
+ * Return the empty cells reachable from just outside a voxel model.
+ *
+ * A plain "neighbor is empty" test treats a sealed cavity as a visible
+ * surface. That is useful for editing, but it makes a solid model and the
+ * same model after shell extraction produce different fixed thumbnails. The
+ * preview path uses this flood fill to keep enclosed cavity walls out of the
+ * external silhouette.
+ *
+ * Very large bounds are left to the caller's conservative fallback so a
+ * thumbnail cannot allocate an unbounded dense air volume.
+ */
+export function exteriorAirKeys(voxels: ReadonlyArray<ToolCell>, maxVolume = 8_000_000): Set<string> | null {
+  if (!voxels.length) return new Set<string>()
+  let minX = voxels[0].x, maxX = voxels[0].x
+  let minY = voxels[0].y, maxY = voxels[0].y
+  let minZ = voxels[0].z, maxZ = voxels[0].z
+  const occupied = new Set<string>()
+  for (const voxel of voxels) {
+    minX = Math.min(minX, voxel.x); maxX = Math.max(maxX, voxel.x)
+    minY = Math.min(minY, voxel.y); maxY = Math.max(maxY, voxel.y)
+    minZ = Math.min(minZ, voxel.z); maxZ = Math.max(maxZ, voxel.z)
+    occupied.add(toolCellKey(voxel))
+  }
+  const spanX = maxX - minX + 3
+  const spanY = maxY - minY + 3
+  const spanZ = maxZ - minZ + 3
+  if (spanX * spanY * spanZ > maxVolume) return null
+  const outside = new Set<string>()
+  const queue: Array<[number, number, number]> = [[minX - 1, minY - 1, minZ - 1]]
+  outside.add(toolCellKey({ x: minX - 1, y: minY - 1, z: minZ - 1 }))
+  let head = 0
+  while (head < queue.length) {
+    const [x, y, z] = queue[head++]
+    for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] as const) {
+      const nx = x + dx, ny = y + dy, nz = z + dz
+      if (nx < minX - 1 || nx > maxX + 1 || ny < minY - 1 || ny > maxY + 1 || nz < minZ - 1 || nz > maxZ + 1) continue
+      const next = toolCellKey({ x: nx, y: ny, z: nz })
+      if (occupied.has(next) || outside.has(next)) continue
+      outside.add(next)
+      queue.push([nx, ny, nz])
+    }
+  }
+  return outside
+}
+
+/**
+ * Return only cells that touch air reachable from outside the model.
+ *
+ * This is deliberately a preview/LOD helper, not a geometry editing
+ * operation: it preserves the original cell objects and never changes the
+ * scene. Keeping this filter separate from face generation makes a solid
+ * model and its hollow-shell version use the same external thumbnail cells.
+ */
+export function exteriorSurfaceVoxels<T extends ToolCell>(voxels: ReadonlyArray<T>, maxVolume = 8_000_000): T[] {
+  if (!voxels.length) return []
+  const exteriorAir = exteriorAirKeys(voxels, maxVolume)
+  if (exteriorAir === null) return [...voxels]
+  const occupied = new Set(voxels.map((voxel) => toolCellKey(voxel)))
+  const directions = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] as const
+  return voxels.filter((voxel) => directions.some(([dx, dy, dz]) => {
+    const neighbor = { x: voxel.x + dx, y: voxel.y + dy, z: voxel.z + dz }
+    return !occupied.has(toolCellKey(neighbor)) && exteriorAir.has(toolCellKey(neighbor))
+  }))
+}
+
 const brushCache = new Map<number, Array<{ u: number; v: number }>>()
 
 export function brushOffsets(size: number): Array<{ u: number; v: number }> {

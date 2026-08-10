@@ -53,6 +53,12 @@ describe('模型转体素', () => {
     expect(solid.asset.voxels.length).toBeGreaterThan(surface.asset.voxels.length)
   })
 
+  it('uses neutral gray for OBJ voxels instead of the active brush material', async () => {
+    const result = await importModelAsVoxelAssetWithDiagnostics(new File([cubeObj], 'gray-default.obj'), { targetSizeVoxels: 8, mode: 'solid', materialId: 'terracotta' })
+    expect(result.asset.color).toBe('#a5a6a2')
+    expect(new Set(result.asset.voxels.map((voxel) => voxel.materialId))).toEqual(new Set(['#a5a6a2']))
+  })
+
   it('warns when solid mode receives an open mesh', async () => {
     const openObj = `v 0 0 0\nv 2 0 0\nv 0 2 0\nf 1 2 3`
     const result = await importModelAsVoxelAssetWithDiagnostics(new File([openObj], 'open.obj'), { mode: 'solid' })

@@ -17,7 +17,7 @@ import { ScenePreviewInputVoxel, ScenePreviewPayload, ScenePreviewWorkerClient }
 import { MAX_PREVIEW_VOXELS, mergePreviewFaceCells, previewVoxelKey, selectPreviewVoxels } from './preview-voxels'
 import { clearLocalSceneDraft, LocalSceneDraft, LocalSceneRef, readLocalSceneDraft, readLocalSceneRef, writeLocalSceneDraft, writeLocalSceneRef } from './local-scene-session'
 import { commitNumericDraft, sanitizeNumericDraft } from './numeric-input'
-import { DrawingPlane, DrawOperation, EDITOR_GROUND_PLANE, VoxelAxis, VoxelTool, clampPlanePointToGround, makePlaneVoxel, planeAxes, projectVoxelToPlane, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine, rasterizePlanarStroke, selectExtrudeLayer, signedExtrudeDelta, toolCellKey, uniqueVoxels } from './voxel-tools'
+import { DrawingPlane, DrawOperation, EDITOR_GROUND_PLANE, VoxelAxis, VoxelTool, clampPlanePointToGround, exteriorAirKeys, exteriorSurfaceVoxels, makePlaneVoxel, planeAxes, projectVoxelToPlane, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine, rasterizePlanarStroke, selectExtrudeLayer, signedExtrudeDelta, toolCellKey, uniqueVoxels } from './voxel-tools'
 import { VoxelToolsGeometryResult, VoxelToolsWorkerClient, VoxelToolsShapeRequest } from './runtime/voxel-tools-client'
 import { adjustHexHsl, hexToHsl } from './color-utils'
 import { SliceLayer, SlicePlane, SliceVoxel, sliceEntityParts, sliceLayerToAsset, slicePlaneLabel } from './slicing'
@@ -2540,7 +2540,11 @@ function App() {
         const filteredInsertable = insertable.filter((voxel) => !occupiedCustomSceneKeys.has(sceneVoxelKey(voxel)))
         if (filteredInsertable.length) updateProject((draft) => {
           filteredInsertable.forEach((voxel) => {
-            draft.customVoxels.push(sceneToStoredCustomVoxel(draft, { ...voxel, materialId: activeMaterial, entityId }, entityId))
+            // Shape previews, especially extrusion, carry the source voxel's
+            // own material. Do not replace it with the currently selected
+            // palette swatch: a multicolour source layer must remain
+            // multicolour at the exact same coordinates.
+            draft.customVoxels.push(sceneToStoredCustomVoxel(draft, { ...voxel, entityId }, entityId))
             occupiedCustomSceneKeys.add(sceneVoxelKey(voxel))
           })
           if (editAssemblyId) {
@@ -2575,7 +2579,10 @@ function App() {
           const local = assetTransformCacheRef.current!.localCoordinateAtSceneVoxel(instance, asset, voxel, part.partId)
           if (!local) continue
           const targets = assetTargets.get(part.instanceId) ?? []
-          targets.push({ ...local, materialId: activeMaterial })
+          // Keep the material carried by the scene-space candidate. For a
+          // brush/shape this is the active swatch; for extrusion it is the
+          // corresponding source-layer material.
+          targets.push({ ...local, materialId: voxel.materialId, ...(voxel.paintMaterialId ? { paintMaterialId: voxel.paintMaterialId } : {}) })
           assetTargets.set(part.instanceId, targets)
           break
         }
@@ -5602,7 +5609,7 @@ function ModelImportDialog({ state, targetSizeVoxels, mode, onTargetSizeChange, 
           <div className="model-import-field"><span>体素化方式</span><div className="model-import-mode"><button className={mode === 'solid' ? 'active' : ''} disabled={state.busy || nativeVox} onClick={() => onModeChange('solid')}>实体填充</button><button className={mode === 'surface' ? 'active' : ''} disabled={state.busy || nativeVox} onClick={() => onModeChange('surface')}>仅表面</button></div></div>
           <p className="model-import-hint">{nativeVox ? 'VOX 已经是体素格式，将直接读取其体素坐标和颜色，不进行网格采样。' : '模型导入后会作为一个完整实体保存，内部保留全部体素与材质信息；目标最大尺寸指模型包围盒最长边的体素数量。实体填充适合封闭模型；开放模型会提示可能需要手工修补。'}</p>
         </div>
-        <div className="model-import-preview"><div className="model-import-preview-title"><span>体素预览</span><span>{sizeLabel}</span></div>{result ? <VoxelMiniPreview voxels={result.asset.voxels} asset={result.asset} /> : <div className="model-import-empty">设置参数后点击“开始体素化”</div>}</div>
+        <div className="model-import-preview"><div className="model-import-preview-title"><span>体素预览</span><span>{sizeLabel}</span></div>{result ? <VoxelMiniPreview voxels={result.asset.voxels} asset={result.asset} exteriorOnly /> : <div className="model-import-empty">设置参数后点击“开始体素化”</div>}</div>
         <div className="model-import-status"><div className="model-import-progress"><span style={{ width: `${Math.round(state.progress * 100)}%` }} /></div><span>{state.progressLabel}{state.busy ? ` · ${Math.round(state.progress * 100)}%` : ''}</span></div>
         {state.error && <div className="model-import-error">{state.error}</div>}
         {diagnostics && <div className="model-import-diagnostics">{diagnostics.sourceFormat === 'vox' ? <span>{diagnostics.voxelCount ?? result?.asset.voxels.length ?? 0} 个体素</span> : <span>{diagnostics.triangleCount} 个三角面</span>}<span>{diagnostics.partCount} 个部件</span>{diagnostics.sourceFormat !== 'vox' && <span>{diagnostics.closedMesh ? '封闭网格' : '开放网格'}</span>}{diagnostics.warnings.map((warning) => <p key={warning}>提示：{warning}</p>)}</div>}
@@ -5613,7 +5620,7 @@ function ModelImportDialog({ state, targetSizeVoxels, mode, onTargetSizeChange, 
 }
 
 const VoxelThumbnail = React.memo(function VoxelThumbnail({ asset }: { asset: VoxelAsset }) {
-  return <div className="thumbnail-scene" aria-label={`${asset.name} 3D 预览`}><VoxelMiniPreview voxels={asset.voxels} asset={asset} /></div>
+  return <div className="thumbnail-scene" aria-label={`${asset.name} 3D 预览`}><VoxelMiniPreview voxels={asset.voxels} asset={asset} exteriorOnly /></div>
 })
 
 const previewVoxelArrayIds = new WeakMap<object, number>()
@@ -5938,12 +5945,22 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
     setRotateDegrees(90)
   }, [selectedPartsKey])
   const previewKey = previewPartsSignature(selectedParts)
-  const previewVoxels = useMemo(() => previewVoxelsForParts(selectedParts), [previewKey])
+  const geometryResultVoxels = geometryPreview?.result?.voxels
+  const previewVoxels = useMemo(
+    () => geometryResultVoxels?.length ? geometryResultVoxels : previewVoxelsForParts(selectedParts),
+    [geometryResultVoxels, previewKey],
+  )
+  // Geometry results already contain resolved per-voxel display colors. Do
+  // not let the old asset/template color override recolor a shell/scale
+  // preview or make a hollow result look like the source model.
+  const previewAsset = geometryResultVoxels?.length ? undefined : selectedAsset
+  const previewColorOverride = geometryResultVoxels?.length ? undefined : previewColor
+  const previewVoxelColorMap = geometryResultVoxels?.length ? EMPTY_PREVIEW_COLORS : previewVoxelColors
   return <aside className="inspector">
     <div className="inspector-section entity-summary-section">
       <div className="inspector-inline-field"><span className="inspector-inline-label">选中实体</span><div className="select-field entity-name-field">{entityName}</div></div>
       <div className="inspector-inline-field"><span className="inspector-inline-label">来源</span><div className="input-field muted-field">{source}</div></div>
-      <div className="entity-preview"><VoxelMiniPreview voxels={previewVoxels} asset={selectedAsset} colorOverride={previewColor} voxelColors={previewVoxelColors} materialColors={previewMaterialColors} /></div>
+      <div className="entity-preview"><VoxelMiniPreview voxels={previewVoxels} asset={previewAsset} colorOverride={previewColorOverride} voxelColors={previewVoxelColorMap} materialColors={previewMaterialColors} exteriorOnly /></div>
       {canEnterEditMode && <button className="enter-edit-button" onClick={() => onEnterEditMode(editTargetId)}>进入编辑模式</button>}
     </div>
     {selectedParts.length > 0 && <>
@@ -6266,7 +6283,7 @@ function SliceDialog({ parts, project, name, onClose, onNotice }: { parts: Scene
   </section></div>
 }
 
-const SceneLibraryPreview = React.memo(function SceneLibraryPreview({ cacheKey, voxels, maxVoxels }: { cacheKey: string; voxels: ScenePreviewInputVoxel[]; maxVoxels: number }) {
+const SceneLibraryPreview = React.memo(function SceneLibraryPreview({ cacheKey, voxels, maxVoxels, exteriorOnly = false }: { cacheKey: string; voxels: ScenePreviewInputVoxel[]; maxVoxels: number; exteriorOnly?: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [payload, setPayload] = useState<ScenePreviewPayload | null>(null)
   const [loading, setLoading] = useState(false)
@@ -6288,7 +6305,8 @@ const SceneLibraryPreview = React.memo(function SceneLibraryPreview({ cacheKey, 
     const worker = workerRef.current
     if (!worker || !voxels.length) return
     const requestId = ++requestRef.current
-    const cached = resultCacheRef.current.get(cacheKey)
+    const resolvedCacheKey = `${cacheKey}:${exteriorOnly ? 'exterior' : 'all-faces'}`
+    const cached = resultCacheRef.current.get(resolvedCacheKey)
     if (cached) {
       setLoading(false)
       setFailed(false)
@@ -6298,17 +6316,17 @@ const SceneLibraryPreview = React.memo(function SceneLibraryPreview({ cacheKey, 
     setLoading(true)
     setFailed(false)
     setPayload(null)
-    worker.build(voxels, maxVoxels).then((nextPayload) => {
+    worker.build(voxels, maxVoxels, exteriorOnly).then((nextPayload) => {
       if (requestId !== requestRef.current) return
       setLoading(false)
       if (!nextPayload) {
         setFailed(true)
         return
       }
-      resultCacheRef.current.set(cacheKey, nextPayload)
+      resultCacheRef.current.set(resolvedCacheKey, nextPayload)
       setPayload(nextPayload)
     })
-  }, [cacheKey, voxels, maxVoxels])
+  }, [cacheKey, voxels, maxVoxels, exteriorOnly])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -6336,7 +6354,9 @@ const SceneLibraryPreview = React.memo(function SceneLibraryPreview({ cacheKey, 
       const spanVerticalY = Math.max(1, maxY - minY + 1)
       const tileX = 8
       const tileZ = 4.5
-      const tileY = 7
+      // Keep the three voxel axes at the same projected scale. The previous
+      // fixed value (7) made tall models visibly shorter than their footprint.
+      const tileY = Math.hypot(tileX, tileZ)
       const rawProject = (x: number, y: number, z: number): [number, number] => [(z - x) * tileX, (x + z) * tileZ - y * tileY]
       const projectedCorners = [
         [0, 0, 0], [spanX, 0, 0], [0, 0, spanGroundZ], [spanX, 0, spanGroundZ],
@@ -6366,14 +6386,20 @@ const SceneLibraryPreview = React.memo(function SceneLibraryPreview({ cacheKey, 
       context.lineJoin = 'round'
       payload.faces.forEach((face) => {
         let points: Array<[number, number]>
-        if (face.orientation === 0) points = [project(face.a, face.plane, face.b), project(face.a + face.width, face.plane, face.b), project(face.a + face.width, face.plane, face.b + face.height), project(face.a, face.plane, face.b + face.height)]
-        else if (face.orientation === 1) points = [project(face.plane, face.b, face.a), project(face.plane, face.b + face.height, face.a), project(face.plane, face.b + face.height, face.a + face.width), project(face.plane, face.b, face.a + face.width)]
+        if (face.orientation === 0 || face.orientation === 3) points = [project(face.a, face.plane, face.b), project(face.a + face.width, face.plane, face.b), project(face.a + face.width, face.plane, face.b + face.height), project(face.a, face.plane, face.b + face.height)]
+        else if (face.orientation === 1 || face.orientation === 4) points = [project(face.plane, face.b, face.a), project(face.plane, face.b + face.height, face.a), project(face.plane, face.b + face.height, face.a + face.width), project(face.plane, face.b, face.a + face.width)]
         else points = [project(face.a, face.b, face.plane), project(face.a + face.width, face.b, face.plane), project(face.a + face.width, face.b + face.height, face.plane), project(face.a, face.b + face.height, face.plane)]
         context.beginPath()
         context.moveTo(points[0][0], points[0][1])
         points.slice(1).forEach(([x, y]) => context.lineTo(x, y))
         context.closePath()
-        context.fillStyle = shade(face.color, face.orientation === 0 ? 1 : face.orientation === 1 ? 0.72 : 0.54)
+        context.fillStyle = shade(face.color,
+          face.orientation === 0 ? 1
+            : face.orientation === 3 ? 0.38
+              : face.orientation === 1 ? 0.72
+                : face.orientation === 4 ? 0.62
+                  : face.orientation === 2 ? 0.54
+                    : 0.46)
         context.fill()
       })
     }
@@ -6389,14 +6415,22 @@ const SceneLibraryPreview = React.memo(function SceneLibraryPreview({ cacheKey, 
   return <canvas ref={canvasRef} className="scene-preview-canvas" aria-label={`场景预览，显示 ${payload.sampledVoxelCount} 个预览体素`} />
 })
 
-const SynchronousVoxelMiniPreview = React.memo(function SynchronousVoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, materialColors = {}, maxPreviewVoxels }: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string>; maxPreviewVoxels?: number }) {
+const SynchronousVoxelMiniPreview = React.memo(function SynchronousVoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, materialColors = {}, maxPreviewVoxels, exteriorOnly = false }: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string>; maxPreviewVoxels?: number; exteriorOnly?: boolean }) {
   if (!voxels.length) return <div className="mini-preview-empty">暂无预览</div>
   // A preview is a visual LOD, not the source model. The source can contain
   // hundreds of thousands of cells (for example an imported robot), while
   // rendering tens of thousands of SVG faces synchronously blocks all input.
   // Keep the caller override for scene-specific previews, but cap the default
   // used by inspector, asset-library and model-import thumbnails.
-  const previewSelection = selectPreviewVoxels(voxels, maxPreviewVoxels ?? MAX_PREVIEW_VOXELS)
+  // Keep external-surface selection independent from the internal voxel set.
+  // The inspector asks for an outside-only thumbnail, so shell extraction must
+  // not change the visible silhouette merely because hidden cells were removed.
+  // Occupancy and exterior-air queries below still use the complete source so
+  // sampled faces are occluded exactly like the worker-backed preview.
+  const fullOccupancyKeys = new Set(voxels.map((voxel) => previewVoxelKey(voxel)))
+  const exteriorAir = exteriorOnly ? exteriorAirKeys(voxels) : null
+  const surfaceVoxels = exteriorOnly ? exteriorSurfaceVoxels(voxels) : voxels
+  const previewSelection = selectPreviewVoxels(surfaceVoxels, maxPreviewVoxels ?? MAX_PREVIEW_VOXELS)
   const previewVoxels = previewSelection.voxels
   const bounds = voxels.slice(1).reduce((result, voxel) => ({
     minX: Math.min(result.minX, voxel.x),
@@ -6412,7 +6446,9 @@ const SynchronousVoxelMiniPreview = React.memo(function SynchronousVoxelMiniPrev
   const spanZ = Math.max(1, maxZ - minZ + 1)
   const tileX = 8
   const tileZ = 4.5
-  const tileY = 7
+  // Match the worker-backed preview's orthographic basis. A fixed 7 here
+  // compressed the persisted vertical axis relative to an X/Z voxel edge.
+  const tileY = Math.hypot(tileX, tileZ)
   const width = (spanX + spanZ) * tileX + 28
   const height = (spanX + spanZ) * tileZ + spanY * tileY + 28
   const originX = 14 + spanX * tileX
@@ -6435,17 +6471,19 @@ const SynchronousVoxelMiniPreview = React.memo(function SynchronousVoxelMiniPrev
     const channels = [0, 2, 4].map((offset) => Math.max(0, Math.min(255, Math.round(parseInt(color.slice(offset + 1, offset + 3), 16) * amount))))
     return `#${channels.map((channel) => channel.toString(16).padStart(2, '0')).join('')}`
   }
-  const hasVoxel = (x: number, y: number, z: number) => previewSelection.occupancyKeys.has(previewVoxelKey({ x: x + minX, y: y + minY, z: z + minZ }))
-  const faceCells = previewVoxels.flatMap((sourceVoxel) => {
+  const hasVoxel = (x: number, y: number, z: number) => fullOccupancyKeys.has(previewVoxelKey({ x: x + minX, y: y + minY, z: z + minZ }))
+  const exteriorPreviewVoxels = previewVoxels
+  const visibleFace = (x: number, y: number, z: number) => !hasVoxel(x, y, z) && (!exteriorOnly || exteriorAir === null || exteriorAir.has(toolCellKey({ x: x + minX, y: y + minY, z: z + minZ })))
+  const faceCells = exteriorPreviewVoxels.flatMap((sourceVoxel) => {
     const voxel = { ...sourceVoxel, x: sourceVoxel.x - minX, y: sourceVoxel.y - minY, z: sourceVoxel.z - minZ, sourceVoxel }
     const cells = []
     const color = materialColor(voxel)
-    if (!hasVoxel(voxel.x, voxel.y + 1, voxel.z)) cells.push({ orientation: 'top' as const, plane: voxel.y + 1, a: voxel.x, b: voxel.z, color, sortKey: voxel.x + voxel.z + voxel.y * 0.02 })
-    if (!hasVoxel(voxel.x, voxel.y - 1, voxel.z)) cells.push({ orientation: 'bottom' as const, plane: voxel.y, a: voxel.x, b: voxel.z, color, sortKey: voxel.x + voxel.z + voxel.y * 0.02 - 0.04 })
-    if (!hasVoxel(voxel.x + 1, voxel.y, voxel.z)) cells.push({ orientation: 'x' as const, plane: voxel.x + 1, a: voxel.z, b: voxel.y, color, sortKey: voxel.x + voxel.z + voxel.y * 0.02 })
-    if (!hasVoxel(voxel.x - 1, voxel.y, voxel.z)) cells.push({ orientation: 'x-negative' as const, plane: voxel.x, a: voxel.z, b: voxel.y, color, sortKey: voxel.x + voxel.z + voxel.y * 0.02 - 0.02 })
-    if (!hasVoxel(voxel.x, voxel.y, voxel.z + 1)) cells.push({ orientation: 'z' as const, plane: voxel.z + 1, a: voxel.x, b: voxel.y, color, sortKey: voxel.x + voxel.z + voxel.y * 0.02 })
-    if (!hasVoxel(voxel.x, voxel.y, voxel.z - 1)) cells.push({ orientation: 'z-negative' as const, plane: voxel.z, a: voxel.x, b: voxel.y, color, sortKey: voxel.x + voxel.z + voxel.y * 0.02 - 0.01 })
+    if (visibleFace(voxel.x, voxel.y + 1, voxel.z)) cells.push({ orientation: 'top' as const, plane: voxel.y + 1, a: voxel.x, b: voxel.z, color, sortKey: voxel.x + voxel.z + voxel.y * 0.02 })
+    if (!exteriorOnly && visibleFace(voxel.x, voxel.y - 1, voxel.z)) cells.push({ orientation: 'bottom' as const, plane: voxel.y, a: voxel.x, b: voxel.z, color, sortKey: voxel.x + voxel.z + voxel.y * 0.02 - 0.04 })
+    if (visibleFace(voxel.x + 1, voxel.y, voxel.z)) cells.push({ orientation: 'x' as const, plane: voxel.x + 1, a: voxel.z, b: voxel.y, color, sortKey: voxel.x + voxel.z + voxel.y * 0.02 })
+    if (!exteriorOnly && visibleFace(voxel.x - 1, voxel.y, voxel.z)) cells.push({ orientation: 'x-negative' as const, plane: voxel.x, a: voxel.z, b: voxel.y, color, sortKey: voxel.x + voxel.z + voxel.y * 0.02 - 0.02 })
+    if (visibleFace(voxel.x, voxel.y, voxel.z + 1)) cells.push({ orientation: 'z' as const, plane: voxel.z + 1, a: voxel.x, b: voxel.y, color, sortKey: voxel.x + voxel.z + voxel.y * 0.02 })
+    if (!exteriorOnly && visibleFace(voxel.x, voxel.y, voxel.z - 1)) cells.push({ orientation: 'z-negative' as const, plane: voxel.z, a: voxel.x, b: voxel.y, color, sortKey: voxel.x + voxel.z + voxel.y * 0.02 - 0.01 })
     return cells
   })
   const faceRects = mergePreviewFaceCells(faceCells)
@@ -6502,15 +6540,15 @@ function miniPreviewVoxelColor(voxel: Voxel, asset: VoxelAsset | undefined, colo
         : voxel.materialId.startsWith('#') ? voxel.materialId : materialColor(voxel.materialId) ?? '#6c827d')
 }
 
-const WorkerVoxelMiniPreview = React.memo(function WorkerVoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, materialColors = {}, maxPreviewVoxels }: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string>; maxPreviewVoxels?: number }) {
+const WorkerVoxelMiniPreview = React.memo(function WorkerVoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, materialColors = {}, maxPreviewVoxels, exteriorOnly = false }: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string>; maxPreviewVoxels?: number; exteriorOnly?: boolean }) {
   const inputVoxels = useMemo<ScenePreviewInputVoxel[]>(() => voxels.map((voxel) => ({
     x: voxel.x,
     y: voxel.y,
     z: voxel.z,
     color: miniPreviewVoxelColor(voxel, asset, colorOverride, voxelColors, materialColors),
   })), [asset, colorOverride, materialColors, voxelColors, voxels])
-  const cacheKey = `entity-mini:${previewInputArrayId(inputVoxels)}:${maxPreviewVoxels ?? MAX_PREVIEW_VOXELS}`
-  return <div className="mini-preview" aria-label="固定斜前方实体预览"><SceneLibraryPreview cacheKey={cacheKey} voxels={inputVoxels} maxVoxels={maxPreviewVoxels ?? MAX_PREVIEW_VOXELS} /></div>
+  const cacheKey = `entity-mini:${previewInputArrayId(inputVoxels)}:${maxPreviewVoxels ?? MAX_PREVIEW_VOXELS}:${exteriorOnly ? 'exterior' : 'all-faces'}`
+  return <div className="mini-preview" aria-label="固定斜前方实体预览"><SceneLibraryPreview cacheKey={cacheKey} voxels={inputVoxels} maxVoxels={maxPreviewVoxels ?? MAX_PREVIEW_VOXELS} exteriorOnly={exteriorOnly} /></div>
 })
 
 /**
@@ -6518,7 +6556,7 @@ const WorkerVoxelMiniPreview = React.memo(function WorkerVoxelMiniPreview({ voxe
  * worker-backed canvas path so the expensive occupancy and face generation do
  * not block selection, camera movement, or the inspector itself.
  */
-const VoxelMiniPreview = React.memo(function VoxelMiniPreview(props: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string>; maxPreviewVoxels?: number }) {
+const VoxelMiniPreview = React.memo(function VoxelMiniPreview(props: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string>; maxPreviewVoxels?: number; exteriorOnly?: boolean }) {
   return props.voxels.length > LARGE_MINI_PREVIEW_THRESHOLD
     ? <WorkerVoxelMiniPreview {...props} />
     : <SynchronousVoxelMiniPreview {...props} />
@@ -8682,12 +8720,28 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     return null
   }
 
-  const pointerShapeGroundPoint = (event: { clientX: number; clientY: number }, operation: DrawOperation, layer = 0) => {
-    // Do not call this through the selected drawing plane. Shape tools use a
-    // separate, fixed XY ground gesture for both pointer-down and pointer-
-    // move; otherwise selecting XZ/YZ for manual drawing leaks into the shape
-    // footprint calculation and can make the preview jump or grow unbounded.
-    return pointerDrawingPoint(event, operation, layer, shapeDrawingPlane)
+  const pointerShapeGroundPoint = (event: { clientX: number; clientY: number }, operation: DrawOperation, layer?: number, attachToHitFace = false, liftAboveHit = false) => {
+    // Shape tools always use the fixed editor ground orientation (storage X/Z
+    // plane), but their first point may be on any existing voxel layer. The
+    // old default of layer 0 made every cuboid/sphere start on the floor even
+    // when the pointer was over a voxel high above it.
+    if (layer !== undefined) return pointerDrawingPoint(event, operation, layer, shapeDrawingPlane)
+    const context = getPointerContext(event)
+    const hit = context?.voxelHit
+    if (hit) {
+      // A cuboid is created adjacent to the face that was clicked.  Using the
+      // hit voxel itself here made the first footprint layer overlap that
+      // voxel; the normal is the authoritative one-cell attachment direction
+      // from the same DDA hit path used by the brush tool.
+      const anchor = attachToHitFace && operation === 'add'
+        ? adjacentVoxel(hit.voxel, hit.normal)
+        : liftAboveHit && operation === 'add'
+          ? { ...hit.voxel, y: hit.voxel.y + 1 }
+          : hit.voxel
+      const point = projectVoxelToPlane(shapeDrawingPlane, anchor)
+      return { point: clampPlanePointToGround(shapeDrawingPlane, point), anchor, context }
+    }
+    return pointerDrawingPoint(event, operation, 0, shapeDrawingPlane)
   }
 
   // Extrusion is view-driven rather than plane-driven.  Keep its initial
@@ -9590,9 +9644,11 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       ? null
       : tool === 'extrude'
         ? pointerExtrudePoint(event)
-        : (tool === 'cuboid' || tool === 'sphere')
-          ? pointerShapeGroundPoint(event, drawOperation)
-          : pointerDrawingPoint(event, tool === 'erase' ? 'subtract' : drawOperation)
+        : tool === 'cuboid'
+          ? pointerShapeGroundPoint(event, drawOperation, undefined, true)
+          : tool === 'sphere'
+            ? pointerShapeGroundPoint(event, drawOperation, undefined, false, true)
+            : pointerDrawingPoint(event, tool === 'erase' ? 'subtract' : drawOperation)
     if (!existingCuboid && !drawing) return
     const extrudeState = tool === 'extrude' && drawing ? createExtrudeGestureState(drawing, event) : null
     if (tool === 'extrude' && (!extrudeState || !extrudeState.source.length)) {
@@ -9610,7 +9666,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       start,
       current: existingCuboid ? { ...(existingCuboid.footprintEnd ?? start), layer: start.layer } : drawing!.point,
       footprintEnd: existingCuboid?.footprintEnd,
-      baseHeight: existingCuboid?.baseHeight ?? (tool === 'sphere' ? 0 : Math.max(0, drawing?.anchor?.y ?? baseVoxel.y)),
+      baseHeight: existingCuboid?.baseHeight ?? (tool === 'sphere' ? Math.max(0, drawing?.point.layer ?? baseVoxel.y) : Math.max(0, drawing?.anchor?.y ?? baseVoxel.y)),
       stage: existingCuboid ? 'depth' : 'footprint',
       moved: false,
       extrudeAxis: extrudeState?.axis,

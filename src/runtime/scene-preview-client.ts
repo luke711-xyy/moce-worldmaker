@@ -6,7 +6,8 @@ export type ScenePreviewInputVoxel = {
 }
 
 export type ScenePreviewFace = {
-  orientation: 0 | 1 | 2
+  /** +Y, +X, +Z, -Y, -X, -Z respectively. */
+  orientation: 0 | 1 | 2 | 3 | 4 | 5
   plane: number
   a: number
   b: number
@@ -26,6 +27,7 @@ export type ScenePreviewWorkerRequest = {
   type: 'build-scene-preview'
   requestId: number
   maxVoxels: number
+  exteriorOnly?: boolean
   voxels: Int32Array
 }
 
@@ -63,7 +65,7 @@ export class ScenePreviewWorkerClient {
       const faces: ScenePreviewFace[] = []
       for (let index = 0; index < response.faces.length; index += 7) {
         faces.push({
-          orientation: response.faces[index] as 0 | 1 | 2,
+          orientation: response.faces[index] as 0 | 1 | 2 | 3 | 4 | 5,
           plane: response.faces[index + 1],
           a: response.faces[index + 2],
           b: response.faces[index + 3],
@@ -86,7 +88,7 @@ export class ScenePreviewWorkerClient {
     return worker
   }
 
-  build(voxels: ReadonlyArray<ScenePreviewInputVoxel>, maxVoxels: number): Promise<ScenePreviewPayload | null> {
+  build(voxels: ReadonlyArray<ScenePreviewInputVoxel>, maxVoxels: number, exteriorOnly = false): Promise<ScenePreviewPayload | null> {
     // A scene row can be changed while a previous 10 MB scene is still being
     // processed. Workers cannot be interrupted in the middle of a synchronous
     // message handler, so replace the worker before starting the newest job.
@@ -105,7 +107,7 @@ export class ScenePreviewWorkerClient {
       packed[offset + 2] = Math.round(voxel.z)
       packed[offset + 3] = colorToInt(voxel.color)
     })
-    const request: ScenePreviewWorkerRequest = { type: 'build-scene-preview', requestId, maxVoxels, voxels: packed }
+    const request: ScenePreviewWorkerRequest = { type: 'build-scene-preview', requestId, maxVoxels, exteriorOnly, voxels: packed }
     return new Promise((resolve) => {
       this.pending.set(requestId, resolve)
       this.worker.postMessage(request, [packed.buffer])

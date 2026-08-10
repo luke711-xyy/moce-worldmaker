@@ -64,6 +64,8 @@ type NormalizedTriangle = Omit<ModelTriangle, 'a' | 'b' | 'c'> & {
 
 const DEFAULT_TARGET_SIZE_VOXELS = 32
 export const MAX_TARGET_SIZE_VOXELS = 256
+/** Neutral default for mesh formats without a preserved material pipeline. */
+export const DEFAULT_IMPORTED_MODEL_COLOR = '#a5a6a2'
 const SURFACE_DISTANCE_SQ = 0.75 // half the diagonal of one voxel cell, squared
 const EPSILON = 1e-7
 
@@ -465,6 +467,16 @@ export async function importModelBufferAsVoxelAssetWithDiagnostics(fileName: str
   const mode = options.mode ?? 'solid'
   const fallbackMaterial = options.materialId ?? 'terracotta'
   const palette = options.palette?.length ? options.palette : MATERIALS
+  // GLB/GLTF have an explicit material/vertex/texture color pipeline that is
+  // sampled by markSurfaceVoxels(). STL and OBJ do not have a stable color
+  // contract for this editor, so loader defaults and the active brush must
+  // not leak into the imported entity. Those formats intentionally start
+  // neutral gray and can be recolored by the user afterward.
+  const preserveEmbeddedColors = extension === 'glb' || extension === 'gltf'
+  const importedFallbackMaterial = preserveEmbeddedColors ? fallbackMaterial : DEFAULT_IMPORTED_MODEL_COLOR
+  const importedColor = preserveEmbeddedColors
+    ? palette.find((material) => material.id === fallbackMaterial)?.color ?? DEFAULT_IMPORTED_MODEL_COLOR
+    : DEFAULT_IMPORTED_MODEL_COLOR
   options.onProgress?.(0.02, '正在解析模型')
   let object: THREE.Object3D
   if (extension === 'glb' || extension === 'gltf') object = await parseGltf(buffer)
@@ -485,7 +497,8 @@ export async function importModelBufferAsVoxelAssetWithDiagnostics(fileName: str
   const warnings: string[] = []
   if (mode === 'solid' && !closedMesh) warnings.push('模型不是封闭网格，实体填充结果可能需要手动修补')
   if (extension === 'stl') warnings.push('STL 不包含材质和部件信息，已使用默认颜色和材质')
-  const asset = createAssetFromVoxelKeys(fileName, keys, surface.materialByKey, dimensions, palette, fallbackMaterial, palette.find((material) => material.id === fallbackMaterial)?.color ?? '#a5a6a2')
+  const materialByKey = preserveEmbeddedColors ? surface.materialByKey : new Map<string, string>()
+  const asset = createAssetFromVoxelKeys(fileName, keys, materialByKey, dimensions, palette, importedFallbackMaterial, importedColor)
   options.onProgress?.(1, '体素化完成')
   return {
     asset,
