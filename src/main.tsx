@@ -3955,8 +3955,18 @@ function App() {
     await Promise.all([refreshLibrary(), refreshCloudLibrary()])
   }
 
-  const applyStoredProject = (loaded: ProjectState, fileRef: SceneFileRef | null, message: string) => {
-    const normalized = normalizeStoredProject(loaded)
+  const applyStoredProject = async (loaded: ProjectState, fileRef: SceneFileRef | null, message: string) => {
+    // A scene file contains only the embedded asset snapshots required to
+    // rebuild that scene. Reload the local catalog at this boundary as well:
+    // this makes switching scenes self-healing even if an older editor build
+    // previously replaced the in-memory project assets with scene-only data.
+    const localWorkspace = await initializeLocalLibrary(makeDefaultProject().assets)
+    const embeddedIds = new Set(loaded.assets.map((asset) => asset.id))
+    const withLocalTemplates = {
+      ...loaded,
+      assets: [...loaded.assets, ...localWorkspace.assets.filter((asset) => asset.isTemplate !== false && !embeddedIds.has(asset.id))],
+    }
+    const normalized = normalizeStoredProject(withLocalTemplates)
     replaceProject(normalized, false)
     setRecentMaterialIds(normalized.materials.slice(0, 8).map((material) => material.id))
     setSelectedId(normalized.instances[0]?.id ?? sceneEntityParts(normalized)[0]?.id ?? '')
@@ -3972,7 +3982,7 @@ function App() {
     requestSceneReplace(async () => {
       setLibraryBusy(true)
       try {
-        applyStoredProject(restoreProject(await loadLocalScene(sceneId)), { name: `${name}.moceworld`, libraryId: sceneId }, `已加载场景 · ${name}`)
+        await applyStoredProject(restoreProject(await loadLocalScene(sceneId)), { name: `${name}.moceworld`, libraryId: sceneId }, `已加载场景 · ${name}`)
         setLibraryOpen(false)
       } catch {
         setNotice('场景加载失败 · 数据库中不存在该场景')
