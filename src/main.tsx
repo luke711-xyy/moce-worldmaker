@@ -2,7 +2,7 @@ import React, { startTransition, useEffect, useLayoutEffect, useMemo, useRef, us
 import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { Box, Brush, ChevronDown, ChevronRight, Cloud, Database, Download, Eraser, Eye, FilePlus2, Grid3X3, Image as ImageIcon, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
+import { Box, Brush, ChevronDown, ChevronLeft, ChevronRight, Cloud, Database, Download, Eraser, Eye, FilePlus2, Grid3X3, Image as ImageIcon, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, Repeat2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
 import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceRotationPivot, instanceVoxelPairs, isBundledDefaultSampleProject, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, validateEntityFile } from './persistence'
@@ -1293,7 +1293,8 @@ function App() {
   const [brushSize, setBrushSize] = useState(1)
   const [toolboxOpen, setToolboxOpen] = useState(false)
   const [referenceImageOpen, setReferenceImageOpen] = useState(false)
-  const [referenceImage, setReferenceImage] = useState<{ name: string; url: string } | null>(null)
+  const [referenceImages, setReferenceImages] = useState<Array<{ name: string; url: string }>>([])
+  const [referenceImageIndex, setReferenceImageIndex] = useState(0)
   const [activeMaterial, setActiveMaterial] = useState('terracotta')
   const [recentMaterialIds, setRecentMaterialIds] = useState(() => MATERIALS.slice(0, 8).map((material) => material.id))
   const [notice, setNotice] = useState('就绪 · 本地工程未保存')
@@ -1394,6 +1395,7 @@ function App() {
   const entityFileInputRef = useRef<HTMLInputElement>(null)
   const modelImportInputRef = useRef<HTMLInputElement>(null)
   const referenceImageInputRef = useRef<HTMLInputElement>(null)
+  const referenceImagesRef = useRef<Array<{ name: string; url: string }>>([])
   const pendingSceneOperationRef = useRef<(() => Promise<void>) | null>(null)
   const [modelImportDialog, setModelImportDialog] = useState<ModelImportDialogState | null>(null)
   const [modelImportTargetVoxels, setModelImportTargetVoxels] = useState(32)
@@ -1401,22 +1403,31 @@ function App() {
 
   const openReferenceImagePicker = () => referenceImageInputRef.current?.click()
   const handleReferenceImageChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
+    const files = Array.from(event.target.files ?? [])
     event.currentTarget.value = ''
-    if (!file) return
-    if (!file.type.startsWith('image/')) {
+    const imageFiles = files.filter((file) => file.type.startsWith('image/'))
+    if (!imageFiles.length) {
       setNotice('请选择图片文件作为参考图')
       return
     }
-    setReferenceImage({ name: file.name, url: URL.createObjectURL(file) })
+    const addedImages = imageFiles.map((file) => ({ name: file.name, url: URL.createObjectURL(file) }))
+    const firstAddedIndex = referenceImagesRef.current.length
+    const nextImages = [...referenceImagesRef.current, ...addedImages]
+    referenceImagesRef.current = nextImages
+    setReferenceImages(nextImages)
+    setReferenceImageIndex(firstAddedIndex)
     setReferenceImageOpen(true)
+    if (imageFiles.length > 1) setNotice(`已添加 ${imageFiles.length} 张参考图`)
   }
 
   useEffect(() => {
-    return () => {
-      if (referenceImage?.url) URL.revokeObjectURL(referenceImage.url)
-    }
-  }, [referenceImage])
+    referenceImagesRef.current = referenceImages
+  }, [referenceImages])
+  useEffect(() => () => {
+    referenceImagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
+  }, [])
+
+  const referenceImage = referenceImages[referenceImageIndex] ?? null
 
   const currentSceneBounds = sceneBoundsForProject(project)
   const refreshSceneDirty = () => {
@@ -5631,7 +5642,7 @@ function App() {
         </div>
         <input ref={modelImportInputRef} className="hidden-input" type="file" accept=".glb,.gltf,.obj,.stl,.vox" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) openModelImportDialog(file) }} />
         <input ref={entityFileInputRef} className="hidden-input" type="file" accept=".moceentity" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) void importEntityFileFromDisk(file) }} />
-        <input ref={referenceImageInputRef} className="hidden-input" type="file" accept="image/*" onChange={handleReferenceImageChange} />
+        <input ref={referenceImageInputRef} className="hidden-input" type="file" accept="image/*" multiple onChange={handleReferenceImageChange} />
       </header>
 
       <main className={`workspace ${assetSidebarCollapsed ? 'asset-sidebar-collapsed' : ''}`} onClick={() => { if (treeContextMenu) setTreeContextMenu(null); if (assetContextMenu) setAssetContextMenu(null); if (assetCategoryContextMenu) setAssetCategoryContextMenu(null); if (sceneLibraryContextMenu) setSceneLibraryContextMenu(null); if (voxelSizeOpen) setVoxelSizeOpen(false) }}>
@@ -5666,7 +5677,7 @@ function App() {
           </div>
           <MemoizedVoxelViewport project={project} authoritativeProjectRef={projectRef} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} geometryApplying={geometryApplying} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSyncSceneOccupancyTransforms={stableViewportSyncOccupancyTransforms} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onCancelScenePartsMove={stableViewportCancelMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
           <ToolboxPopover open={toolboxOpen} onClose={() => setToolboxOpen(false)} tool={tool} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} onToolChange={changeTool} onPlaneChange={setDrawingPlane} onOperationChange={setDrawOperation} onBrushSizeChange={setBrushSize} />
-          <ReferenceImagePopover open={referenceImageOpen} image={referenceImage} onClose={() => setReferenceImageOpen(false)} onOpen={openReferenceImagePicker} />
+          <ReferenceImagePopover open={referenceImageOpen} image={referenceImage} index={referenceImageIndex} count={referenceImages.length} onPrevious={() => setReferenceImageIndex((current) => (current - 1 + referenceImages.length) % referenceImages.length)} onNext={() => setReferenceImageIndex((current) => (current + 1) % referenceImages.length)} onClose={() => setReferenceImageOpen(false)} onOpen={openReferenceImagePicker} />
           <div className="viewport-footer">
             <div className="tool-group">
               <ToolButton icon={<SquareDashedMousePointer size={17} />} label="选择" description="实体移动" active={tool === 'select'} onClick={() => changeTool('select')} />
@@ -6326,9 +6337,11 @@ function ExtrudeToolIcon() {
   </svg>
 }
 
-function ReferenceImagePopover({ open, image, onClose, onOpen }: { open: boolean; image: { name: string; url: string } | null; onClose: () => void; onOpen: () => void }) {
+function ReferenceImagePopover({ open, image, index, count, onPrevious, onNext, onClose, onOpen }: { open: boolean; image: { name: string; url: string } | null; index: number; count: number; onPrevious: () => void; onNext: () => void; onClose: () => void; onOpen: () => void }) {
   const [offset, setOffset] = useState({ x: 0, y: 0 })
+  const [size, setSize] = useState({ width: 360, height: 430 })
   const dragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null)
+  const resizeRef = useRef<{ pointerId: number; x: number; y: number; width: number; height: number } | null>(null)
 
   if (!open || !image) return null
 
@@ -6358,21 +6371,52 @@ function ReferenceImagePopover({ open, image, onClose, onOpen }: { open: boolean
     dragRef.current = null
   }
 
-  return <section className="reference-image-popover" style={{ transform: `translate(${offset.x}px, ${offset.y}px)` }} aria-label="参考图" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+  const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    resizeRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, width: size.width, height: size.height }
+  }
+  const moveResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    const resize = resizeRef.current
+    if (!resize || resize.pointerId !== event.pointerId) return
+    event.preventDefault()
+    event.stopPropagation()
+    setSize({
+      width: Math.max(240, Math.min(760, resize.width + event.clientX - resize.x)),
+      height: Math.max(180, Math.min(760, resize.height + event.clientY - resize.y)),
+    })
+  }
+  const endResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (resizeRef.current?.pointerId !== event.pointerId) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    resizeRef.current = null
+  }
+
+  return <section className="reference-image-popover" style={{ width: `${size.width}px`, height: `${size.height}px`, transform: `translate(${offset.x}px, ${offset.y}px)` }} aria-label="参考图" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
     <div className="reference-image-header">
       <div className="reference-image-drag-handle" role="button" tabIndex={0} aria-label="拖动参考图" title="按住拖动参考图" onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} onLostPointerCapture={() => { dragRef.current = null }}>
         <span className="reference-image-grip" aria-hidden="true"><i /><i /><i /></span>
         <strong>参考图</strong>
         <span className="reference-image-name" title={image.name}>{image.name}</span>
       </div>
+      <div className="reference-image-nav" aria-label="切换参考图">
+        <button type="button" aria-label="上一张参考图" title="上一张参考图" disabled={count < 2} onPointerDown={(event) => event.stopPropagation()} onClick={onPrevious}><ChevronLeft size={14} /></button>
+        <span>{index + 1}/{count}</span>
+        <button type="button" aria-label="下一张参考图" title="下一张参考图" disabled={count < 2} onPointerDown={(event) => event.stopPropagation()} onClick={onNext}><ChevronRight size={14} /></button>
+      </div>
       <div className="reference-image-actions">
-        <button type="button" aria-label="更换参考图" title="更换参考图" onPointerDown={(event) => event.stopPropagation()} onClick={onOpen}><Upload size={13} /></button>
+        <button type="button" aria-label="添加或更换参考图" title="添加或更换参考图" onPointerDown={(event) => event.stopPropagation()} onClick={onOpen}><Repeat2 size={14} /></button>
         <button type="button" aria-label="关闭参考图" title="关闭参考图" onPointerDown={(event) => event.stopPropagation()} onClick={onClose}><X size={14} /></button>
       </div>
     </div>
     <div className="reference-image-canvas">
       <img src={image.url} alt={`参考图：${image.name}`} draggable={false} />
     </div>
+    <div className="reference-image-resize-handle" role="button" tabIndex={0} aria-label="调整参考图窗口大小" title="拖动调整窗口大小" onPointerDown={startResize} onPointerMove={moveResize} onPointerUp={endResize} onPointerCancel={endResize} onLostPointerCapture={() => { resizeRef.current = null }} />
   </section>
 }
 

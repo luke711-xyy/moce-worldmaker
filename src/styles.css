@@ -280,7 +280,7 @@ button { border: 0; cursor: pointer; color: inherit; }
 .toolbox-mode { display: grid; grid-template-columns: 56px repeat(3, 1fr); align-items: center; gap: 4px; }
 .toolbox-mode button { height: 22px; color: #8e9a97; background: #20282b; border: 1px solid #354144; font-size: 9px; }
 .toolbox-mode button.active { color: #fff0df; background: #b95b42; border-color: #d37b61; }
-.reference-image-popover { position: absolute; top: max(14px, calc(14px + var(--safe-top))); left: max(14px, calc(14px + var(--safe-left))); z-index: 26; width: min(360px, calc(100% - 28px - var(--safe-left) - var(--safe-right))); max-height: min(70%, 520px); display: flex; flex-direction: column; color: #cfd7d2; background: rgba(27,34,37,.97); border: 1px solid #526063; box-shadow: 0 14px 32px rgba(0,0,0,.42); user-select: none; overflow: hidden; }
+.reference-image-popover { position: absolute; top: max(14px, calc(14px + var(--safe-top))); left: max(14px, calc(14px + var(--safe-left))); z-index: 26; min-width: 240px; min-height: 180px; max-width: calc(100% - 28px - var(--safe-left) - var(--safe-right)); max-height: min(80%, 760px); display: flex; flex-direction: column; color: #cfd7d2; background: rgba(27,34,37,.97); border: 1px solid #526063; box-shadow: 0 14px 32px rgba(0,0,0,.42); user-select: none; overflow: hidden; }
 .reference-image-header { min-height: 34px; display: flex; align-items: center; gap: 5px; padding: 0 6px; border-bottom: 1px solid #354144; background: rgba(34,43,46,.96); }
 .reference-image-drag-handle { min-width: 0; flex: 1; height: 32px; display: flex; align-items: center; gap: 6px; cursor: grab; touch-action: none; user-select: none; }
 .reference-image-drag-handle:active { cursor: grabbing; }
@@ -288,11 +288,16 @@ button { border: 0; cursor: pointer; color: inherit; }
 .reference-image-grip i { width: 3px; height: 3px; border-radius: 50%; background: #8d9a97; }
 .reference-image-drag-handle strong { flex: 0 0 auto; color: #f1ece2; font-size: 10px; font-weight: 600; }
 .reference-image-name { min-width: 0; overflow: hidden; color: #91a09c; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.reference-image-nav { display: flex; align-items: center; gap: 1px; flex: 0 0 auto; color: #8d9a97; font: 9px 'DM Mono', monospace; }
+.reference-image-nav button { width: 22px; height: 24px; display: grid; place-items: center; padding: 0; color: #aab6b3; background: transparent; border: 0; }
+.reference-image-nav button:hover:not(:disabled) { color: #fff0df; background: #3a2925; }
+.reference-image-nav button:disabled { cursor: default; opacity: .32; }
 .reference-image-actions { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
 .reference-image-actions button { width: 24px; height: 24px; display: grid; place-items: center; padding: 0; color: #8d9a97; background: transparent; border: 0; }
 .reference-image-actions button:hover { color: #fff0df; background: #3a2925; }
-.reference-image-canvas { min-height: 100px; display: grid; place-items: center; padding: 8px; background: #12181a; overflow: auto; }
-.reference-image-canvas img { display: block; max-width: 100%; max-height: 460px; width: auto; height: auto; object-fit: contain; user-select: none; -webkit-user-drag: none; pointer-events: none; }
+.reference-image-canvas { min-width: 0; min-height: 0; flex: 1; display: grid; place-items: center; padding: 8px; background: #12181a; overflow: auto; }
+.reference-image-canvas img { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; user-select: none; -webkit-user-drag: none; pointer-events: none; }
+.reference-image-resize-handle { position: absolute; right: 0; bottom: 0; width: 17px; height: 17px; cursor: nwse-resize; touch-action: none; background: linear-gradient(135deg, transparent 0 47%, #71807d 48% 54%, transparent 55% 64%, #71807d 65% 71%, transparent 72%); }
 .hidden-color-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .axis-gizmo { position: absolute; right: max(18px, calc(18px + var(--safe-right))); top: max(14px, calc(14px + var(--safe-top))); width: 64px; height: 64px; z-index: 3; pointer-events: none; overflow: visible; font: 600 10px 'DM Mono', monospace; }
 .axis-gizmo line { stroke-width: 2.2; stroke-linecap: round; filter: drop-shadow(0 1px 2px rgba(0,0,0,.65)); }
