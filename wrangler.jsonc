@@ -49,8 +49,14 @@
         "MOCE_AUTH_REQUIRED": "false",
         "ADMIN_EMAILS": "xuyiyang038@gmail.com",
         "MAX_USERS": "50",
-        "AUTH_BASE_URL": "https://moce-worldmaker.xuyiyang038.workers.dev"
-      }
+        "AUTH_BASE_URL": "https://moce.luke-xu.asia"
+      },
+      "routes": [
+        {
+          "pattern": "moce.luke-xu.asia",
+          "custom_domain": true
+        }
+      ]
     }
   }
 }
