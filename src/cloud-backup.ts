@@ -163,6 +163,16 @@ export async function loadCloudLibrary(): Promise<{ assets: CloudAssetSummary[];
   return { assets: assets.assets, scenes: scenes.scenes }
 }
 
+/**
+ * Load one cloud asset for the catalog thumbnail without adding it to the
+ * local asset library. The summary endpoint intentionally contains metadata
+ * only; this endpoint is used by the asset-card preview pipeline and the
+ * resumable download path remains the only path that persists the asset.
+ */
+export async function loadCloudAssetPreview(id: string): Promise<VoxelAsset> {
+  return jsonRequest<VoxelAsset>(`/api/cloud/assets/${encodeURIComponent(id)}`)
+}
+
 async function startTransfer(payload: Record<string, unknown>): Promise<TransferStartResponse> {
   return jsonRequest<TransferStartResponse>('/api/cloud/transfers', {
     method: 'POST',
@@ -248,6 +258,7 @@ export async function uploadCloudScene(scene: MoceSceneFile, conflictMode?: 'rep
 
 export async function downloadCloudObject(kind: 'asset' | 'scene', id: string, versionId?: string, onProgress?: (progress: CloudProgress) => void): Promise<{ bytes: Uint8Array; transfer: CloudTransfer }> {
   const started = await startTransfer({ direction: 'download', objectKind: kind, objectId: id, versionId, name: id, blobHash: '0'.repeat(64), totalBytes: 1, totalParts: 1 })
+  onProgress?.({ transfer: started.transfer, transferredBytes: 0, status: 'transferring' })
   try {
     const bytes = await downloadBytes(started.transfer, onProgress)
     onProgress?.({ transfer: { ...started.transfer, status: 'completed' }, transferredBytes: bytes.byteLength, status: 'completed' })

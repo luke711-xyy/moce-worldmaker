@@ -526,6 +526,15 @@ export function resolveInstanceComponents(asset: VoxelAsset, overrides: VoxelOve
   const components = Object.entries(asset.partVoxels).flatMap(([partId, sourceVoxels]) => {
     const voxels = sourceVoxels.map((voxel) => resolvedByKey.get(voxelKey(voxel))).filter((voxel): voxel is Voxel => Boolean(voxel))
     voxels.forEach((voxel) => claimed.add(voxelKey(voxel)))
+    // An authored part in an assembly is a structural/file-tree boundary,
+    // not a connectivity hint. It may legitimately contain disconnected
+    // islands (for example, a frame, trim, or a model-derived sub-part), but
+    // all of those voxels must remain under the same assembly member key.
+    // Splitting here creates synthetic `part#2` ids that the assembly mapping
+    // does not know about, leaving those islands as random top-level entities
+    // after an assembly template is placed back into a scene. Non-assembly
+    // assets retain the older connectivity-based behavior.
+    if (asset.assembly) return voxels.length ? [{ partId, voxels }] : []
     return voxelComponents(voxels).map((component, index) => ({ partId: index === 0 ? partId : `${partId}#${index + 1}`, voxels: component }))
   }).filter((component) => component.voxels.length > 0)
   const additions = resolved.filter((voxel) => !claimed.has(voxelKey(voxel)))

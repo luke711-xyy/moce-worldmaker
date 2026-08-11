@@ -81,19 +81,40 @@ export function writeLocalSceneRef(ref: LocalSceneRef | null): void {
 }
 
 export async function readLocalSceneDraft(): Promise<LocalSceneDraft | null> {
+  const fallback = fallbackReadDraft()
   try {
     const database = await openDatabase()
     return await new Promise<LocalSceneDraft | null>((resolve, reject) => {
       const request = database.transaction(DRAFT_STORE_NAME, 'readonly').objectStore(DRAFT_STORE_NAME).get(DRAFT_KEY)
-      request.onsuccess = () => resolve((request.result as LocalSceneDraft | undefined) ?? null)
+      request.onsuccess = () => {
+        const indexedDraft = (request.result as LocalSceneDraft | undefined) ?? null
+        // pagehide can finish localStorage synchronously while the IndexedDB
+        // write is still pending. If an older IndexedDB draft is present,
+        // returning it would make a refresh appear to lose the last edits.
+        if (!indexedDraft) {
+          resolve(fallback)
+          return
+        }
+        if (!fallback) {
+          resolve(indexedDraft)
+          return
+        }
+        resolve((fallback.updatedAt ?? 0) > (indexedDraft.updatedAt ?? 0) ? fallback : indexedDraft)
+      }
       request.onerror = () => reject(request.error ?? new Error('本地草稿读取失败'))
     })
   } catch {
-    return fallbackReadDraft()
+    return fallback
   }
 }
 
 export async function writeLocalSceneDraft(draft: LocalSceneDraft): Promise<void> {
+  // pagehide/visibilitychange may give IndexedDB too little time to finish.
+  // Write the small-browser fallback before the first await so a refresh or
+  // tab close always leaves a recoverable copy. IndexedDB remains the normal
+  // durable store and will overwrite the fallback on the next successful
+  // restore cycle.
+  fallbackWriteDraft(draft)
   try {
     const database = await openDatabase()
     await new Promise<void>((resolve, reject) => {
@@ -101,9 +122,7 @@ export async function writeLocalSceneDraft(draft: LocalSceneDraft): Promise<void
       request.onsuccess = () => resolve()
       request.onerror = () => reject(request.error ?? new Error('本地草稿保存失败'))
     })
-  } catch {
-    fallbackWriteDraft(draft)
-  }
+  } catch { /* the synchronous fallback above is already available */ }
 }
 
 export async function clearLocalSceneDraft(): Promise<void> {

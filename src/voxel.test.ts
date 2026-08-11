@@ -356,6 +356,40 @@ describe('莫测造境体素核心数据', () => {
     expect(components.every((component) => component.voxels.length > 0)).toBe(true)
   })
 
+  it('keeps disconnected islands in one authored assembly part', () => {
+    const asset = {
+      id: 'assembly-template',
+      name: '装配体模板',
+      style: '自定义实体',
+      kind: 'imported' as const,
+      color: '#d2a354',
+      accent: '#6c827d',
+      width: 5,
+      depth: 5,
+      height: 5,
+      parts: ['part-1'],
+      partVoxels: {
+        'part-1': [
+          { x: 0, y: 0, z: 0, materialId: 'gold' },
+          { x: 4, y: 4, z: 4, materialId: 'gold' },
+        ],
+      },
+      voxels: [
+        { x: 0, y: 0, z: 0, materialId: 'gold' },
+        { x: 4, y: 4, z: 4, materialId: 'gold' },
+      ],
+      assembly: {
+        name: '装配体模板',
+        rootId: 'assembly-root',
+        nodes: [{ id: 'assembly-root', name: '装配体模板', memberKeys: ['part:part-1'] }],
+      },
+    }
+    const components = resolveInstanceComponents(asset)
+    expect(components).toHaveLength(1)
+    expect(components[0].partId).toBe('part-1')
+    expect(components[0].voxels).toHaveLength(2)
+  })
+
   it('builds the instance local/scene voxel index in one resolution pass', () => {
     const project = makeDefaultProject()
     const instance = project.instances[0]
