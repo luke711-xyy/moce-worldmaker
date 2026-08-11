@@ -626,3 +626,21 @@ button { border: 0; cursor: pointer; color: inherit; }
 .cloud-progress-label { flex-shrink: 0; color: #c88672 !important; font: 8px 'DM Mono', monospace; }
 .asset-card.cloud-uploading { border-color: #b45a43; }
 .asset-cloud-progress { display: flex; align-items: center; gap: 3px; color: #c88672; font: 8px 'DM Mono', monospace; }
+
+.auth-backdrop { position: fixed; inset: 0; z-index: 500; display: grid; place-items: center; padding: 24px; background: rgba(5,8,9,.72); }
+.auth-dialog { position: relative; width: min(390px, calc(100vw - 32px)); padding: 30px; color: #dbe2de; background: #20282b; border: 1px solid #586466; box-shadow: 0 24px 80px rgba(0,0,0,.48); }
+.auth-close { position: absolute; top: 12px; right: 12px; display: grid; place-items: center; width: 30px; height: 30px; color: #aab5b2; background: transparent; border: 1px solid transparent; }
+.auth-close:hover { color: #fff0df; border-color: #a9523c; }
+.auth-mark { display: grid; place-items: center; width: 38px; height: 38px; margin-bottom: 16px; color: #fff0df; background: #a9523c; border: 1px solid #d47b5e; }
+.auth-dialog h2 { margin: 0 0 8px; color: #f4eee4; font-size: 22px; }
+.auth-subtitle { margin: 0 0 22px; color: #9aa6a3; font: 11px 'DM Mono', monospace; }
+.auth-dialog form { display: grid; gap: 14px; }
+.auth-dialog label { display: grid; gap: 6px; color: #aab5b2; font-size: 12px; }
+.auth-dialog input { height: 40px; padding: 0 11px; color: #edf1ec; background: #151b1d; border: 1px solid #465355; outline: none; }
+.auth-dialog input:focus { border-color: #c46b50; box-shadow: 0 0 0 2px rgba(196,107,80,.16); }
+.auth-submit { min-height: 40px; color: #fff4e8; background: #a9523c; border: 1px solid #c46b50; font-size: 13px; }
+.auth-submit:hover { background: #bf644a; }
+.auth-submit:disabled { cursor: wait; opacity: .55; }
+.auth-switch { min-height: 32px; color: #c98b76; background: transparent; border: 0; font-size: 11px; }
+.auth-message { margin: 2px 0 0; color: #cbd3cf; font-size: 11px; line-height: 1.55; }
+.auth-dev-link { color: #e2a18d; font-size: 11px; word-break: break-all; }

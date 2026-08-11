@@ -12,6 +12,11 @@ interface Env {
   ALLOWED_ORIGIN?: string
   ACCESS_TEAM_DOMAIN?: string
   ACCESS_AUDIENCE?: string
+  ADMIN_EMAILS?: string
+  AUTH_BASE_URL?: string
+  RESEND_API_KEY?: string
+  RESEND_FROM?: string
+  MAX_USERS?: string
 }
 
 type StoredObjectKind = 'asset' | 'scene'
@@ -33,6 +38,12 @@ const ASSET_CLOUD_QUOTA_BYTES = 100 * 1024 * 1024
 const SCENE_CLOUD_QUOTA_BYTES = 300 * 1024 * 1024
 const ACCOUNT_CLOUD_QUOTA_BYTES = 8 * 1024 * 1024 * 1024
 const TRANSFER_TTL_MS = 24 * 60 * 60 * 1000
+const DEFAULT_MAX_USERS = 50
+const PASSWORD_ITERATIONS = 310_000
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const EMAIL_TOKEN_TTL_MS = 30 * 60 * 1000
+const AUTH_RATE_WINDOW_MS = 15 * 60 * 1000
+const AUTH_RATE_BLOCK_MS = 15 * 60 * 1000
 type AccessJwk = JsonWebKey & { kid?: string }
 let accessJwksCache: { issuer: string; expiresAt: number; keys: AccessJwk[] } | null = null
 
@@ -187,6 +198,172 @@ function ownerFromRequest(request: Request, env: Env): string {
   return localHost ? 'local-dev' : 'anonymous'
 }
 
+function normalizedEmail(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toLowerCase() : ''
+}
+
+function randomToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32))
+  return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('')
+}
+
+async function sha256Text(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return [...new Uint8Array(digest)].map((part) => part.toString(16).padStart(2, '0')).join('')
+}
+
+async function derivePassword(password: string, saltHex: string, iterations = PASSWORD_ITERATIONS): Promise<string> {
+  const salt = Uint8Array.from(saltHex.match(/.{1,2}/g) ?? [], (part) => Number.parseInt(part, 16))
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits'])
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, key, 256)
+  return [...new Uint8Array(bits)].map((part) => part.toString(16).padStart(2, '0')).join('')
+}
+
+function readCookie(request: Request, name: string): string | null {
+  const cookie = request.headers.get('Cookie') ?? ''
+  const match = cookie.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))
+  return match ? decodeURIComponent(match.slice(name.length + 1)) : null
+}
+
+function authCookie(token: string, maxAge = Math.floor(SESSION_TTL_MS / 1000)) {
+  return `moce_session=${encodeURIComponent(token)}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Lax`
+}
+
+function adminEmails(env: Env): Set<string> {
+  return new Set((env.ADMIN_EMAILS ?? 'xuyiyang038@gmail.com').split(',').map((email) => normalizedEmail(email)).filter(Boolean))
+}
+
+function maxUsers(env: Env): number {
+  const value = Number(env.MAX_USERS ?? DEFAULT_MAX_USERS)
+  return Number.isSafeInteger(value) && value > 0 ? value : DEFAULT_MAX_USERS
+}
+
+async function authRateKey(request: Request, scope: string, value = ''): Promise<string> {
+  const address = request.headers.get('CF-Connecting-IP') ?? request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ?? 'unknown'
+  return sha256Text(`${scope}:${address}:${value}`)
+}
+
+async function consumeAuthRateLimit(env: Env & { DB: D1Database }, key: string, limit: number): Promise<boolean> {
+  const now = Date.now()
+  const row = await env.DB.prepare('SELECT attempt_count, window_started_at, blocked_until FROM auth_rate_limits WHERE rate_key = ?1').bind(key).first<{ attempt_count: number; window_started_at: string; blocked_until: string | null }>()
+  if (row?.blocked_until && Date.parse(row.blocked_until) > now) return false
+  const windowStarted = row ? Date.parse(row.window_started_at) : NaN
+  const inWindow = Number.isFinite(windowStarted) && now - windowStarted < AUTH_RATE_WINDOW_MS
+  const count = inWindow ? Number(row?.attempt_count ?? 0) + 1 : 1
+  const startedAt = inWindow ? row?.window_started_at ?? new Date(now).toISOString() : new Date(now).toISOString()
+  const blockedUntil = count > limit ? new Date(now + AUTH_RATE_BLOCK_MS).toISOString() : null
+  await env.DB.prepare('INSERT INTO auth_rate_limits (rate_key, attempt_count, window_started_at, blocked_until) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(rate_key) DO UPDATE SET attempt_count = excluded.attempt_count, window_started_at = excluded.window_started_at, blocked_until = excluded.blocked_until').bind(key, count, startedAt, blockedUntil).run()
+  return !blockedUntil
+}
+
+async function appUserFromSession(request: Request, env: Env & { DB: D1Database }) {
+  const token = readCookie(request, 'moce_session')
+  if (!token) return null
+  const tokenHash = await sha256Text(token)
+  const row = await env.DB.prepare('SELECT s.session_id, s.user_id, s.expires_at, s.revoked_at, u.email, u.status FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?1').bind(tokenHash).first<{ session_id: string; user_id: string; expires_at: string; revoked_at: string | null; email: string; status: string }>()
+  if (!row || row.revoked_at || row.status !== 'active' || Date.parse(row.expires_at) <= Date.now()) return null
+  const now = new Date().toISOString()
+  await env.DB.prepare('UPDATE sessions SET last_seen_at = ?1 WHERE session_id = ?2').bind(now, row.session_id).run()
+  return { id: row.user_id, email: normalizedEmail(row.email), status: 'active' as const }
+}
+
+async function sendVerificationEmail(env: Env, request: Request, email: string, token: string, purpose: 'verify' | 'claim' = 'verify') {
+  const baseUrl = (env.AUTH_BASE_URL ?? new URL(request.url).origin).replace(/\/$/, '')
+  const verificationUrl = `${baseUrl}/api/auth/verify-email?token=${encodeURIComponent(token)}`
+  if (!env.RESEND_API_KEY || !env.RESEND_FROM) {
+    if (env.DEPLOYMENT_ENV !== 'production') return verificationUrl
+    throw new Error('邮箱验证服务尚未配置，请先设置 RESEND_API_KEY 和 RESEND_FROM')
+  }
+  const subject = purpose === 'claim' ? '莫测造境账号激活' : '验证你的莫测造境账号'
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${env.RESEND_API_KEY}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ from: env.RESEND_FROM, to: [email], subject, html: `<p>请点击下面的链接完成莫测造境账号验证：</p><p><a href="${verificationUrl}">${verificationUrl}</a></p><p>链接 30 分钟内有效，且只能使用一次。</p>` }),
+  })
+  if (!response.ok) throw new Error(`验证邮件发送失败（${response.status}）`)
+  return null
+}
+
+async function createSession(env: Env & { DB: D1Database }, userId: string, response: Response): Promise<Response> {
+  const token = randomToken()
+  const now = new Date().toISOString()
+  const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString()
+  await env.DB.prepare('INSERT INTO sessions (session_id, user_id, token_hash, expires_at, created_at, last_seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)').bind(`session-${crypto.randomUUID()}`, userId, await sha256Text(token), expiresAt, now, now).run()
+  const headers = new Headers(response.headers)
+  headers.append('Set-Cookie', authCookie(token))
+  return new Response(response.body, { status: response.status, headers })
+}
+
+async function handleAuthApi(request: Request, env: Env): Promise<Response | null> {
+  const url = new URL(request.url)
+  const route = url.pathname.replace(/\/$/, '')
+  if (!route.startsWith('/api/auth/')) return null
+  if (!env.DB) return errorResponse(new Error('认证数据库尚未配置'), 503, request, env)
+
+  if (request.method === 'GET' && route === '/api/auth/me') {
+    const user = await appUserFromSession(request, env as Env & { DB: D1Database })
+    return json({ user }, 200, request, env)
+  }
+  if (request.method === 'POST' && route === '/api/auth/logout') {
+    const token = readCookie(request, 'moce_session')
+    if (token) await env.DB.prepare('UPDATE sessions SET revoked_at = ?1 WHERE token_hash = ?2').bind(new Date().toISOString(), await sha256Text(token)).run()
+    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { ...JSON_HEADERS, 'Set-Cookie': authCookie('', 0) } })
+  }
+  if (request.method === 'POST' && route === '/api/auth/register') {
+    const body = await readBody(request)
+    const email = normalizedEmail(isRecord(body) ? body.email : '')
+    const password = isRecord(body) && typeof body.password === 'string' ? body.password : ''
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return errorResponse(new Error('请输入有效邮箱'), 400, request, env)
+    if (password.length < 12 || password.length > 128) return errorResponse(new Error('密码长度需要为 12–128 个字符'), 400, request, env)
+    const allowed = await consumeAuthRateLimit(env as Env & { DB: D1Database }, await authRateKey(request, 'register', email), 5)
+    if (!allowed) return errorResponse(new Error('注册请求过于频繁，请 15 分钟后再试'), 429, request, env)
+    const active = await env.DB.prepare("SELECT COUNT(*) AS count FROM users WHERE status = 'active'").first<{ count: number }>()
+    if (Number(active?.count ?? 0) >= maxUsers(env)) return errorResponse(new Error(`内测名额已满，目前最多支持 ${maxUsers(env)} 个用户`), 409, request, env)
+    const existing = await env.DB.prepare('SELECT id, status FROM users WHERE email = ?1').bind(email).first<{ id: string; status: string }>()
+    if (existing?.status === 'active') return errorResponse(new Error('该邮箱已注册，请直接登录'), 409, request, env)
+    const userId = existing?.id ?? `user-${crypto.randomUUID()}`
+    const salt = randomToken()
+    const hash = await derivePassword(password, salt)
+    const now = new Date().toISOString()
+    await env.DB.prepare('INSERT INTO users (id, email, status, password_hash, password_salt, password_algorithm, password_iterations, created_at) VALUES (?1, ?2, \'pending\', ?3, ?4, \'PBKDF2-SHA256\', ?5, ?6) ON CONFLICT(email) DO UPDATE SET password_hash = excluded.password_hash, password_salt = excluded.password_salt, password_algorithm = excluded.password_algorithm, password_iterations = excluded.password_iterations, status = \'pending\'').bind(userId, email, hash, salt, PASSWORD_ITERATIONS, now).run()
+    await env.DB.prepare("DELETE FROM email_verifications WHERE user_id = ?1 AND purpose = 'verify'").bind(userId).run()
+    const token = randomToken()
+    await env.DB.prepare('INSERT INTO email_verifications (id, user_id, token_hash, purpose, expires_at, created_at) VALUES (?1, ?2, ?3, \'verify\', ?4, ?5)').bind(`verification-${crypto.randomUUID()}`, userId, await sha256Text(token), new Date(Date.now() + EMAIL_TOKEN_TTL_MS).toISOString(), now).run()
+    const devVerificationUrl = await sendVerificationEmail(env, request, email, token)
+    return json({ ok: true, message: '注册成功，请检查邮箱完成验证', ...(devVerificationUrl ? { devVerificationUrl } : {}) }, 201, request, env)
+  }
+  if (request.method === 'POST' && route === '/api/auth/login') {
+    const body = await readBody(request)
+    const email = normalizedEmail(isRecord(body) ? body.email : '')
+    const password = isRecord(body) && typeof body.password === 'string' ? body.password : ''
+    const allowed = await consumeAuthRateLimit(env as Env & { DB: D1Database }, await authRateKey(request, 'login', email), 10)
+    if (!allowed) return errorResponse(new Error('登录尝试过于频繁，请 15 分钟后再试'), 429, request, env)
+    const row = await env.DB.prepare('SELECT id, email, status, password_hash, password_salt, password_iterations FROM users WHERE email = ?1').bind(email).first<{ id: string; email: string; status: string; password_hash: string | null; password_salt: string | null; password_iterations: number | null }>()
+    if (!row || row.status !== 'active' || !row.password_hash || !row.password_salt) return errorResponse(new Error('邮箱或密码不正确，或邮箱尚未验证'), 401, request, env)
+    const candidate = await derivePassword(password, row.password_salt, row.password_iterations ?? PASSWORD_ITERATIONS)
+    if (candidate !== row.password_hash) return errorResponse(new Error('邮箱或密码不正确'), 401, request, env)
+    await env.DB.prepare('UPDATE users SET last_login_at = ?1 WHERE id = ?2').bind(new Date().toISOString(), row.id).run()
+    const response = json({ ok: true, user: { id: row.id, email: normalizedEmail(row.email), status: 'active' } }, 200, request, env)
+    return createSession(env as Env & { DB: D1Database }, row.id, response)
+  }
+  if (request.method === 'GET' && route === '/api/auth/verify-email') {
+    const token = url.searchParams.get('token') ?? ''
+    const allowed = await consumeAuthRateLimit(env as Env & { DB: D1Database }, await authRateKey(request, 'verify'), 10)
+    if (!allowed) return new Response('<h1>验证请求过于频繁</h1>', { status: 429, headers: { 'content-type': 'text/html; charset=utf-8' } })
+    const row = await env.DB.prepare('SELECT id, user_id, expires_at, used_at FROM email_verifications WHERE token_hash = ?1').bind(await sha256Text(token)).first<{ id: string; user_id: string; expires_at: string; used_at: string | null }>()
+    if (!row || row.used_at || Date.parse(row.expires_at) <= Date.now()) return new Response('<h1>验证链接无效或已过期</h1>', { status: 400, headers: { 'content-type': 'text/html; charset=utf-8' } })
+    const active = await env.DB.prepare("SELECT COUNT(*) AS count FROM users WHERE status = 'active'").first<{ count: number }>()
+    if (Number(active?.count ?? 0) >= maxUsers(env)) return new Response('<h1>内测名额已满</h1>', { status: 409, headers: { 'content-type': 'text/html; charset=utf-8' } })
+    const now = new Date().toISOString()
+    await env.DB.batch([
+      env.DB.prepare("UPDATE users SET status = 'active', email_verified_at = ?1 WHERE id = ?2").bind(now, row.user_id),
+      env.DB.prepare('UPDATE email_verifications SET used_at = ?1 WHERE id = ?2').bind(now, row.id),
+    ])
+    return new Response('<h1>邮箱验证成功</h1><p>现在可以返回莫测造境登录。</p>', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } })
+  }
+  return errorResponse(new Error('未知认证接口'), 404, request, env)
+}
+
 function decodeBase64Url(value: string): Uint8Array {
   const normalized = value.replaceAll('-', '+').replaceAll('_', '/') + '==='.slice((value.length + 3) % 4)
   const binary = atob(normalized)
@@ -235,15 +412,17 @@ async function verifyAccessJwt(request: Request, env: Env, expectedEmail: string
 async function authenticatedOwner(request: Request, env: Env): Promise<string> {
   const url = new URL(request.url)
   const localHost = ['localhost', '127.0.0.1'].includes(url.hostname)
-  if (localHost && !request.headers.get('Cf-Access-Authenticated-User-Email')) return 'local-dev'
-  const email = request.headers.get('Cf-Access-Authenticated-User-Email')?.trim().toLowerCase()
-  const authRequired = env.MOCE_AUTH_REQUIRED === 'true' && !localHost
-  if (authRequired) {
-    if (!email) throw new Response('需要通过 Cloudflare Access 登录', { status: 401 })
-    await verifyAccessJwt(request, env, email)
-    return email
-  }
-  return email || ownerFromRequest(request, env)
+  if (localHost && !readCookie(request, 'moce_session')) return 'local-dev'
+  if (!env.DB) throw new Response('认证数据库尚未配置', { status: 503 })
+  const user = await appUserFromSession(request, env as Env & { DB: D1Database })
+  if (!user) throw new Response('请先登录莫测造境账号', { status: 401 })
+  return user.email
+}
+
+async function requireAdminAccess(request: Request, env: Env): Promise<void> {
+  const email = normalizedEmail(request.headers.get('Cf-Access-Authenticated-User-Email'))
+  if (!email || !adminEmails(env).has(email)) throw new Response('管理员入口未授权', { status: 403 })
+  await verifyAccessJwt(request, env, email)
 }
 
 async function readBody(request: Request): Promise<unknown> {
@@ -985,8 +1164,18 @@ export default {
       } })
     }
     try {
-      const owner = await authenticatedOwner(request, env)
-      if (new URL(request.url).pathname.startsWith('/api/')) return await handleApi(request, env, owner)
+      const url = new URL(request.url)
+      const authResponse = await handleAuthApi(request, env)
+      if (authResponse) return authResponse
+      if (url.pathname.startsWith('/admin')) {
+        await requireAdminAccess(request, env)
+        if (env.ASSETS) return env.ASSETS.fetch(request)
+        return new Response('管理员后台静态资源尚未配置', { status: 503 })
+      }
+      if (url.pathname.startsWith('/api/')) {
+        const owner = await authenticatedOwner(request, env)
+        return await handleApi(request, env, owner)
+      }
       if (env.ASSETS) return env.ASSETS.fetch(request)
       return new Response('莫测造境 Worker 已启动，但尚未配置静态资源绑定', { status: 503 })
     } catch (error) {

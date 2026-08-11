@@ -2,7 +2,7 @@ import React, { startTransition, useEffect, useLayoutEffect, useMemo, useRef, us
 import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { Box, Brush, ChevronDown, ChevronLeft, ChevronRight, Cloud, Database, Download, Eraser, Eye, FilePlus2, Grid3X3, Image as ImageIcon, Layers3, Lock, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, Repeat2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, WandSparkles, X } from 'lucide-react'
+import { Box, Brush, ChevronDown, ChevronLeft, ChevronRight, Cloud, Database, Download, Eraser, Eye, FilePlus2, Grid3X3, Image as ImageIcon, Layers3, Lock, LogIn, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, Repeat2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, UserRound, WandSparkles, X } from 'lucide-react'
 import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceRotationPivot, instanceVoxelPairs, isBundledDefaultSampleProject, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, validateEntityFile } from './persistence'
@@ -25,6 +25,7 @@ import { SliceLayer, SlicePlane, SliceVoxel, sliceEntityParts, sliceLayerToAsset
 import { computeScale, computeShell, GeometryScaleMode, GeometryVoxel, validScaleFactors, VoxelGeometryMesh, VoxelGeometryPreview } from './voxel-geometry'
 import { createZip } from './zip'
 import { CloudAssetSummary, CloudProgress, CloudSceneSummary, CloudUsage, deleteCloudAsset, deleteCloudScene, downloadCloudObject, loadCloudAssetPreview, loadCloudLibrary, loadCloudUsage, uploadCloudAsset, uploadCloudScene } from './cloud-backup'
+import { AuthUser, loadAuthUser, loginAuthUser, logoutAuthUser, registerAuthUser, setCloudAuthRequiredHandler } from './auth'
 import './styles.css'
 
 function useStableEvent<T extends (...args: any[]) => any>(handler: T): T {
@@ -1356,6 +1357,9 @@ function App() {
   const [cloudError, setCloudError] = useState<string | null>(null)
   const [cloudTransfers, setCloudTransfers] = useState<Record<string, CloudProgress>>({})
   const [cloudTransferErrors, setCloudTransferErrors] = useState<Record<string, string>>({})
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null)
+  const [authDialogOpen, setAuthDialogOpen] = useState(false)
+  const [authDialogMode, setAuthDialogMode] = useState<'login' | 'register'>('login')
   const [sceneFileRef, setSceneFileRef] = useState<SceneFileRef | null>(null)
   const [savedSceneSignature, setSavedSceneSignature] = useState<string | null>(null)
   const [unsavedDialogOpen, setUnsavedDialogOpen] = useState(false)
@@ -1376,6 +1380,7 @@ function App() {
   const [sliceDialogOpen, setSliceDialogOpen] = useState(false)
   const persistenceReadyRef = useRef(false)
   const cloudInitialRefreshRef = useRef(false)
+  const cloudInitialRefreshCompletedRef = useRef(false)
   const savedSceneSignatureRef = useRef<string | null>(null)
   const sceneFileRefRef = useRef<SceneFileRef | null>(null)
   const exitDraftPersistedAtRef = useRef(0)
@@ -3817,8 +3822,20 @@ function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : '云端库暂时无法访问'
       setCloudError(message)
+    } finally {
+      cloudInitialRefreshCompletedRef.current = true
     }
   }
+
+  useEffect(() => {
+    void loadAuthUser().then(({ user }) => setAuthUser(user)).catch(() => setAuthUser(null))
+    setCloudAuthRequiredHandler(() => {
+      if (!cloudInitialRefreshCompletedRef.current) return
+      setAuthDialogMode('login')
+      setAuthDialogOpen(true)
+    })
+    return () => setCloudAuthRequiredHandler(null)
+  }, [])
 
   // The cloud catalog is independent from the local IndexedDB restore. Load
   // it once after the local session is ready so a page refresh immediately
@@ -5629,6 +5646,7 @@ function App() {
         <div className="top-actions">
           <ActionButton icon={<FilePlus2 size={17} />} label="新建" onClick={createNewProject} />
           <ActionButton icon={<Database size={17} />} label="场景库" onClick={openLibrary} />
+          <ActionButton icon={authUser ? <UserRound size={17} /> : <LogIn size={17} />} label={authUser ? authUser.email : '登录/注册'} onClick={() => { setAuthDialogMode('login'); setAuthDialogOpen(true) }} />
           <ActionButton icon={<Save size={17} />} label="保存" onClick={saveProject} />
           <ActionButton icon={<Save size={17} />} label="另存" onClick={saveProjectAs} />
           <div className="top-divider" />
@@ -5704,8 +5722,49 @@ function App() {
       {modelImportDialog && <ModelImportDialog state={modelImportDialog} targetSizeVoxels={modelImportTargetVoxels} mode={modelImportMode} onTargetSizeChange={setModelImportTargetVoxels} onModeChange={setModelImportMode} onStart={runModelImport} onConfirm={confirmModelImport} onCancel={() => setModelImportDialog(null)} />}
       {sliceDialogOpen && selectedEntityParts.length > 0 && <SliceDialog parts={selectedEntityParts} project={project} name={selectedDisplayName || '选中实体'} onClose={() => setSliceDialogOpen(false)} onNotice={setNotice} />}
       {unsavedDialogOpen && <UnsavedChangesDialog onDecision={handleUnsavedDecision} />}
+      {authDialogOpen && <AuthDialog mode={authDialogMode} user={authUser} onModeChange={setAuthDialogMode} onClose={() => setAuthDialogOpen(false)} onAuthenticated={(user) => { setAuthUser(user); setAuthDialogOpen(false); void refreshCloudLibrary(); setNotice(`已登录 · ${user.email}`) }} onLogout={async () => { await logoutAuthUser(); setAuthUser(null); setAuthDialogOpen(false); setNotice('已退出登录') }} />}
     </div>
   )
+}
+
+function AuthDialog({ mode, user, onModeChange, onClose, onAuthenticated, onLogout }: { mode: 'login' | 'register'; user: AuthUser | null; onModeChange: (mode: 'login' | 'register') => void; onClose: () => void; onAuthenticated: (user: AuthUser) => void; onLogout: () => Promise<void> }) {
+  const [email, setEmail] = useState(user?.email ?? '')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const [verificationUrl, setVerificationUrl] = useState('')
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault()
+    setBusy(true); setMessage(''); setVerificationUrl('')
+    try {
+      if (mode === 'login') {
+        const result = await loginAuthUser(email, password)
+        if (!result.user) throw new Error('登录响应缺少用户信息')
+        onAuthenticated(result.user)
+      } else {
+        const result = await registerAuthUser(email, password)
+        setMessage(result.message ?? '注册成功，请检查邮箱完成验证')
+        if (result.devVerificationUrl) setVerificationUrl(result.devVerificationUrl)
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '认证失败')
+    } finally { setBusy(false) }
+  }
+  return <div className="auth-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+    <section className="auth-dialog" role="dialog" aria-modal="true">
+      <button className="auth-close" onClick={onClose} aria-label="关闭"><X size={18} /></button>
+      <div className="auth-mark"><Box size={20} /></div>
+      <h2>{user ? '账号' : mode === 'login' ? '登录莫测造境' : '注册莫测造境'}</h2>
+      {user ? <><p className="auth-subtitle">当前账号：{user.email}</p><button className="auth-submit" onClick={() => void onLogout()}>退出登录</button></> : <form onSubmit={submit}>
+        <label>邮箱<input type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+        <label>密码<input type="password" required minLength={12} maxLength={128} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 12 个字符" /></label>
+        <button className="auth-submit" disabled={busy}>{busy ? '处理中…' : mode === 'login' ? '登录' : '注册'}</button>
+        <button type="button" className="auth-switch" onClick={() => { onModeChange(mode === 'login' ? 'register' : 'login'); setMessage('') }}>{mode === 'login' ? '还没有账号？注册' : '已有账号？登录'}</button>
+        {message && <p className="auth-message">{message}</p>}
+        {verificationUrl && <a className="auth-dev-link" href={verificationUrl} target="_blank" rel="noreferrer">打开本地验证链接</a>}
+      </form>}
+    </section>
+  </div>
 }
 
 function ActionButton({ icon, label, onClick, strong = false }: { icon: React.ReactNode; label: string; onClick: () => void; strong?: boolean }) {

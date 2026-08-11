@@ -23,7 +23,9 @@
   ],
   "vars": {
     "DEPLOYMENT_ENV": "staging",
-    "MOCE_AUTH_REQUIRED": "true"
+    "MOCE_AUTH_REQUIRED": "false",
+    "ADMIN_EMAILS": "xuyiyang038@gmail.com",
+    "MAX_USERS": "50"
   },
   "env": {
     "production": {
@@ -44,7 +46,10 @@
       ],
       "vars": {
         "DEPLOYMENT_ENV": "production",
-        "MOCE_AUTH_REQUIRED": "true"
+        "MOCE_AUTH_REQUIRED": "false",
+        "ADMIN_EMAILS": "xuyiyang038@gmail.com",
+        "MAX_USERS": "50",
+        "AUTH_BASE_URL": "https://moce-worldmaker.xuyiyang038.workers.dev"
       }
     }
   }

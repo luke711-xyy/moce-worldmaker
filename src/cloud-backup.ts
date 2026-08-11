@@ -86,6 +86,9 @@ function apiPath(path: string) {
 async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(apiPath(path), { credentials: 'include', ...init })
   if (!response.ok) {
+    if (response.status === 401) {
+      ;(globalThis as typeof globalThis & { __moceAuthRequired?: (() => void) | null }).__moceAuthRequired?.()
+    }
     let message = `云端请求失败（${response.status}）`
     try {
       const body = await response.json() as { error?: string; code?: string; objectKind?: 'asset' | 'scene'; conflicts?: Array<{ id: string; name: string; reason: 'name' | 'id' }> }

@@ -24,6 +24,9 @@ export type LibraryResponse = {
 async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
   const response = await fetch(input, { headers: { 'Content-Type': 'application/json' }, ...init })
   if (!response.ok) {
+    if (response.status === 401) {
+      ;(globalThis as typeof globalThis & { __moceAuthRequired?: (() => void) | null }).__moceAuthRequired?.()
+    }
     const body = await response.json().catch(() => ({})) as { error?: string }
     throw new Error(body.error ?? `请求失败 · ${response.status}`)
   }
