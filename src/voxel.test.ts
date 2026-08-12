@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { VOXEL_WORLD_SIZE, Voxel, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceLocalVoxelToSceneVoxelFast, instanceRotationPivot, instanceVoxelPairs, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { VOXEL_WORLD_SIZE, Voxel, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceLocalVoxelToSceneVoxelFast, instanceRotationPivot, instanceVoxelPairs, makeAssemblyAssetFromSceneParts, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, sceneNameForAsset, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueSceneName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
@@ -628,6 +628,57 @@ describe('莫测造境体素核心数据', () => {
     expect(asset.voxels).toHaveLength(parts.flatMap((part) => part.voxels).length)
     expect(Math.min(...asset.voxels.map((voxel) => voxel.x))).toBe(0)
     expect(Math.min(...asset.voxels.map((voxel) => voxel.y))).toBe(0)
+  })
+
+  it('keeps the scene-facing name separate from the asset-library name', () => {
+    const project = makeEmptyProject()
+    project.customVoxels = [{ x: 4, y: 2, z: 3, materialId: 'jade', entityId: 'authored-1' }]
+    project.entityNames = { 'voxel:authored-1': '我的原始实体名' }
+    const part = sceneEntityParts(project)[0]
+    const asset = makeAssetFromSceneParts('asset-library-1', '资产库展示名', [part])
+
+    expect(asset.name).toBe('资产库展示名')
+    expect(asset.sceneName).toBe('资产库展示名')
+    asset.name = '后来改过的资产库名字'
+    expect(asset.sceneName).toBe('资产库展示名')
+    expect(project.entityNames?.[part.memberKey]).toBe('我的原始实体名')
+  })
+
+  it('adds a suffix only for a real scene-name collision', () => {
+    expect(uniqueSceneName([], '原始实体名')).toBe('原始实体名')
+    expect(uniqueSceneName(['原始实体名'], '原始实体名')).toBe('原始实体名 2')
+    expect(uniqueSceneName(['原始实体名', '原始实体名 2'], '原始实体名')).toBe('原始实体名 3')
+  })
+
+  it('preserves nested assembly topology when saving an assembly to the asset library', () => {
+    const project = makeEmptyProject()
+    const materialIds = project.materials.map((material) => material.id)
+    project.customVoxels = [
+      { x: 0, y: 0, z: 0, materialId: materialIds[0], entityId: 'part-a' },
+      { x: 2, y: 1, z: 0, materialId: materialIds[1], entityId: 'part-b' },
+      { x: 5, y: 0, z: 0, materialId: materialIds[2], entityId: 'part-c' },
+    ]
+    project.assemblies = [
+      { id: 'assembly-root', name: '装配体 7', memberKeys: ['assembly:assembly-child', 'voxel:part-c'] },
+      { id: 'assembly-child', name: '子装配体 7-1', memberKeys: ['voxel:part-a', 'voxel:part-b'] },
+    ]
+    const parts = sceneEntityParts(project).filter((part) => part.kind === 'custom')
+    const asset = makeAssemblyAssetFromSceneParts('asset-assembly-7', '装配体 7', project, parts, 'assembly-root')
+
+    expect(asset?.name).toBe('装配体 7')
+    expect(asset?.sceneName).toBe('装配体 7')
+    expect(sceneNameForAsset({ ...asset!, name: '资产库改名' })).toBe('装配体 7')
+    expect(sceneNameForAsset({ ...asset!, name: '资产库改名', sceneName: '错误的旧字段' })).toBe('装配体 7')
+    expect(asset?.assembly?.rootId).toBe('assembly-node-assembly-root')
+    expect(asset?.assembly?.nodes).toHaveLength(2)
+    expect(asset?.assembly?.nodes.find((node) => node.id === 'assembly-node-assembly-child')?.parentAssemblyId)
+      .toBe('assembly-node-assembly-root')
+    expect(asset?.assembly?.nodes.find((node) => node.id === 'assembly-node-assembly-root')?.memberKeys)
+      .toEqual(expect.arrayContaining(['assembly:assembly-node-assembly-child', 'part:part-3']))
+    expect(asset?.assembly?.nodes.find((node) => node.id === 'assembly-node-assembly-child')?.memberKeys)
+      .toEqual(expect.arrayContaining(['part:part-1', 'part:part-2']))
+    expect(asset ? resolveInstanceComponents(asset).map((component) => component.partId) : [])
+      .toEqual(['part-1', 'part-2', 'part-3'])
   })
 
   it('increments copied asset names without overwriting existing assets', () => {

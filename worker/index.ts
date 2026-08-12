@@ -34,11 +34,11 @@ type StoredObject = {
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' }
 const MAX_BODY_BYTES = 25 * 1024 * 1024
 const MAX_TRANSFER_PART_BYTES = 8 * 1024 * 1024
-const ASSET_CLOUD_QUOTA_BYTES = 100 * 1024 * 1024
-const SCENE_CLOUD_QUOTA_BYTES = 300 * 1024 * 1024
+const ASSET_CLOUD_QUOTA_BYTES = 10 * 1024 * 1024
+const SCENE_CLOUD_QUOTA_BYTES = 30 * 1024 * 1024
 const ACCOUNT_CLOUD_QUOTA_BYTES = 8 * 1024 * 1024 * 1024
 const TRANSFER_TTL_MS = 24 * 60 * 60 * 1000
-const DEFAULT_MAX_USERS = 50
+const DEFAULT_MAX_USERS = 500
 // Cloudflare Workers Web Crypto rejects PBKDF2 iteration counts above 100000.
 // Keep the value at the supported ceiling so registration works in production.
 const PASSWORD_ITERATIONS = 100_000

@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronLeft, ChevronRight, Cloud, Database, Download, Eraser, Eye, FilePlus2, Grid3X3, Image as ImageIcon, Layers3, Lock, LogIn, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, Repeat2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, UserRound, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceRotationPivot, instanceVoxelPairs, isBundledDefaultSampleProject, isLegacyDefaultSampleProject, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceRotationPivot, instanceVoxelPairs, isBundledDefaultSampleProject, isLegacyDefaultSampleProject, makeAssemblyAssetFromSceneParts, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblyNodeNameForAsset, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, sceneNameForAsset, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueSceneName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, validateEntityFile } from './persistence'
 import { deleteLocalAsset, deleteLocalScene, duplicateLocalScene, initializeLocalLibrary, loadLocalLibrary, loadLocalScene, saveLocalAsset, saveLocalAssetCategories, saveLocalScene } from './local-library'
@@ -520,7 +520,11 @@ function materializeProjectInstances(project: ProjectState): ProjectState {
           return []
         }))]
         if (memberKeys.length >= 2) {
-          nextAssemblies.push({ id: assemblyMap.get(node.id)!, name: node.name || asset.assembly?.name || '装配体', memberKeys })
+          nextAssemblies.push({
+            id: assemblyMap.get(node.id)!,
+            name: sceneAssemblyNodeNameForAsset(asset, node),
+            memberKeys,
+          })
         }
       })
     }
@@ -2949,6 +2953,26 @@ function App() {
     return { ...position, valid: placementAssetWithinSceneBoundary(asset, position.x, position.y, position.z) && !hasPlacementAssetCollisionAt(asset, position.x, position.y, position.z) }
   }
 
+  const sceneNameForPlacement = (asset: VoxelAsset): string => {
+    // New templates carry an immutable scene-facing snapshot. Never consult
+    // the editable library label when that snapshot exists.
+    if (asset.sceneName?.trim() || asset.assembly?.sceneName?.trim()) return sceneNameForAsset(asset)
+
+    // Older ordinary templates cannot be retroactively reconstructed from
+    // the asset itself. If one is still represented in the current scene,
+    // however, its source link gives us the authored file-tree name. This
+    // makes old local records behave like new records without changing their
+    // library label or topology.
+    const sourceEntityIds = new Set(Object.entries(projectRef.current.customEntitySources ?? {})
+      .filter(([, source]) => source.assetId === asset.id)
+      .map(([entityId]) => entityId))
+    if (sourceEntityIds.size) {
+      const sourcePart = sceneEntityParts(projectRef.current).find((part) => sourceEntityIds.has(part.partId))
+      if (sourcePart) return sceneEntityTreeName(projectRef.current, sourcePart)
+    }
+    return sceneNameForAsset(asset)
+  }
+
   const placeAssetAt = (assetId: string, x: number, z: number) => {
     const asset = projectRef.current.assets.find((item) => item.id === assetId) ?? (pendingEntityImport?.asset.id === assetId ? pendingEntityImport.asset : undefined)
     if (!asset) return
@@ -3021,7 +3045,13 @@ function App() {
       // initial display name.
       if (!asset.assembly && materializedParts.length === 1) {
         const memberKey = `voxel:${materializedParts[0].entityId}`
-        draft.entityNames = { ...(draft.entityNames ?? {}), [memberKey]: asset.name }
+        // `asset.name` is the editable asset-library label. The scene-facing
+        // name is captured separately when the template is saved, so changing
+        // a template's library name cannot rename an entity that is placed
+        // back into a scene.
+        const existingNames = Object.values(draft.entityNames ?? {})
+        const sceneName = uniqueSceneName(existingNames, sceneNameForPlacement(asset), '实体')
+        draft.entityNames = { ...(draft.entityNames ?? {}), [memberKey]: sceneName }
         // Imported model assets may be added while another entity is being
         // edited, which places the new part under an assembly. Mark only this
         // model-derived name as explicit so the hierarchical auto-namer does
@@ -3035,14 +3065,25 @@ function App() {
         if (importedModel) draft.entityNameModes = { ...(draft.entityNameModes ?? {}), [memberKey]: 'custom' }
       }
       // Portable entity batches carry one name per materialized part. Write
-      // those names before the normalizer runs; this preserves duplicate-safe
-      // file-tree names without using names as topology identifiers.
+      // standalone names before the normalizer runs; assembly members are
+      // deliberately left to the same hierarchical naming path used by
+      // assets dragged from the asset library. Otherwise an imported
+      // assembly can keep the source member names as custom names and two
+      // assemblies end up with identical children in the file tree.
       if (asset.assembly?.partNames) {
+        const usedNames = new Set(
+          Object.values(draft.entityNames ?? {})
+            .map((name) => name.trim())
+            .filter(Boolean),
+        )
         materializedParts.forEach((part) => {
           const importedName = asset.assembly?.partNames?.[part.partId]
-          if (!importedName) return
+          const baseName = importedName?.trim()
+          if (!baseName) return
+          const nextName = uniqueSceneName(usedNames, baseName, '子实体')
+          usedNames.add(nextName)
           const memberKey = `voxel:${part.entityId}`
-          draft.entityNames = { ...(draft.entityNames ?? {}), [memberKey]: importedName }
+          draft.entityNames = { ...(draft.entityNames ?? {}), [memberKey]: nextName }
           draft.entityNameModes = { ...(draft.entityNameModes ?? {}), [memberKey]: 'custom' }
         })
       }
@@ -3072,6 +3113,11 @@ function App() {
       if (asset.assembly) {
         const nodeIds = new Map(asset.assembly.nodes.map((node) => [node.id, `assembly-${instanceId}-${node.id}`]))
         const partIds = new Map(materializedParts.map((part) => [part.partId, part.entityId]))
+        const usedAssemblyNames = new Set(
+          (draft.assemblies ?? [])
+            .map((assembly) => assembly.name?.trim())
+            .filter((name): name is string => Boolean(name)),
+        )
         asset.assembly.nodes.forEach((node) => {
           const memberKeys = [...new Set(node.memberKeys.flatMap((memberKey) => {
             if (memberKey.startsWith('assembly:')) {
@@ -3087,9 +3133,15 @@ function App() {
           if (memberKeys.length < 2) return
           const sceneAssemblyId = nodeIds.get(node.id)!
           const parentAssemblyId = node.parentAssemblyId ? nodeIds.get(node.parentAssemblyId) : undefined
+          const baseName = sceneAssemblyNodeNameForAsset(asset, node)
+          const sceneAssemblyName = uniqueSceneName(usedAssemblyNames, baseName, '装配体')
+          usedAssemblyNames.add(sceneAssemblyName)
           draft.assemblies = [...(draft.assemblies ?? []), {
             id: sceneAssemblyId,
-            name: node.name || asset.assembly?.name || '装配体',
+            // Asset-library naming is intentionally not used here. Preserve
+            // the authored scene/tree name and only suffix a real collision
+            // with an assembly already present in the destination scene.
+            name: sceneAssemblyName,
             memberKeys,
             nameMode: 'custom',
             ...(parentAssemblyId ? { parentAssemblyId } : {}),
@@ -3546,7 +3598,7 @@ function App() {
     const entityPartIds = new Map<string, string>()
     const partNames: Record<string, string> = {}
     const usedSceneNames = new Set(sceneEntityParts(projectRef.current)
-      .map((part) => part.displayLabel ?? part.label ?? '')
+      .map((part) => projectRef.current.entityNames?.[part.memberKey] ?? part.displayLabel ?? part.label ?? '')
       .map((value) => value.trim())
       .filter(Boolean))
     const uniqueImportedName = (requestedName: string) => {
@@ -3564,15 +3616,23 @@ function App() {
     }
     const sourceVoxels: Voxel[] = []
     const partVoxels: Record<string, Voxel[]> = {}
+    const assemblyEntityIds = new Set(
+      portable.assemblies.flatMap((assembly) => assembly.memberKeys
+        .filter((memberKey) => memberKey.startsWith('entity:'))
+        .map((memberKey) => memberKey.slice('entity:'.length))),
+    )
     portable.entities.forEach((entity, index) => {
       const sourceName = entity.name || entity.asset.name || '导入实体'
-      const uniqueName = uniqueImportedName(sourceName)
+      // Assembly members are named by the newly created assembly hierarchy at
+      // placement time. Only standalone imported entities consume the normal
+      // scene-level duplicate-name allocator here.
+      const uniqueName = assemblyEntityIds.has(entity.id) ? sourceName.trim() || '子实体' : uniqueImportedName(sourceName)
       importedNames.push({ ...structuredClone(entity.asset), id: `entity-name-${index}`, name: uniqueName })
       // Names are presentation data. Use the portable entity ID for topology
       // references so duplicate names can never merge or redirect a part.
       const partId = `portable-part-${batchId}-${entity.id}`
       entityPartIds.set(entity.id, partId)
-      partNames[partId] = uniqueName
+      if (!assemblyEntityIds.has(entity.id)) partNames[partId] = uniqueName
       const entityColor = entity.asset.templateColor ?? entity.asset.color
       const voxels = entity.asset.voxels.map((voxel) => ({
         x: voxel.x + entity.gridPosition.x - minGrid.x,
@@ -3615,20 +3675,12 @@ function App() {
     const maxY = importedBounds.max.y - importedBounds.min.y
     const maxZ = importedBounds.max.z - importedBounds.min.z
     const assemblyIdMap = new Map(portable.assemblies.map((assembly) => [assembly.id, `import-assembly-${batchId}-${assembly.id}`]))
-    const usedAssemblyNames = new Set((projectRef.current.assemblies ?? []).map((assembly) => assembly.name?.trim()).filter((value): value is string => Boolean(value)))
-    const uniqueAssemblyName = (requestedName: string) => {
-      const base = requestedName.trim() || '装配体'
-      let candidate = base
-      let suffix = 2
-      while (usedAssemblyNames.has(candidate)) candidate = `${base} ${suffix++}`
-      usedAssemblyNames.add(candidate)
-      return candidate
-    }
     const assemblyNodes: AssetAssembly['nodes'] = portable.assemblies.map((assembly) => ({
       id: assemblyIdMap.get(assembly.id)!,
-      name: uniqueAssemblyName(assembly.name ?? '装配体'),
-      // Imported names are explicit file data. Prevent the project naming
-      // normalizer from replacing them with a newly allocated sequence.
+      // Use the same automatic hierarchy naming as the asset-library drag
+      // path. The source name is retained only as a fallback label until the
+      // project naming normalizer assigns the new persistent sequence.
+      name: assembly.name ?? '装配体',
       parentAssemblyId: assembly.parentAssemblyId ? assemblyIdMap.get(assembly.parentAssemblyId) : undefined,
       memberKeys: assembly.memberKeys.flatMap((memberKey) => {
         if (memberKey.startsWith('entity:')) {
@@ -4247,6 +4299,10 @@ function App() {
       ...structuredClone(sourceAsset),
       id: `asset-library-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       name: sourceAsset.name?.trim() || '未命名实体',
+      // Keep a durable scene-facing snapshot even when this source asset came
+      // from the scene library or from an older template record. The dialog's
+      // later rename only changes `name`, never this field.
+      sceneName: sceneNameForAsset(sourceAsset),
       source: '场景库实体保存',
       isTemplate: true,
       templateSourceId: undefined,
@@ -4260,6 +4316,17 @@ function App() {
     const asset: VoxelAsset = {
       ...structuredClone(assetCategorySave.asset),
       name,
+      // The dialog name belongs only to the asset-library namespace. Always
+      // persist the authored scene name separately at the final write
+      // boundary as well, so both inspector-save and scene-library-save use
+      // the same invariant even for assembly templates.
+      sceneName: sceneNameForAsset(assetCategorySave.asset),
+      ...(assetCategorySave.asset.assembly ? {
+        assembly: {
+          ...assetCategorySave.asset.assembly,
+          sceneName: sceneNameForAsset(assetCategorySave.asset),
+        },
+      } : {}),
       categoryPath: normalizeAssetCategoryPath(categoryPath),
       isTemplate: true,
     }
@@ -4536,71 +4603,17 @@ function App() {
   }
 
   const makeAssemblyTemplateAsset = (sourceProject: ProjectState, sourceParts: SceneEntityPart[], rootAssemblyId: string): VoxelAsset | null => {
-    const sourceAssemblies = sourceProject.assemblies ?? []
-    const assemblyMap = new Map(sourceAssemblies.map((assembly) => [assembly.id, assembly]))
-    const rootAssembly = assemblyMap.get(rootAssemblyId)
-    if (!rootAssembly) return null
-    const assemblyIds = new Set<string>()
-    const collectAssemblyIds = (assemblyId: string) => {
-      if (assemblyIds.has(assemblyId)) return
-      assemblyIds.add(assemblyId)
-      assemblyMap.get(assemblyId)?.memberKeys.filter((key) => key.startsWith('assembly:')).forEach((key) => collectAssemblyIds(key.slice('assembly:'.length)))
-    }
-    collectAssemblyIds(rootAssemblyId)
-    const includedParts = sourceParts.filter((part) => (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(rootAssemblyId))
-    if (includedParts.length < 2) return null
-    const allVoxels = includedParts.flatMap((part) => scenePartVoxels(part))
-    const assemblyBounds = voxelBounds(allVoxels)!
-    const minX = assemblyBounds.min.x
-    const minY = assemblyBounds.min.y
-    const minZ = assemblyBounds.min.z
-    const partIdMap = new Map<string, string>()
-    const partVoxels: Record<string, Voxel[]> = {}
-    includedParts.forEach((part, index) => {
-      const localPartId = `part-${index + 1}`
-      partIdMap.set(part.id, localPartId)
-      partVoxels[localPartId] = scenePartVoxels(part).map((voxel) => ({ x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ, materialId: voxel.materialId }))
-    })
-    const uniqueVoxels = new Map<string, Voxel>()
-    Object.values(partVoxels).flat().forEach((voxel) => uniqueVoxels.set(`${voxel.x},${voxel.y},${voxel.z}`, voxel))
-    const mapStoredMemberKey = (storedKey: string): string[] => {
-      if (storedKey.startsWith('assembly:')) {
-        const mappedAssemblyId = `assembly-node-${storedKey.slice('assembly:'.length)}`
-        return assemblyIds.has(storedKey.slice('assembly:'.length)) ? [`assembly:${mappedAssemblyId}`] : []
-      }
-      const matchingParts = includedParts.filter((part) => part.memberKey === storedKey || (storedKey.startsWith('asset:') && part.memberKey.startsWith(`${storedKey}:`)))
-      return matchingParts.map((part) => `part:${partIdMap.get(part.id)}`).filter((key): key is string => Boolean(key))
-    }
-    const nodes = [...assemblyIds].map((assemblyId) => {
-      const assembly = assemblyMap.get(assemblyId)!
-      return {
-        id: `assembly-node-${assemblyId}`,
-        name: assembly.name?.trim() || '装配体',
-        memberKeys: [...new Set(assembly.memberKeys.flatMap(mapStoredMemberKey))],
-      }
-    })
-    const rootName = rootAssembly.name?.trim() || '装配体'
-    const width = assemblyBounds.max.x - minX + 1
-    const depth = assemblyBounds.max.z - minZ + 1
-    const height = assemblyBounds.max.y - minY + 1
-    const assembly: AssetAssembly = { name: rootName, rootId: `assembly-node-${rootAssemblyId}`, nodes }
-    return {
-      id: `asset-assembly-${Date.now()}`,
-      name: rootName,
-      style: '自定义实体',
-      kind: 'imported',
-      color: selectedAsset?.color ?? '#6c827d',
-      accent: selectedAsset?.accent ?? '#d2a354',
-      width,
-      depth,
-      height,
-      parts: Object.keys(partVoxels),
-      partVoxels,
-      voxels: [...uniqueVoxels.values()],
-      source: '装配体模板保存',
-      assembly,
-      isTemplate: true,
-    }
+    const rootName = sourceProject.assemblies?.find((assembly) => assembly.id === rootAssemblyId)?.name?.trim() || '装配体'
+    return makeAssemblyAssetFromSceneParts(
+      `asset-assembly-${Date.now()}`,
+      rootName,
+      sourceProject,
+      sourceParts,
+      rootAssemblyId,
+      selectedAsset?.color ?? '#6c827d',
+      selectedAsset?.accent ?? '#d2a354',
+      '装配体模板保存',
+    )
   }
 
   const saveSelectedEntityAsAsset = () => {
@@ -6321,88 +6334,16 @@ function SceneLibraryDialog({ library, busy, selectedSceneLoading, selectionRevi
         materialId: scenePartVoxelDisplayColorResolver?.(voxel, part) ?? voxel.materialId,
       })),
     }))
-    const makeAssemblyAsset = (rootId: string): VoxelAsset | null => {
-      const sourceAssemblies = selectedSceneProject.assemblies ?? []
-      const assemblyMap = new Map(sourceAssemblies.map((assembly) => [assembly.id, assembly]))
-      if (!assemblyMap.has(rootId)) return null
-
-      const assemblyIds = new Set<string>()
-      const collectAssemblyIds = (assemblyId: string) => {
-        if (assemblyIds.has(assemblyId)) return
-        assemblyIds.add(assemblyId)
-        assemblyMap.get(assemblyId)?.memberKeys
-          .filter((memberKey) => memberKey.startsWith('assembly:'))
-          .forEach((memberKey) => collectAssemblyIds(memberKey.slice('assembly:'.length)))
-      }
-      collectAssemblyIds(rootId)
-
-      const includedParts = colorizedParts.filter((part) =>
-        (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).some((assemblyId) => assemblyIds.has(assemblyId)),
-      )
-      if (includedParts.length < 2) return null
-      const allVoxels = includedParts.flatMap((part) => scenePartVoxels(part))
-      const bounds = voxelBounds(allVoxels)
-      if (!bounds) return null
-      const partIdMap = new Map<string, string>()
-      const partVoxels: Record<string, Voxel[]> = {}
-      includedParts.forEach((part, index) => {
-        const localPartId = `part-${index + 1}`
-        partIdMap.set(part.id, localPartId)
-        partVoxels[localPartId] = scenePartVoxels(part).map((voxel) => ({
-          ...voxel,
-          x: voxel.x - bounds.min.x,
-          y: voxel.y - bounds.min.y,
-          z: voxel.z - bounds.min.z,
-        }))
-      })
-
-      const mapStoredMemberKey = (storedKey: string): string[] => {
-        if (storedKey.startsWith('assembly:')) {
-          const sourceAssemblyId = storedKey.slice('assembly:'.length)
-          return assemblyIds.has(sourceAssemblyId) ? [`assembly:assembly-node-${sourceAssemblyId}`] : []
-        }
-        const matchingParts = includedParts.filter((part) =>
-          part.memberKey === storedKey
-          || (storedKey.startsWith('asset:') && part.memberKey.startsWith(`${storedKey}:`)),
-        )
-        return matchingParts
-          .map((part) => partIdMap.get(part.id))
-          .filter((partId): partId is string => Boolean(partId))
-          .map((partId) => `part:${partId}`)
-      }
-      const nodes = [...assemblyIds].map((assemblyId) => {
-        const assembly = assemblyMap.get(assemblyId)!
-        return {
-          id: `assembly-node-${assemblyId}`,
-          name: assembly.name?.trim() || '装配体',
-          memberKeys: [...new Set(assembly.memberKeys.flatMap(mapStoredMemberKey))],
-        }
-      })
-      const rootAssembly = assemblyMap.get(rootId)!
-      const uniqueVoxels = new Map<string, Voxel>()
-      Object.values(partVoxels).flat().forEach((voxel) => uniqueVoxels.set(`${voxel.x},${voxel.y},${voxel.z}`, voxel))
-      return {
-        id: `scene-library-assembly-${rootId}`,
-        name: entity.name,
-        style: '自定义实体',
-        kind: 'imported',
-        color,
-        accent: '#d2a354',
-        width: bounds.max.x - bounds.min.x + 1,
-        depth: bounds.max.z - bounds.min.z + 1,
-        height: bounds.max.y - bounds.min.y + 1,
-        parts: Object.keys(partVoxels),
-        partVoxels,
-        voxels: [...uniqueVoxels.values()],
-        source: '场景库装配体保存',
-        assembly: {
-          name: rootAssembly.name?.trim() || entity.name,
-          rootId: `assembly-node-${rootId}`,
-          nodes,
-        },
-        isTemplate: true,
-      }
-    }
+    const makeAssemblyAsset = (rootId: string): VoxelAsset | null => makeAssemblyAssetFromSceneParts(
+      `scene-library-assembly-${rootId}`,
+      entity.name,
+      selectedSceneProject,
+      colorizedParts,
+      rootId,
+      color,
+      '#d2a354',
+      '场景库装配体保存',
+    )
     const asset = rootAssemblyId
       ? (makeAssemblyAsset(rootAssemblyId) ?? makeAssetFromSceneParts(
         `scene-library-${entity.id}`,
@@ -6463,7 +6404,7 @@ function SceneLibraryDialog({ library, busy, selectedSceneLoading, selectionRevi
     <section className="library-dialog" role="dialog" aria-modal="true" aria-label="场景库" onPointerDown={(event) => { const target = event.target as HTMLElement; if (!target.closest('button, input, .scene-library-context-menu')) closeMenus() }}>
       <div className="library-dialog-heading"><div><h2>场景库</h2><p>场景文件与场景实体由当前工程自动管理</p></div><button className="icon-button" aria-label="关闭场景库" onClick={onClose}><X size={17} /></button></div>
       <div className="library-dialog-toolbar"><span>{error ? '场景库暂时无法访问' : `${library.scenes.length} 个本地场景 · ${cloudScenes.length} 个云端场景 · ${selectedSceneId ? `${selectedSceneProject ? selectedSceneParts.length : '…'} 个实体` : '未选择场景'}`}</span><div className="library-toolbar-actions"><button className="tiny-button" onClick={onBackupCurrentScene} disabled={sceneUploadProgress?.status === 'transferring' || sceneUploadProgress?.status === 'reconnecting'}><Cloud size={13} /> {sceneUploadProgress?.status === 'reconnecting' ? '正在重连…' : sceneUploadProgress ? `备份 ${Math.round((sceneUploadProgress.transferredBytes / Math.max(1, sceneUploadProgress.transfer.totalBytes)) * 100)}%` : '备份当前场景'}</button></div></div>
-      {cloudUsage && <div className="cloud-usage-strip"><span>云端资产 {formatBytesUi(cloudUsage.assetBytes)} / {formatBytesUi(cloudUsage.assetQuotaBytes)}</span><span>云端场景 {formatBytesUi(cloudUsage.sceneBytes)} / {formatBytesUi(cloudUsage.sceneQuotaBytes)}</span><span>账户总量 {formatBytesUi(cloudUsage.accountBytes)} / {formatBytesUi(cloudUsage.accountQuotaBytes)}</span></div>}
+      {cloudUsage && <div className="cloud-usage-strip"><span>云端资产 {formatBytesUi(cloudUsage.assetBytes)} / {formatBytesUi(cloudUsage.assetQuotaBytes)}</span><span>云端场景 {formatBytesUi(cloudUsage.sceneBytes)} / {formatBytesUi(cloudUsage.sceneQuotaBytes)}</span></div>}
       {cloudError && <div className="cloud-error-strip"><Cloud size={13} /> 云端暂不可用：{cloudError}</div>}
       {error && <div className="library-error" role="alert"><span>加载失败：{error}</span><button className="tiny-button" onClick={() => window.location.reload()}>刷新页面重试</button></div>}
       <div className="library-columns">

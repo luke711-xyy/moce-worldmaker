@@ -25,7 +25,7 @@
     "DEPLOYMENT_ENV": "staging",
     "MOCE_AUTH_REQUIRED": "false",
     "ADMIN_EMAILS": "xuyiyang038@gmail.com",
-    "MAX_USERS": "50"
+    "MAX_USERS": "500"
   },
   "env": {
     "production": {
@@ -48,7 +48,7 @@
         "DEPLOYMENT_ENV": "production",
         "MOCE_AUTH_REQUIRED": "false",
         "ADMIN_EMAILS": "xuyiyang038@gmail.com",
-        "MAX_USERS": "50",
+        "MAX_USERS": "500",
         "AUTH_BASE_URL": "https://moce.luke-xu.asia"
       },
       "routes": [

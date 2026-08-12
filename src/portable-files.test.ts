@@ -45,6 +45,17 @@ describe('莫测造境实体传播文件', () => {
     ])
   })
 
+  it('导出位于不同高度的实体时不会把世界高度重复写入资产局部坐标', () => {
+    const project = makeEmptyProject()
+    project.customVoxels = [
+      { x: 0, y: 5, z: 0, materialId: 'jade', entityId: 'entity-low' },
+      { x: 0, y: 9, z: 0, materialId: 'terracotta', entityId: 'entity-high' },
+    ]
+    const file = createEntityFile(project, sceneEntityParts(project), '上下实体')
+    expect(file.entities.map((entity) => entity.gridPosition.y)).toEqual([5, 9])
+    expect(file.entities.map((entity) => Math.min(...entity.asset.voxels.map((voxel) => voxel.y)))).toEqual([0, 0])
+  })
+
   it('导出普通实体时保留每个体素的最终显示颜色', () => {
     const project = makeDefaultProject()
     project.customVoxels = [

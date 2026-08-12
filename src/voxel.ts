@@ -30,6 +30,12 @@ export type VoxelOverride = Voxel & {
 export type VoxelAsset = {
   id: string
   name: string
+  /**
+   * The scene-facing name captured when this asset was saved. `name` is the
+   * asset-library label and may be renamed independently; this field is never
+   * changed by asset-library rename operations.
+   */
+  sceneName?: string
   /** Hierarchical asset-library category, from root to leaf. */
   categoryPath?: string[]
   style: string
@@ -54,12 +60,46 @@ export type VoxelAsset = {
 
 export type AssetAssembly = {
   name: string
+  /** Name of the root assembly in the scene when this asset was captured. */
+  sceneName?: string
   rootId: string
   /** Multiple top-level assemblies can be carried by one portable placement. */
   rootIds?: string[]
   /** Stable display names for ordinary parts inside a portable placement. */
   partNames?: Record<string, string>
   nodes: Array<{ id: string; name: string; memberKeys: string[]; parentAssemblyId?: string }>
+}
+
+/**
+ * Resolve the name that should be written into the scene tree when a template
+ * asset is materialized. `name` belongs to the asset-library namespace and is
+ * intentionally the last fallback only. New assets carry the scene-facing
+ * snapshot explicitly; assembly assets also carry it on `assembly` so the
+ * root node remains stable after a library rename.
+ */
+export function sceneNameForAsset(asset: Pick<VoxelAsset, 'name' | 'sceneName' | 'assembly'>, fallback = '实体'): string {
+  const rootNodeName = asset.assembly?.rootId
+    ? asset.assembly.nodes.find((node) => node.id === asset.assembly?.rootId)?.name
+    : undefined
+  // Assembly snapshots are authoritative for the root of an assembly. Keep
+  // this ahead of the top-level field so an older asset whose library label
+  // was accidentally copied into `sceneName` can still recover its authored
+  // assembly name from the nested snapshot.
+  return asset.assembly?.sceneName?.trim()
+    || asset.sceneName?.trim()
+    || rootNodeName?.trim()
+    || asset.name?.trim()
+    || fallback
+}
+
+/** Resolve the scene-facing label for one assembly node. */
+export function sceneAssemblyNodeNameForAsset(
+  asset: Pick<VoxelAsset, 'name' | 'sceneName' | 'assembly'>,
+  node: Pick<NonNullable<VoxelAsset['assembly']>['nodes'][number], 'id' | 'name'>,
+  fallback = '装配体',
+): string {
+  if (node.id === asset.assembly?.rootId) return sceneNameForAsset(asset, fallback)
+  return node.name?.trim() || fallback
 }
 
 export type SceneInstance = {
@@ -276,6 +316,21 @@ export function uniqueTemplateAssetName(assets: VoxelAsset[], requestedName: str
   return `${baseName} (${index})`
 }
 
+/**
+ * Allocate a scene-tree display name without renaming any existing object.
+ * Asset-library labels are not part of this namespace; callers pass the
+ * captured scene name here when materializing an asset into a scene.
+ */
+export function uniqueSceneName(existingNames: Iterable<string>, requestedName: string, fallback = '实体'): string {
+  const used = new Set([...existingNames].map((name) => name.trim()).filter(Boolean))
+  const base = requestedName.trim() || fallback
+  if (!used.has(base)) return base
+  let suffix = 2
+  let candidate = `${base} ${suffix}`
+  while (used.has(candidate)) candidate = `${base} ${++suffix}`
+  return candidate
+}
+
 export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEntityPart[], color = '#6c827d', accent = '#d2a354', materialIdResolver?: (voxel: Voxel, part: SceneEntityPart) => string): VoxelAsset {
   const sourceVoxels = parts.flatMap((part) => scenePartVoxels(part).map((voxel) => ({
     ...voxel,
@@ -284,14 +339,21 @@ export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEn
   // Avoid spreading a large voxel array into Math.min/Math.max. Imported
   // scenes can contain tens of thousands of voxels, which otherwise exceeds
   // the browser call stack while building a scene-library preview.
-  const bounds = sourceVoxels.reduce((result, voxel) => ({
+  // The source parts may already be positioned above the ground or away
+  // from the origin. Starting the reduction at zero incorrectly leaves a
+  // positive minimum at zero, so the exported asset keeps the old world
+  // offset and the portable importer adds the entity grid position again.
+  // Seed from the first real voxel so every asset snapshot is normalized to
+  // its true local bounding-box origin.
+  const firstVoxel = sourceVoxels[0]
+  const bounds = sourceVoxels.slice(1).reduce((result, voxel) => ({
     minX: Math.min(result.minX, voxel.x),
     minY: Math.min(result.minY, voxel.y),
     minZ: Math.min(result.minZ, voxel.z),
     maxX: Math.max(result.maxX, voxel.x),
     maxY: Math.max(result.maxY, voxel.y),
     maxZ: Math.max(result.maxZ, voxel.z),
-  }), { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 })
+  }), { minX: firstVoxel.x, minY: firstVoxel.y, minZ: firstVoxel.z, maxX: firstVoxel.x, maxY: firstVoxel.y, maxZ: firstVoxel.z })
   const { minX, minY, minZ, maxX, maxY, maxZ } = bounds
   const voxels = deduplicateVoxels(sourceVoxels.map((voxel) => ({
     x: voxel.x - minX,
@@ -303,6 +365,7 @@ export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEn
   return {
     id,
     name,
+    sceneName: name,
     style: '自定义实体',
     kind: 'imported',
     color,
@@ -313,6 +376,139 @@ export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEn
     parts: parts.map((part, index) => part.kind === 'asset' ? part.partId : `体素模块_${index + 1}`),
     voxels,
     source: '场景实体保存',
+    isTemplate: true,
+  }
+}
+
+/**
+ * Snapshot an authored scene assembly as a reusable asset.
+ *
+ * Asset-library placement is deliberately materialized into ordinary custom
+ * voxels, but the file-tree topology must travel with the snapshot. Keeping
+ * this conversion here (instead of maintaining separate copies in the
+ * inspector and scene-library code paths) makes assembly, nested assembly,
+ * part IDs, offsets, and colors use exactly the same coordinate frame.
+ */
+export function makeAssemblyAssetFromSceneParts(
+  id: string,
+  name: string,
+  project: Pick<ProjectState, 'assemblies' | 'entityNames'>,
+  sourceParts: SceneEntityPart[],
+  rootAssemblyId: string,
+  color = '#6c827d',
+  accent = '#d2a354',
+  source = '装配体模板保存',
+  materialIdResolver?: (voxel: Voxel, part: SceneEntityPart) => string,
+): VoxelAsset | null {
+  const sourceAssemblies = project.assemblies ?? []
+  const assemblyMap = new Map(sourceAssemblies.map((assembly) => [assembly.id, assembly]))
+  const rootAssembly = assemblyMap.get(rootAssemblyId)
+  if (!rootAssembly) return null
+
+  const assemblyIds = new Set<string>()
+  const collectAssemblyIds = (assemblyId: string) => {
+    if (assemblyIds.has(assemblyId)) return
+    assemblyIds.add(assemblyId)
+    assemblyMap.get(assemblyId)?.memberKeys
+      .filter((memberKey) => memberKey.startsWith('assembly:'))
+      .forEach((memberKey) => collectAssemblyIds(memberKey.slice('assembly:'.length)))
+  }
+  collectAssemblyIds(rootAssemblyId)
+
+  const includedParts = sourceParts.filter((part) =>
+    (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).some((assemblyId) => assemblyIds.has(assemblyId)),
+  )
+  if (includedParts.length < 2) return null
+  const allVoxels = includedParts.flatMap((part) => scenePartVoxels(part))
+  const bounds = voxelBounds(allVoxels)
+  if (!bounds) return null
+
+  const partIdMap = new Map<string, string>()
+  const partVoxels: Record<string, Voxel[]> = {}
+  const partNames: Record<string, string> = {}
+  includedParts.forEach((part, index) => {
+    const localPartId = `part-${index + 1}`
+    partIdMap.set(part.id, localPartId)
+    const sourceVoxels = scenePartVoxels(part)
+    partVoxels[localPartId] = sourceVoxels.map((voxel) => ({
+      ...voxel,
+      x: voxel.x - bounds.min.x,
+      y: voxel.y - bounds.min.y,
+      z: voxel.z - bounds.min.z,
+      materialId: materialIdResolver ? materialIdResolver(voxel, part) : voxel.materialId,
+      entityId: undefined,
+    }))
+    const partName = project.entityNames?.[part.memberKey]?.trim() || part.displayLabel?.trim() || part.label?.trim()
+    if (partName) partNames[localPartId] = partName
+  })
+
+  const uniqueVoxels = new Map<string, Voxel>()
+  Object.values(partVoxels).flat().forEach((voxel) => {
+    const { entityId: _entityId, ...assetVoxel } = voxel
+    uniqueVoxels.set(`${assetVoxel.x},${assetVoxel.y},${assetVoxel.z}`, assetVoxel)
+  })
+
+  const mapStoredMemberKey = (storedKey: string): string[] => {
+    if (storedKey.startsWith('assembly:')) {
+      const sourceAssemblyId = storedKey.slice('assembly:'.length)
+      return assemblyIds.has(sourceAssemblyId) ? [`assembly:assembly-node-${sourceAssemblyId}`] : []
+    }
+    const matchingParts = includedParts.filter((part) =>
+      part.memberKey === storedKey
+      || (storedKey.startsWith('asset:') && part.memberKey.startsWith(`${storedKey}:`)),
+    )
+    return matchingParts
+      .map((part) => partIdMap.get(part.id))
+      .filter((partId): partId is string => Boolean(partId))
+      .map((partId) => `part:${partId}`)
+  }
+
+  // parentAssemblyId was historically omitted by both asset-save paths. If
+  // an old project has no explicit parent field, infer it from assembly
+  // membership so nested assemblies are still captured correctly.
+  const inferredParents = new Map<string, string>()
+  sourceAssemblies.forEach((assembly) => {
+    assembly.memberKeys.filter((key) => key.startsWith('assembly:')).forEach((key) => {
+      inferredParents.set(key.slice('assembly:'.length), assembly.id)
+    })
+  })
+  const nodes = [...assemblyIds].map((assemblyId) => {
+    const assembly = assemblyMap.get(assemblyId)!
+    const parentSourceId = assembly.parentAssemblyId ?? inferredParents.get(assemblyId)
+    const parentAssemblyId = parentSourceId && assemblyIds.has(parentSourceId)
+      ? `assembly-node-${parentSourceId}`
+      : undefined
+    return {
+      id: `assembly-node-${assemblyId}`,
+      name: assembly.name?.trim() || '装配体',
+      memberKeys: [...new Set(assembly.memberKeys.flatMap(mapStoredMemberKey))],
+      ...(parentAssemblyId ? { parentAssemblyId } : {}),
+    }
+  })
+
+  return {
+    id,
+    name,
+    sceneName: rootAssembly.name?.trim() || name,
+    style: '自定义实体',
+    kind: 'imported',
+    color,
+    accent,
+    width: bounds.max.x - bounds.min.x + 1,
+    depth: bounds.max.z - bounds.min.z + 1,
+    height: bounds.max.y - bounds.min.y + 1,
+    parts: Object.keys(partVoxels),
+    partVoxels,
+    voxels: [...uniqueVoxels.values()],
+    source,
+    assembly: {
+      name: rootAssembly.name?.trim() || name,
+      sceneName: rootAssembly.name?.trim() || name,
+      rootId: `assembly-node-${rootAssemblyId}`,
+      rootIds: [`assembly-node-${rootAssemblyId}`],
+      partNames,
+      nodes,
+    },
     isTemplate: true,
   }
 }
