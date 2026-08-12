@@ -168,10 +168,10 @@ function partMatchesMemberKey(part: SceneEntityPart, storedKey: string): boolean
 export function createEntityFile(project: ProjectState, parts: SceneEntityPart[], name = '莫测造境实体', voxelColorResolver?: (voxel: Voxel, part: SceneEntityPart) => string) : MoceEntityFile {
   const groups = new Map<string, SceneEntityPart[]>()
   parts.forEach((part) => {
-    // A selected plain instance is exported as one entity. Once its parts take
-    // part in an assembly, keep each member separate so the assembly tree can
-    // be rebuilt on import.
-    const key = part.assemblyIds?.length ? `part:${part.id}` : (part.instanceId ? `instance:${part.instanceId}` : `part:${part.id}`)
+    // Each scene file-tree part is a portable entity. Do not collapse parts by
+    // instanceId: an instance may contain several independent scene entities,
+    // and collapsing them loses both their names and their spatial relation.
+    const key = `part:${part.id}`
     groups.set(key, [...(groups.get(key) ?? []), part])
   })
   const entities: PortableEntity[] = []
@@ -238,9 +238,10 @@ export function createEntityFile(project: ProjectState, parts: SceneEntityPart[]
     if (memberKeys.length < 2) continue
     assemblies.push({ id: source.id, name: source.name, nameMode: source.nameMode, parentAssemblyId: source.parentAssemblyId, memberKeys })
   }
-  // A multi-selection is deliberately flattened into ordinary entities. The
-  // source assembly relationship must not leak into a portable selection.
-  return { format: MOCE_ENTITY_FORMAT, formatVersion: MOCE_PORTABLE_FORMAT_VERSION, name, entities, assemblies: entities.length > 1 ? [] : assemblies }
+  // Keep the complete selected assembly graph even when several entities are
+  // exported. Import uses this graph to reconstruct nested and sibling
+  // assemblies instead of turning the batch into one synthetic entity.
+  return { format: MOCE_ENTITY_FORMAT, formatVersion: MOCE_PORTABLE_FORMAT_VERSION, name, entities, assemblies }
 }
 
 export function parseAssetFile(value: unknown): MoceAssetFile {

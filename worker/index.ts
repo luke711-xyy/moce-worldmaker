@@ -39,9 +39,12 @@ const SCENE_CLOUD_QUOTA_BYTES = 300 * 1024 * 1024
 const ACCOUNT_CLOUD_QUOTA_BYTES = 8 * 1024 * 1024 * 1024
 const TRANSFER_TTL_MS = 24 * 60 * 60 * 1000
 const DEFAULT_MAX_USERS = 50
-const PASSWORD_ITERATIONS = 310_000
+// Cloudflare Workers Web Crypto rejects PBKDF2 iteration counts above 100000.
+// Keep the value at the supported ceiling so registration works in production.
+const PASSWORD_ITERATIONS = 100_000
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const EMAIL_TOKEN_TTL_MS = 30 * 60 * 1000
+const PASSWORD_RESET_TOKEN_TTL_MS = 30 * 60 * 1000
 const AUTH_RATE_WINDOW_MS = 15 * 60 * 1000
 const AUTH_RATE_BLOCK_MS = 15 * 60 * 1000
 type AccessJwk = JsonWebKey & { kid?: string }
@@ -269,7 +272,9 @@ async function appUserFromSession(request: Request, env: Env & { DB: D1Database 
 
 async function sendVerificationEmail(env: Env, request: Request, email: string, token: string, purpose: 'verify' | 'claim' = 'verify') {
   const baseUrl = (env.AUTH_BASE_URL ?? new URL(request.url).origin).replace(/\/$/, '')
-  const verificationUrl = `${baseUrl}/api/auth/verify-email?token=${encodeURIComponent(token)}`
+  // Open the application first and let it POST the token. This prevents mail
+  // security scanners from consuming a one-time GET link before the user does.
+  const verificationUrl = `${baseUrl}/?verify=${encodeURIComponent(token)}`
   if (!env.RESEND_API_KEY || !env.RESEND_FROM) {
     if (env.DEPLOYMENT_ENV !== 'production') return verificationUrl
     throw new Error('邮箱验证服务尚未配置，请先设置 RESEND_API_KEY 和 RESEND_FROM')
@@ -281,6 +286,22 @@ async function sendVerificationEmail(env: Env, request: Request, email: string, 
     body: JSON.stringify({ from: env.RESEND_FROM, to: [email], subject, html: `<p>请点击下面的链接完成莫测造境账号验证：</p><p><a href="${verificationUrl}">${verificationUrl}</a></p><p>链接 30 分钟内有效，且只能使用一次。</p>` }),
   })
   if (!response.ok) throw new Error(`验证邮件发送失败（${response.status}）`)
+  return null
+}
+
+async function sendPasswordResetEmail(env: Env, request: Request, email: string, token: string) {
+  const baseUrl = (env.AUTH_BASE_URL ?? new URL(request.url).origin).replace(/\/$/, '')
+  const resetUrl = `${baseUrl}/?reset=${encodeURIComponent(token)}`
+  if (!env.RESEND_API_KEY || !env.RESEND_FROM) {
+    if (env.DEPLOYMENT_ENV !== 'production') return resetUrl
+    throw new Error('邮箱验证服务尚未配置，请先设置 RESEND_API_KEY 和 RESEND_FROM')
+  }
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${env.RESEND_API_KEY}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ from: env.RESEND_FROM, to: [email], subject: '重置你的莫测造境密码', html: `<p>请点击下面的链接设置新的莫测造境密码：</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>链接 30 分钟内有效，且只能使用一次。如果不是你发起的请求，请忽略此邮件。</p>` }),
+  })
+  if (!response.ok) throw new Error(`密码重置邮件发送失败（${response.status}）`)
   return null
 }
 
@@ -332,6 +353,60 @@ async function handleAuthApi(request: Request, env: Env): Promise<Response | nul
     const devVerificationUrl = await sendVerificationEmail(env, request, email, token)
     return json({ ok: true, message: '注册成功，请检查邮箱完成验证', ...(devVerificationUrl ? { devVerificationUrl } : {}) }, 201, request, env)
   }
+  if (request.method === 'POST' && route === '/api/auth/resend-verification') {
+    const body = await readBody(request)
+    const email = normalizedEmail(isRecord(body) ? body.email : '')
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return errorResponse(new Error('请输入有效邮箱'), 400, request, env)
+    const allowed = await consumeAuthRateLimit(env as Env & { DB: D1Database }, await authRateKey(request, 'resend-verification', email), 5)
+    if (!allowed) return errorResponse(new Error('邮件请求过于频繁，请 15 分钟后再试'), 429, request, env)
+
+    const row = await env.DB.prepare('SELECT id, status FROM users WHERE email = ?1').bind(email).first<{ id: string; status: string }>()
+    let devVerificationUrl: string | null = null
+    if (row?.status === 'pending') {
+      const now = new Date().toISOString()
+      await env.DB.prepare("DELETE FROM email_verifications WHERE user_id = ?1 AND purpose = 'verify'").bind(row.id).run()
+      const token = randomToken()
+      await env.DB.prepare("INSERT INTO email_verifications (id, user_id, token_hash, purpose, expires_at, created_at) VALUES (?1, ?2, ?3, 'verify', ?4, ?5)").bind(`verification-${crypto.randomUUID()}`, row.id, await sha256Text(token), new Date(Date.now() + EMAIL_TOKEN_TTL_MS).toISOString(), now).run()
+      devVerificationUrl = await sendVerificationEmail(env, request, email, token)
+    }
+    // Keep this response intentionally generic so the endpoint cannot be used
+    // to enumerate registered addresses.
+    return json({ ok: true, message: '如果该邮箱存在待验证账号，最新验证邮件已发送，请只使用最新邮件中的链接', ...(devVerificationUrl ? { devVerificationUrl } : {}) }, 200, request, env)
+  }
+  if (request.method === 'POST' && route === '/api/auth/request-password-reset') {
+    const body = await readBody(request)
+    const email = normalizedEmail(isRecord(body) ? body.email : '')
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return errorResponse(new Error('请输入有效邮箱'), 400, request, env)
+    const allowed = await consumeAuthRateLimit(env as Env & { DB: D1Database }, await authRateKey(request, 'password-reset', email), 3)
+    if (!allowed) return errorResponse(new Error('请求过于频繁，请 15 分钟后再试'), 429, request, env)
+    const row = await env.DB.prepare("SELECT id, status FROM users WHERE email = ?1 AND status != 'disabled'").bind(email).first<{ id: string; status: string }>()
+    let devResetUrl: string | null = null
+    if (row) {
+      const now = new Date().toISOString()
+      await env.DB.prepare('DELETE FROM password_resets WHERE user_id = ?1').bind(row.id).run()
+      const token = randomToken()
+      await env.DB.prepare('INSERT INTO password_resets (id, user_id, token_hash, expires_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5)').bind(`password-reset-${crypto.randomUUID()}`, row.id, await sha256Text(token), new Date(Date.now() + PASSWORD_RESET_TOKEN_TTL_MS).toISOString(), now).run()
+      devResetUrl = await sendPasswordResetEmail(env, request, email, token)
+    }
+    return json({ ok: true, message: '如果该邮箱对应账号存在，密码重置邮件已发送，请检查收件箱', ...(devResetUrl ? { devVerificationUrl: devResetUrl } : {}) }, 200, request, env)
+  }
+  if (request.method === 'POST' && route === '/api/auth/reset-password') {
+    const body = await readBody(request)
+    const token = isRecord(body) && typeof body.token === 'string' ? body.token : ''
+    const password = isRecord(body) && typeof body.password === 'string' ? body.password : ''
+    if (password.length < 12 || password.length > 128) return errorResponse(new Error('密码长度需要为 12–128 个字符'), 400, request, env)
+    const row = await env.DB.prepare('SELECT id, user_id, expires_at, used_at FROM password_resets WHERE token_hash = ?1').bind(await sha256Text(token)).first<{ id: string; user_id: string; expires_at: string; used_at: string | null }>()
+    if (!row || row.used_at || Date.parse(row.expires_at) <= Date.now()) return errorResponse(new Error('密码重置链接无效或已过期，请重新申请'), 400, request, env)
+    const salt = randomToken()
+    const hash = await derivePassword(password, salt)
+    const now = new Date().toISOString()
+    await env.DB.batch([
+      env.DB.prepare('UPDATE users SET password_hash = ?1, password_salt = ?2, password_algorithm = \'PBKDF2-SHA256\', password_iterations = ?3 WHERE id = ?4').bind(hash, salt, PASSWORD_ITERATIONS, row.user_id),
+      env.DB.prepare('UPDATE password_resets SET used_at = ?1 WHERE id = ?2 AND used_at IS NULL').bind(now, row.id),
+      env.DB.prepare('UPDATE sessions SET revoked_at = ?1 WHERE user_id = ?2 AND revoked_at IS NULL').bind(now, row.user_id),
+    ])
+    return json({ ok: true, message: '密码已重置，请使用新密码登录' }, 200, request, env)
+  }
   if (request.method === 'POST' && route === '/api/auth/login') {
     const body = await readBody(request)
     const email = normalizedEmail(isRecord(body) ? body.email : '')
@@ -339,27 +414,38 @@ async function handleAuthApi(request: Request, env: Env): Promise<Response | nul
     const allowed = await consumeAuthRateLimit(env as Env & { DB: D1Database }, await authRateKey(request, 'login', email), 10)
     if (!allowed) return errorResponse(new Error('登录尝试过于频繁，请 15 分钟后再试'), 429, request, env)
     const row = await env.DB.prepare('SELECT id, email, status, password_hash, password_salt, password_iterations FROM users WHERE email = ?1').bind(email).first<{ id: string; email: string; status: string; password_hash: string | null; password_salt: string | null; password_iterations: number | null }>()
-    if (!row || row.status !== 'active' || !row.password_hash || !row.password_salt) return errorResponse(new Error('邮箱或密码不正确，或邮箱尚未验证'), 401, request, env)
+    if (!row || !row.password_hash || !row.password_salt) return errorResponse(new Error('邮箱或密码不正确'), 401, request, env)
+    if (row.status !== 'active') return errorResponse(new Error('邮箱尚未验证，请打开最新验证邮件中的链接后再登录'), 401, request, env)
     const candidate = await derivePassword(password, row.password_salt, row.password_iterations ?? PASSWORD_ITERATIONS)
     if (candidate !== row.password_hash) return errorResponse(new Error('邮箱或密码不正确'), 401, request, env)
     await env.DB.prepare('UPDATE users SET last_login_at = ?1 WHERE id = ?2').bind(new Date().toISOString(), row.id).run()
     const response = json({ ok: true, user: { id: row.id, email: normalizedEmail(row.email), status: 'active' } }, 200, request, env)
     return createSession(env as Env & { DB: D1Database }, row.id, response)
   }
-  if (request.method === 'GET' && route === '/api/auth/verify-email') {
-    const token = url.searchParams.get('token') ?? ''
+  if ((request.method === 'GET' || request.method === 'POST') && route === '/api/auth/verify-email') {
+    const body = request.method === 'POST' ? await readBody(request) : null
+    const token = request.method === 'POST'
+      ? (isRecord(body) && typeof body.token === 'string' ? body.token : '')
+      : (url.searchParams.get('token') ?? '')
+    const verificationError = (message: string, status: number) => request.method === 'POST'
+      ? errorResponse(new Error(message), status, request, env)
+      : new Response(`<h1>${message}</h1>`, { status, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
     const allowed = await consumeAuthRateLimit(env as Env & { DB: D1Database }, await authRateKey(request, 'verify'), 10)
-    if (!allowed) return new Response('<h1>验证请求过于频繁</h1>', { status: 429, headers: { 'content-type': 'text/html; charset=utf-8' } })
+    if (!allowed) return verificationError('验证请求过于频繁', 429)
     const row = await env.DB.prepare('SELECT id, user_id, expires_at, used_at FROM email_verifications WHERE token_hash = ?1').bind(await sha256Text(token)).first<{ id: string; user_id: string; expires_at: string; used_at: string | null }>()
-    if (!row || row.used_at || Date.parse(row.expires_at) <= Date.now()) return new Response('<h1>验证链接无效或已过期</h1>', { status: 400, headers: { 'content-type': 'text/html; charset=utf-8' } })
+    if (!row || row.used_at || Date.parse(row.expires_at) <= Date.now()) return verificationError('验证链接无效或已过期', 400)
     const active = await env.DB.prepare("SELECT COUNT(*) AS count FROM users WHERE status = 'active'").first<{ count: number }>()
-    if (Number(active?.count ?? 0) >= maxUsers(env)) return new Response('<h1>内测名额已满</h1>', { status: 409, headers: { 'content-type': 'text/html; charset=utf-8' } })
+    if (Number(active?.count ?? 0) >= maxUsers(env)) return verificationError('内测名额已满', 409)
     const now = new Date().toISOString()
     await env.DB.batch([
       env.DB.prepare("UPDATE users SET status = 'active', email_verified_at = ?1 WHERE id = ?2").bind(now, row.user_id),
       env.DB.prepare('UPDATE email_verifications SET used_at = ?1 WHERE id = ?2').bind(now, row.id),
     ])
-    return new Response('<h1>邮箱验证成功</h1><p>现在可以返回莫测造境登录。</p>', { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } })
+    if (request.method === 'POST') return json({ ok: true, message: '邮箱验证成功，请登录' }, 200, request, env)
+    const redirectUrl = new URL('/', request.url)
+    redirectUrl.searchParams.set('verified', '1')
+    const target = redirectUrl.toString()
+    return new Response(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>验证成功</title><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><p>邮箱验证成功，正在返回莫测造境……</p><p><a href="${target}">如果没有自动返回，请点击这里</a></p><script>(function(){var target=${JSON.stringify(target)};try{if(window.opener&&!window.opener.closed){window.opener.location.replace(target);window.close();return}}catch(e){}window.location.replace(target)})()</script></body></html>`, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
   }
   return errorResponse(new Error('未知认证接口'), 404, request, env)
 }

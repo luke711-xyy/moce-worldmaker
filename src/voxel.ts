@@ -55,7 +55,11 @@ export type VoxelAsset = {
 export type AssetAssembly = {
   name: string
   rootId: string
-  nodes: Array<{ id: string; name: string; memberKeys: string[] }>
+  /** Multiple top-level assemblies can be carried by one portable placement. */
+  rootIds?: string[]
+  /** Stable display names for ordinary parts inside a portable placement. */
+  partNames?: Record<string, string>
+  nodes: Array<{ id: string; name: string; memberKeys: string[]; parentAssemblyId?: string }>
 }
 
 export type SceneInstance = {

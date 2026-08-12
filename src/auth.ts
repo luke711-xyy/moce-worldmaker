@@ -37,6 +37,22 @@ export function registerAuthUser(email: string, password: string): Promise<AuthR
   return request<AuthResponse>('/api/auth/register', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password }) }, false)
 }
 
+export function resendVerificationEmail(email: string): Promise<AuthResponse> {
+  return request<AuthResponse>('/api/auth/resend-verification', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }) }, false)
+}
+
+export function verifyAuthEmail(token: string): Promise<{ ok: boolean; message?: string }> {
+  return request<{ ok: boolean; message?: string }>('/api/auth/verify-email', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }) }, false)
+}
+
+export function requestPasswordReset(email: string): Promise<AuthResponse> {
+  return request<AuthResponse>('/api/auth/request-password-reset', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }) }, false)
+}
+
+export function resetAuthPassword(token: string, password: string): Promise<AuthResponse> {
+  return request<AuthResponse>('/api/auth/reset-password', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, password }) }, false)
+}
+
 export function loginAuthUser(email: string, password: string): Promise<AuthResponse> {
   return request<AuthResponse>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email, password }) }, false)
 }

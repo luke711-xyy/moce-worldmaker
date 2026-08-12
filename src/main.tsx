@@ -25,7 +25,7 @@ import { SliceLayer, SlicePlane, SliceVoxel, sliceEntityParts, sliceLayerToAsset
 import { computeScale, computeShell, GeometryScaleMode, GeometryVoxel, validScaleFactors, VoxelGeometryMesh, VoxelGeometryPreview } from './voxel-geometry'
 import { createZip } from './zip'
 import { CloudAssetSummary, CloudProgress, CloudSceneSummary, CloudUsage, deleteCloudAsset, deleteCloudScene, downloadCloudObject, loadCloudAssetPreview, loadCloudLibrary, loadCloudUsage, uploadCloudAsset, uploadCloudScene } from './cloud-backup'
-import { AuthUser, loadAuthUser, loginAuthUser, logoutAuthUser, registerAuthUser, setCloudAuthRequiredHandler } from './auth'
+import { AuthUser, loadAuthUser, loginAuthUser, logoutAuthUser, registerAuthUser, requestPasswordReset, resendVerificationEmail, resetAuthPassword, setCloudAuthRequiredHandler, verifyAuthEmail } from './auth'
 import './styles.css'
 
 function useStableEvent<T extends (...args: any[]) => any>(handler: T): T {
@@ -1358,8 +1358,9 @@ function App() {
   const [cloudTransfers, setCloudTransfers] = useState<Record<string, CloudProgress>>({})
   const [cloudTransferErrors, setCloudTransferErrors] = useState<Record<string, string>>({})
   const [authUser, setAuthUser] = useState<AuthUser | null>(null)
+  const [authChecked, setAuthChecked] = useState(false)
   const [authDialogOpen, setAuthDialogOpen] = useState(false)
-  const [authDialogMode, setAuthDialogMode] = useState<'login' | 'register'>('login')
+  const [authDialogMode, setAuthDialogMode] = useState<'login' | 'register' | 'forgot'>('login')
   const [sceneFileRef, setSceneFileRef] = useState<SceneFileRef | null>(null)
   const [savedSceneSignature, setSavedSceneSignature] = useState<string | null>(null)
   const [unsavedDialogOpen, setUnsavedDialogOpen] = useState(false)
@@ -3033,6 +3034,18 @@ function App() {
           && !asset.source.includes('拆分子实体')
         if (importedModel) draft.entityNameModes = { ...(draft.entityNameModes ?? {}), [memberKey]: 'custom' }
       }
+      // Portable entity batches carry one name per materialized part. Write
+      // those names before the normalizer runs; this preserves duplicate-safe
+      // file-tree names without using names as topology identifiers.
+      if (asset.assembly?.partNames) {
+        materializedParts.forEach((part) => {
+          const importedName = asset.assembly?.partNames?.[part.partId]
+          if (!importedName) return
+          const memberKey = `voxel:${part.entityId}`
+          draft.entityNames = { ...(draft.entityNames ?? {}), [memberKey]: importedName }
+          draft.entityNameModes = { ...(draft.entityNameModes ?? {}), [memberKey]: 'custom' }
+        })
+      }
       if (draft.customEntitySources) {
         const sourceAsset = asset.isTemplate === true
           ? asset
@@ -3073,10 +3086,22 @@ function App() {
           }))]
           if (memberKeys.length < 2) return
           const sceneAssemblyId = nodeIds.get(node.id)!
-          draft.assemblies = [...(draft.assemblies ?? []), { id: sceneAssemblyId, name: node.name || asset.assembly?.name || '装配体', memberKeys }]
+          const parentAssemblyId = node.parentAssemblyId ? nodeIds.get(node.parentAssemblyId) : undefined
+          draft.assemblies = [...(draft.assemblies ?? []), {
+            id: sceneAssemblyId,
+            name: node.name || asset.assembly?.name || '装配体',
+            memberKeys,
+            nameMode: 'custom',
+            ...(parentAssemblyId ? { parentAssemblyId } : {}),
+          }]
         })
-        placedRootAssemblyId = nodeIds.get(asset.assembly.rootId) ?? ''
-        placedMemberKeys = placedRootAssemblyId ? [`assembly:${placedRootAssemblyId}`] : []
+        const rootAssemblyIds = (asset.assembly.rootIds?.length ? asset.assembly.rootIds : [asset.assembly.rootId])
+          .map((rootId) => nodeIds.get(rootId))
+          .filter((rootId): rootId is string => Boolean(rootId))
+        placedRootAssemblyId = rootAssemblyIds[0] ?? ''
+        placedMemberKeys = rootAssemblyIds.length
+          ? rootAssemblyIds.map((rootId) => `assembly:${rootId}`)
+          : materializedParts.map((part) => `voxel:${part.entityId}`)
       } else {
         placedMemberKeys = materializedParts.map((part) => `voxel:${part.entityId}`)
       }
@@ -3519,6 +3544,19 @@ function App() {
     const existingAssets = projectRef.current.assets
     const importedNames: VoxelAsset[] = []
     const entityPartIds = new Map<string, string>()
+    const partNames: Record<string, string> = {}
+    const usedSceneNames = new Set(sceneEntityParts(projectRef.current)
+      .map((part) => part.displayLabel ?? part.label ?? '')
+      .map((value) => value.trim())
+      .filter(Boolean))
+    const uniqueImportedName = (requestedName: string) => {
+      const base = requestedName.trim() || '导入实体'
+      let candidate = base
+      let suffix = 2
+      while (usedSceneNames.has(candidate)) candidate = `${base} ${suffix++}`
+      usedSceneNames.add(candidate)
+      return candidate
+    }
     const minGrid = {
       x: Math.min(...portable.entities.map((entity) => entity.gridPosition.x)),
       y: Math.min(...portable.entities.map((entity) => entity.gridPosition.y)),
@@ -3528,10 +3566,13 @@ function App() {
     const partVoxels: Record<string, Voxel[]> = {}
     portable.entities.forEach((entity, index) => {
       const sourceName = entity.name || entity.asset.name || '导入实体'
-      const uniqueName = uniqueAssetName([...existingAssets, ...importedNames], sourceName)
+      const uniqueName = uniqueImportedName(sourceName)
       importedNames.push({ ...structuredClone(entity.asset), id: `entity-name-${index}`, name: uniqueName })
-      const partId = uniqueName
+      // Names are presentation data. Use the portable entity ID for topology
+      // references so duplicate names can never merge or redirect a part.
+      const partId = `portable-part-${batchId}-${entity.id}`
       entityPartIds.set(entity.id, partId)
+      partNames[partId] = uniqueName
       const entityColor = entity.asset.templateColor ?? entity.asset.color
       const voxels = entity.asset.voxels.map((voxel) => ({
         x: voxel.x + entity.gridPosition.x - minGrid.x,
@@ -3551,13 +3592,44 @@ function App() {
       sourceVoxels.push(...voxels)
     })
     const importedBounds = voxelBounds(sourceVoxels)!
-    const maxX = importedBounds.max.x
-    const maxY = importedBounds.max.y
-    const maxZ = importedBounds.max.z
+    // The portable file stores each entity in its own local coordinates plus
+    // a scene-grid origin. Normalize the combined batch once, after all
+    // offsets have been applied. This gives the placement asset a true common
+    // origin while preserving every pairwise delta between entities.
+    const batchOrigin = importedBounds.min
+    Object.keys(partVoxels).forEach((partId) => {
+      partVoxels[partId] = partVoxels[partId].map((voxel) => ({
+        ...voxel,
+        x: voxel.x - batchOrigin.x,
+        y: voxel.y - batchOrigin.y,
+        z: voxel.z - batchOrigin.z,
+      }))
+    })
+    const normalizedSourceVoxels = sourceVoxels.map((voxel) => ({
+      ...voxel,
+      x: voxel.x - batchOrigin.x,
+      y: voxel.y - batchOrigin.y,
+      z: voxel.z - batchOrigin.z,
+    }))
+    const maxX = importedBounds.max.x - importedBounds.min.x
+    const maxY = importedBounds.max.y - importedBounds.min.y
+    const maxZ = importedBounds.max.z - importedBounds.min.z
     const assemblyIdMap = new Map(portable.assemblies.map((assembly) => [assembly.id, `import-assembly-${batchId}-${assembly.id}`]))
+    const usedAssemblyNames = new Set((projectRef.current.assemblies ?? []).map((assembly) => assembly.name?.trim()).filter((value): value is string => Boolean(value)))
+    const uniqueAssemblyName = (requestedName: string) => {
+      const base = requestedName.trim() || '装配体'
+      let candidate = base
+      let suffix = 2
+      while (usedAssemblyNames.has(candidate)) candidate = `${base} ${suffix++}`
+      usedAssemblyNames.add(candidate)
+      return candidate
+    }
     const assemblyNodes: AssetAssembly['nodes'] = portable.assemblies.map((assembly) => ({
       id: assemblyIdMap.get(assembly.id)!,
-      name: assembly.name ?? '装配体',
+      name: uniqueAssemblyName(assembly.name ?? '装配体'),
+      // Imported names are explicit file data. Prevent the project naming
+      // normalizer from replacing them with a newly allocated sequence.
+      parentAssemblyId: assembly.parentAssemblyId ? assemblyIdMap.get(assembly.parentAssemblyId) : undefined,
       memberKeys: assembly.memberKeys.flatMap((memberKey) => {
         if (memberKey.startsWith('entity:')) {
           const partId = entityPartIds.get(memberKey.slice('entity:'.length))
@@ -3570,8 +3642,12 @@ function App() {
         return []
       }),
     }))
-    const childAssemblyIds = new Set(portable.assemblies.flatMap((assembly) => assembly.memberKeys.filter((key) => key.startsWith('assembly:')).map((key) => key.slice('assembly:'.length))))
-    const rootAssembly = portable.assemblies.find((assembly) => !childAssemblyIds.has(assembly.id))
+    const childAssemblyIds = new Set(portable.assemblies.flatMap((assembly) => [
+      ...(assembly.parentAssemblyId ? [assembly.id] : []),
+      ...assembly.memberKeys.filter((key) => key.startsWith('assembly:')).map((key) => key.slice('assembly:'.length)),
+    ]))
+    const rootAssemblies = portable.assemblies.filter((assembly) => !childAssemblyIds.has(assembly.id))
+    const rootIds = rootAssemblies.map((assembly) => assemblyIdMap.get(assembly.id)).filter((id): id is string => Boolean(id))
     const previewAsset: VoxelAsset = {
       id: `entity-import-preview-${batchId}`,
       name: uniqueAssetName([...existingAssets, ...importedNames], portable.name || '导入实体'),
@@ -3584,10 +3660,19 @@ function App() {
       height: maxY + 1,
       parts: Object.keys(partVoxels),
       partVoxels,
-      voxels: sourceVoxels,
+      voxels: normalizedSourceVoxels,
       source: '普通实体文件导入预览',
       isTemplate: false,
-      assembly: rootAssembly && assemblyNodes.length ? { name: rootAssembly.name ?? '装配体', rootId: assemblyIdMap.get(rootAssembly.id)!, nodes: assemblyNodes } : undefined,
+      // Keep this metadata even for a batch without assemblies. The placement
+      // path then materializes every portable entity as its own ordinary part
+      // instead of falling back to one merged __asset__ part.
+      assembly: {
+        name: rootAssemblies[0]?.name ?? portable.name ?? '导入实体',
+        rootId: rootIds[0] ?? '',
+        rootIds,
+        partNames,
+        nodes: assemblyNodes,
+      },
     }
     setPendingEntityImport({ asset: previewAsset, entityCount: portable.entities.length })
     setPlacementAssetId(previewAsset.id)
@@ -3828,7 +3913,9 @@ function App() {
   }
 
   useEffect(() => {
-    void loadAuthUser().then(({ user }) => setAuthUser(user)).catch(() => setAuthUser(null))
+    void loadAuthUser()
+      .then(({ user }) => { setAuthUser(user); setAuthChecked(true) })
+      .catch(() => { setAuthUser(null); setAuthChecked(true) })
     setCloudAuthRequiredHandler(() => {
       if (!cloudInitialRefreshCompletedRef.current) return
       setAuthDialogMode('login')
@@ -5646,7 +5733,6 @@ function App() {
         <div className="top-actions">
           <ActionButton icon={<FilePlus2 size={17} />} label="新建" onClick={createNewProject} />
           <ActionButton icon={<Database size={17} />} label="场景库" onClick={openLibrary} />
-          <ActionButton icon={authUser ? <UserRound size={17} /> : <LogIn size={17} />} label={authUser ? authUser.email : '登录/注册'} onClick={() => { setAuthDialogMode('login'); setAuthDialogOpen(true) }} />
           <ActionButton icon={<Save size={17} />} label="保存" onClick={saveProject} />
           <ActionButton icon={<Save size={17} />} label="另存" onClick={saveProjectAs} />
           <div className="top-divider" />
@@ -5656,7 +5742,13 @@ function App() {
           <button className="icon-button" title="撤销" aria-label="撤销" disabled={!canUndo} onClick={undoProject}><Undo2 size={17} /></button>
           <button className="icon-button" title="重做" aria-label="重做" disabled={!canRedo} onClick={redoProject}><Redo2 size={17} /></button>
           <div className="top-spacer" />
-          <button className="icon-button" title="设置" onClick={() => setNotice('设置面板将在下一阶段接入')}><Settings size={17} /></button>
+          <div className="header-account-tools">
+            <button className="action-button header-account-button" title={authUser ? `已登录：${authUser.email}` : '登录或注册'} onClick={() => { setAuthDialogMode('login'); setAuthDialogOpen(true) }}>
+              {authUser ? <UserRound size={17} /> : <LogIn size={17} />}
+              <span>{authUser ? authUser.email : '登录/注册'}</span>
+            </button>
+            <button className="icon-button" title="设置" aria-label="设置" onClick={() => setNotice('设置面板将在下一阶段接入')}><Settings size={17} /></button>
+          </div>
         </div>
         <input ref={modelImportInputRef} className="hidden-input" type="file" accept=".glb,.gltf,.obj,.stl,.vox" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) openModelImportDialog(file) }} />
         <input ref={entityFileInputRef} className="hidden-input" type="file" accept=".moceentity" onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; if (file) void importEntityFileFromDisk(file) }} />
@@ -5722,44 +5814,94 @@ function App() {
       {modelImportDialog && <ModelImportDialog state={modelImportDialog} targetSizeVoxels={modelImportTargetVoxels} mode={modelImportMode} onTargetSizeChange={setModelImportTargetVoxels} onModeChange={setModelImportMode} onStart={runModelImport} onConfirm={confirmModelImport} onCancel={() => setModelImportDialog(null)} />}
       {sliceDialogOpen && selectedEntityParts.length > 0 && <SliceDialog parts={selectedEntityParts} project={project} name={selectedDisplayName || '选中实体'} onClose={() => setSliceDialogOpen(false)} onNotice={setNotice} />}
       {unsavedDialogOpen && <UnsavedChangesDialog onDecision={handleUnsavedDecision} />}
-      {authDialogOpen && <AuthDialog mode={authDialogMode} user={authUser} onModeChange={setAuthDialogMode} onClose={() => setAuthDialogOpen(false)} onAuthenticated={(user) => { setAuthUser(user); setAuthDialogOpen(false); void refreshCloudLibrary(); setNotice(`已登录 · ${user.email}`) }} onLogout={async () => { await logoutAuthUser(); setAuthUser(null); setAuthDialogOpen(false); setNotice('已退出登录') }} />}
+      {(!authChecked || authDialogOpen || !authUser) && <AuthDialog required={!authChecked || !authUser} mode={authDialogMode} user={authUser} onModeChange={setAuthDialogMode} onClose={() => { if (authUser) setAuthDialogOpen(false) }} onAuthenticated={(user) => { setAuthUser(user); setAuthChecked(true); setAuthDialogOpen(false); void refreshCloudLibrary(); setNotice(`已登录 · ${user.email}`) }} onLogout={async () => { await logoutAuthUser(); setAuthUser(null); setAuthDialogOpen(false); setNotice('已退出登录') }} />}
     </div>
   )
 }
 
-function AuthDialog({ mode, user, onModeChange, onClose, onAuthenticated, onLogout }: { mode: 'login' | 'register'; user: AuthUser | null; onModeChange: (mode: 'login' | 'register') => void; onClose: () => void; onAuthenticated: (user: AuthUser) => void; onLogout: () => Promise<void> }) {
+function AuthDialog({ required, mode, user, onModeChange, onClose, onAuthenticated, onLogout }: { required: boolean; mode: 'login' | 'register' | 'forgot'; user: AuthUser | null; onModeChange: (mode: 'login' | 'register' | 'forgot') => void; onClose: () => void; onAuthenticated: (user: AuthUser) => void; onLogout: () => Promise<void> }) {
   const [email, setEmail] = useState(user?.email ?? '')
   const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState('')
+  const [message, setMessage] = useState(() => new URLSearchParams(window.location.search).get('verified') === '1' ? '邮箱验证成功，请登录' : '')
   const [verificationUrl, setVerificationUrl] = useState('')
+  const [verificationPendingEmail, setVerificationPendingEmail] = useState('')
+  const [resetToken, setResetToken] = useState(() => new URLSearchParams(window.location.search).get('reset') ?? '')
+  useEffect(() => {
+    const token = new URLSearchParams(window.location.search).get('verify')
+    if (!token) return
+    setBusy(true)
+    void verifyAuthEmail(token)
+      .then((result) => {
+        setMessage(result.message ?? '邮箱验证成功，请登录')
+        const url = new URL(window.location.href)
+        url.searchParams.delete('verify')
+        window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
+      })
+      .catch((error) => setMessage(error instanceof Error ? error.message : '邮箱验证失败，请重新发送验证邮件'))
+      .finally(() => setBusy(false))
+  }, [])
   const submit = async (event: React.FormEvent) => {
     event.preventDefault()
     setBusy(true); setMessage(''); setVerificationUrl('')
     try {
-      if (mode === 'login') {
+      if (resetToken) {
+        if (password !== confirmPassword) throw new Error('两次输入的密码不一致')
+        const result = await resetAuthPassword(resetToken, password)
+        setResetToken('')
+        setPassword(''); setConfirmPassword('')
+        setMessage(result.message ?? '密码已重置，请使用新密码登录')
+        onModeChange('login')
+        const url = new URL(window.location.href)
+        url.searchParams.delete('reset')
+        window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
+      } else if (mode === 'forgot') {
+        const result = await requestPasswordReset(email)
+        setMessage(result.message ?? '如果该邮箱对应账号存在，密码重置邮件已发送，请检查收件箱')
+        if (result.devVerificationUrl) setVerificationUrl(result.devVerificationUrl)
+      } else if (mode === 'login') {
         const result = await loginAuthUser(email, password)
         if (!result.user) throw new Error('登录响应缺少用户信息')
         onAuthenticated(result.user)
       } else {
         const result = await registerAuthUser(email, password)
+        setVerificationPendingEmail(email.trim())
         setMessage(result.message ?? '注册成功，请检查邮箱完成验证')
         if (result.devVerificationUrl) setVerificationUrl(result.devVerificationUrl)
       }
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '认证失败')
+      const text = error instanceof Error ? error.message : '认证失败'
+      if (mode === 'login' && text.includes('尚未验证')) setVerificationPendingEmail(email.trim())
+      setMessage(text)
     } finally { setBusy(false) }
   }
-  return <div className="auth-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+  const resend = async () => {
+    if (!verificationPendingEmail) return
+    setBusy(true); setMessage(''); setVerificationUrl('')
+    try {
+      const result = await resendVerificationEmail(verificationPendingEmail)
+      setMessage(result.message ?? '最新验证邮件已发送，请检查邮箱')
+      if (result.devVerificationUrl) setVerificationUrl(result.devVerificationUrl)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '验证邮件发送失败')
+    } finally { setBusy(false) }
+  }
+  const resetMode = Boolean(resetToken)
+  const title = resetMode ? '设置新密码' : user ? '账号' : mode === 'login' ? '登录莫测造境' : mode === 'register' ? '注册莫测造境' : '忘记密码'
+  return <div className={`auth-backdrop ${required ? 'auth-gate' : ''}`} onPointerDown={(event) => { if (!required && event.target === event.currentTarget) onClose() }}>
     <section className="auth-dialog" role="dialog" aria-modal="true">
-      <button className="auth-close" onClick={onClose} aria-label="关闭"><X size={18} /></button>
+      {!required && <button className="auth-close" onClick={onClose} aria-label="关闭"><X size={18} /></button>}
       <div className="auth-mark"><Box size={20} /></div>
-      <h2>{user ? '账号' : mode === 'login' ? '登录莫测造境' : '注册莫测造境'}</h2>
-      {user ? <><p className="auth-subtitle">当前账号：{user.email}</p><button className="auth-submit" onClick={() => void onLogout()}>退出登录</button></> : <form onSubmit={submit}>
-        <label>邮箱<input type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
-        <label>密码<input type="password" required minLength={12} maxLength={128} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 12 个字符" /></label>
-        <button className="auth-submit" disabled={busy}>{busy ? '处理中…' : mode === 'login' ? '登录' : '注册'}</button>
-        <button type="button" className="auth-switch" onClick={() => { onModeChange(mode === 'login' ? 'register' : 'login'); setMessage('') }}>{mode === 'login' ? '还没有账号？注册' : '已有账号？登录'}</button>
+      <h2>{title}</h2>
+      {user && !resetMode ? <><p className="auth-subtitle">当前账号：{user.email}</p><button className="auth-submit" onClick={() => void onLogout()}>退出登录</button></> : <form onSubmit={submit}>
+        {!resetMode && <label>邮箱<input type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>}
+        {(!resetMode && mode !== 'forgot') && <label>密码<input type="password" required minLength={12} maxLength={128} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 12 个字符" /></label>}
+        {resetMode && <><label>新密码<input type="password" required minLength={12} maxLength={128} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 12 个字符" /></label><label>确认新密码<input type="password" required minLength={12} maxLength={128} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></label></>}
+        <button className="auth-submit" disabled={busy}>{busy ? '处理中…' : resetMode ? '设置新密码' : mode === 'login' ? '登录' : mode === 'register' ? '注册' : '发送重置邮件'}</button>
+        {!resetMode && <button type="button" className="auth-switch" onClick={() => { onModeChange(mode === 'login' ? 'register' : 'login'); setMessage(''); setVerificationUrl('') }}>{mode === 'login' ? '还没有账号？注册' : mode === 'register' ? '已有账号？登录' : '返回登录'}</button>}
+        {mode === 'login' && !resetMode && <button type="button" className="auth-switch" onClick={() => { onModeChange('forgot'); setMessage(''); setVerificationUrl('') }}>忘记密码？</button>}
+        {verificationPendingEmail && mode === 'login' && <button type="button" className="auth-switch" disabled={busy} onClick={() => void resend()}>{busy ? '正在发送…' : '没有收到邮件？重新发送验证邮件'}</button>}
         {message && <p className="auth-message">{message}</p>}
         {verificationUrl && <a className="auth-dev-link" href={verificationUrl} target="_blank" rel="noreferrer">打开本地验证链接</a>}
       </form>}

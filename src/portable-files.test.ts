@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createAssetFile, createEntityFile, parseAssetFile, parseEntityFile, parsePortableFileText, PortableFileError } from './portable-files'
-import { makeDefaultProject, sceneEntityParts } from './voxel'
+import { makeDefaultProject, makeEmptyProject, sceneEntityParts } from './voxel'
 
 describe('莫测造境实体传播文件', () => {
   it('保存资产库实体及其类别树，并可往返解析', () => {
@@ -22,10 +22,27 @@ describe('莫测造境实体传播文件', () => {
     expect(file.entities.length).toBeGreaterThan(0)
     expect(file.entities[0].asset.voxels.length).toBeGreaterThan(0)
     expect(file.entities[0].gridPosition).toEqual(expect.objectContaining({ x: expect.any(Number), y: expect.any(Number), z: expect.any(Number) }))
-    expect(file.assemblies).toEqual([])
+    expect(file.assemblies).toHaveLength(1)
+    expect(file.assemblies[0].memberKeys).toEqual(file.entities.slice(0, 2).map((entity) => `entity:${entity.id}`))
     const parsed = parseEntityFile(JSON.parse(JSON.stringify(file)))
     expect(parsed.name).toBe('测试实体')
     expect(parsed.entities).toHaveLength(file.entities.length)
+  })
+
+  it('多选没有装配关系的实体时保留独立实体和相对空间关系', () => {
+    const project = makeEmptyProject()
+    project.customVoxels = [
+      { x: -8, y: 0, z: 3, materialId: 'terracotta', entityId: 'entity-left' },
+      { x: -4, y: 1, z: 3, materialId: 'jade', entityId: 'entity-right' },
+    ]
+    const parts = sceneEntityParts(project)
+    const file = createEntityFile(project, parts, '两个实体')
+    expect(file.entities).toHaveLength(2)
+    expect(file.assemblies).toHaveLength(0)
+    expect(file.entities.map((entity) => entity.gridPosition)).toEqual([
+      { x: -8, y: 0, z: 3 },
+      { x: -4, y: 1, z: 3 },
+    ])
   })
 
   it('导出普通实体时保留每个体素的最终显示颜色', () => {
