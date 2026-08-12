@@ -1,3 +1,6 @@
+import { buildVariantGeometry } from './voxel-variant-geometry'
+import { voxelFacing, voxelRotation, voxelShape } from './voxel-variants'
+
 export type Material = {
   id: string
   name: string
@@ -18,6 +21,12 @@ export type Voxel = {
    * such as enlargement; it does not change the voxel's physical size.
    */
   preserveVoxelCells?: boolean
+  /** Render-only voxel variant; logical occupancy remains one full cube cell. */
+  shape?: import('./voxel-variants').VoxelShape
+  facing?: import('./voxel-variants').VoxelFacing
+  rotation?: import('./voxel-variants').VoxelRotation
+  neighborMask?: number
+  variantId?: string
 }
 
 export type VoxelNormal = Pick<Voxel, 'x' | 'y' | 'z'>
@@ -356,6 +365,7 @@ export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEn
   }), { minX: firstVoxel.x, minY: firstVoxel.y, minZ: firstVoxel.z, maxX: firstVoxel.x, maxY: firstVoxel.y, maxZ: firstVoxel.z })
   const { minX, minY, minZ, maxX, maxY, maxZ } = bounds
   const voxels = deduplicateVoxels(sourceVoxels.map((voxel) => ({
+    ...voxel,
     x: voxel.x - minX,
     y: voxel.y - minY,
     z: voxel.z - minZ,
@@ -705,7 +715,21 @@ export function resolveInstanceVoxels(asset: VoxelAsset, overrides: VoxelOverrid
       const existing = resolved.get(key)
       if (existing) resolved.set(key, { ...existing, paintMaterialId: override.materialId })
     } else {
-      resolved.set(key, { x: override.x, y: override.y, z: override.z, materialId: override.materialId, ...(override.paintMaterialId ? { paintMaterialId: override.paintMaterialId } : {}) })
+      resolved.set(key, {
+        x: override.x,
+        y: override.y,
+        z: override.z,
+        materialId: override.materialId,
+        ...(override.paintMaterialId ? { paintMaterialId: override.paintMaterialId } : {}),
+        ...(override.preserveVoxelCells ? { preserveVoxelCells: override.preserveVoxelCells } : {}),
+        ...(override.shape ? {
+          shape: override.shape,
+          facing: override.facing,
+          rotation: override.rotation,
+          neighborMask: override.neighborMask,
+          variantId: override.variantId,
+        } : {}),
+      })
     }
   }
   return [...resolved.values()]
@@ -1883,6 +1907,32 @@ function stlMeshFromVoxels(voxels: Voxel[]): { vertices: StlPoint[]; triangles: 
   return { vertices, triangles }
 }
 
+/** Export render variants as real geometry while preserving cube occupancy. */
+function stlMeshFromVariants(voxels: Voxel[]): { vertices: StlPoint[]; triangles: StlTriangle[] } {
+  const cubes = voxels.filter((voxel) => voxelShape(voxel) === 'cube')
+  const mesh = stlMeshFromVoxels(cubes)
+  const vertices = [...mesh.vertices]
+  const triangles = [...mesh.triangles]
+  for (const voxel of voxels) {
+    if (voxelShape(voxel) === 'cube') continue
+    const source = buildVariantGeometry(voxelShape(voxel) as Exclude<ReturnType<typeof voxelShape>, 'cube'>, voxelFacing(voxel), voxelRotation(voxel), voxel.variantId ?? 'isolated')
+    const start = vertices.length
+    for (let index = 0; index < source.positions.length; index += 3) {
+      // Runtime geometry is expressed as Three X/Z/Y. STL remains in the
+      // editor's storage X/Y/Z convention, so swap the last two axes back.
+      vertices.push([
+        voxel.x + source.positions[index],
+        voxel.y + source.positions[index + 2],
+        voxel.z + source.positions[index + 1],
+      ])
+    }
+    for (let index = 0; index < source.indices.length; index += 3) {
+      triangles.push([start + source.indices[index], start + source.indices[index + 1], start + source.indices[index + 2]])
+    }
+  }
+  return { vertices, triangles }
+}
+
 function stlEdgeKey(left: number, right: number): string {
   return left < right ? `${left}:${right}` : `${right}:${left}`
 }
@@ -1908,6 +1958,30 @@ function stlNormal(vertices: StlPoint[], [a, b, c]: StlTriangle): StlPoint {
 
 export function makeStlWithDiagnostics(asset: VoxelAsset, voxelSizeMm = DEFAULT_VOXEL_SIZE_MM): { stl: string; diagnostics: StlExportDiagnostics } {
   const union = voxelBooleanUnion(asset.voxels)
+  if (union.some((voxel) => voxelShape(voxel) !== 'cube')) {
+    const mesh = stlMeshFromVariants(union)
+    const outputVoxelSizeMm = normalizeVoxelSizeMm(voxelSizeMm)
+    const lines: string[] = [`solid ${asset.id}`]
+    mesh.triangles.forEach((triangle) => {
+      const normal = stlNormal(mesh.vertices, triangle).map((value) => value.toFixed(6)).join(' ')
+      lines.push(`facet normal ${normal}`, ' outer loop')
+      triangle.forEach((vertexId) => lines.push(`  vertex ${mesh.vertices[vertexId].map((value) => (value * outputVoxelSizeMm).toFixed(6)).join(' ')}`))
+      lines.push(' endloop', 'endfacet')
+    })
+    lines.push(`endsolid ${asset.id}`)
+    return {
+      stl: lines.join('\n'),
+      diagnostics: {
+        inputVoxelCount: asset.voxels.length,
+        unionVoxelCount: union.length,
+        bridgeVoxelCount: 0,
+        weldedVertexCount: mesh.vertices.length,
+        triangleCount: mesh.triangles.length,
+        nonManifoldEdgesBefore: countNonManifoldEdges(mesh),
+        nonManifoldEdgesAfter: countNonManifoldEdges(mesh),
+      },
+    }
+  }
   const beforeRepair = stlMeshFromVoxels(union)
   const repaired = repairDiagonalVoxelContacts(union)
   const mesh = stlMeshFromVoxels(repaired.voxels)

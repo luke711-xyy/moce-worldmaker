@@ -51,7 +51,13 @@ function validateVoxel(value: unknown, label: string, allowMode = false): assert
   }
   requireString(voxel.materialId, `${label}.materialId`)
   if (voxel.entityId !== undefined) requireString(voxel.entityId, `${label}.entityId`)
-  if (allowMode && voxel.mode !== undefined && voxel.mode !== 'add' && voxel.mode !== 'remove') throw new SceneFileError(`${label}.mode无效`)
+  if (voxel.paintMaterialId !== undefined) requireString(voxel.paintMaterialId, `${label}.paintMaterialId`)
+  if (voxel.shape !== undefined && (typeof voxel.shape !== 'string' || !['cube', 'tri-prism', 'quarter-cylinder', 'stair'].includes(voxel.shape))) throw new SceneFileError(`${label}.shape无效`)
+  if (voxel.facing !== undefined && (typeof voxel.facing !== 'string' || !['+x', '-x', '+y', '-y', '+z', '-z'].includes(voxel.facing))) throw new SceneFileError(`${label}.facing无效`)
+  if (voxel.rotation !== undefined && (typeof voxel.rotation !== 'number' || ![0, 1, 2, 3].includes(voxel.rotation))) throw new SceneFileError(`${label}.rotation无效`)
+  if (voxel.neighborMask !== undefined && (typeof voxel.neighborMask !== 'number' || !Number.isInteger(voxel.neighborMask) || voxel.neighborMask < 0 || voxel.neighborMask > 63)) throw new SceneFileError(`${label}.neighborMask无效`)
+  if (voxel.variantId !== undefined) requireString(voxel.variantId, `${label}.variantId`)
+  if (allowMode && voxel.mode !== undefined && voxel.mode !== 'add' && voxel.mode !== 'remove' && voxel.mode !== 'paint') throw new SceneFileError(`${label}.mode无效`)
 }
 
 function validateAsset(value: unknown, index: number): asserts value is VoxelAsset {

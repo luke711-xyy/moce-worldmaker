@@ -72,6 +72,11 @@ function validateVoxel(value: unknown, label: string) {
   integer(voxel.z, `${label}.z`)
   text(voxel.materialId, `${label}.materialId`)
   if (voxel.paintMaterialId !== undefined) text(voxel.paintMaterialId, `${label}.paintMaterialId`)
+  if (voxel.shape !== undefined && (typeof voxel.shape !== 'string' || !['cube', 'tri-prism', 'quarter-cylinder', 'stair'].includes(voxel.shape))) throw new PortableFileError(`${label}.shape无效`)
+  if (voxel.facing !== undefined && (typeof voxel.facing !== 'string' || !['+x', '-x', '+y', '-y', '+z', '-z'].includes(voxel.facing))) throw new PortableFileError(`${label}.facing无效`)
+  if (voxel.rotation !== undefined && (typeof voxel.rotation !== 'number' || ![0, 1, 2, 3].includes(voxel.rotation))) throw new PortableFileError(`${label}.rotation无效`)
+  if (voxel.neighborMask !== undefined && (typeof voxel.neighborMask !== 'number' || !Number.isInteger(voxel.neighborMask) || voxel.neighborMask < 0 || voxel.neighborMask > 63)) throw new PortableFileError(`${label}.neighborMask无效`)
+  if (voxel.variantId !== undefined) text(voxel.variantId, `${label}.variantId`)
 }
 
 function validateAsset(value: unknown, label: string): asserts value is VoxelAsset {
@@ -212,7 +217,7 @@ export function createEntityFile(project: ProjectState, parts: SceneEntityPart[]
     asset.templateColor = entityColor
     const partVoxels: Record<string, Voxel[]> = {}
     exportParts.forEach((part, index) => {
-      partVoxels[`part-${index + 1}`] = scenePartVoxels(part).map((voxel) => ({ x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ, materialId: voxel.materialId, ...(voxel.paintMaterialId ? { paintMaterialId: voxel.paintMaterialId } : {}) }))
+      partVoxels[`part-${index + 1}`] = scenePartVoxels(part).map((voxel) => ({ ...voxel, x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ }))
     })
     asset.parts = Object.keys(partVoxels)
     asset.partVoxels = partVoxels

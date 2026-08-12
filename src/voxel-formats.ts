@@ -1,6 +1,8 @@
 import * as THREE from 'three'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { MATERIALS, Voxel, VoxelAsset, deduplicateVoxels, voxelBounds } from './voxel'
+import { buildVariantGeometry } from './voxel-variant-geometry'
+import { voxelFacing, voxelRotation, voxelShape } from './voxel-variants'
 
 export type VoxImportResult = {
   asset: VoxelAsset
@@ -295,6 +297,23 @@ export async function encodeGlb(asset: VoxelAsset, colorResolver: ColorResolver 
   }
   asset.voxels.forEach((voxel) => {
     const color = hexRgb(colorResolver(voxel))
+    if (voxelShape(voxel) !== 'cube') {
+      const source = buildVariantGeometry(voxelShape(voxel) as Exclude<ReturnType<typeof voxelShape>, 'cube'>, voxelFacing(voxel), voxelRotation(voxel), voxel.variantId ?? 'isolated')
+      for (let index = 0; index < source.indices.length; index += 3) {
+        const triangle = [source.indices[index], source.indices[index + 1], source.indices[index + 2]]
+        triangle.forEach((sourceIndex) => {
+          const positionIndex = sourceIndex * 3
+          // Runtime geometry is Three X/Z/Y; keep exported GLB in the
+          // established storage X/Y/Z convention used by cube exports.
+          const x = voxel.x + source.positions[positionIndex]
+          const y = voxel.y + source.positions[positionIndex + 2]
+          const z = voxel.z + source.positions[positionIndex + 1]
+          const normal: [number, number, number] = [source.normals[positionIndex], source.normals[positionIndex + 2], source.normals[positionIndex + 1]]
+          pushVertex(x, y, z, normal, color)
+        })
+      }
+      return
+    }
     glbFaces.forEach((face) => {
       const [dx, dy, dz] = face.normal
       if (occupied.has(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`)) return

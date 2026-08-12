@@ -19,6 +19,8 @@ import { MAX_PREVIEW_VOXELS, mergePreviewFaceCells, previewVoxelKey, selectPrevi
 import { clearLocalSceneDraft, LocalSceneDraft, LocalSceneRef, readLocalSceneDraft, readLocalSceneRef, writeLocalSceneDraft, writeLocalSceneRef } from './local-scene-session'
 import { commitNumericDraft, sanitizeNumericDraft } from './numeric-input'
 import { DrawingPlane, DrawOperation, EDITOR_GROUND_PLANE, VoxelAxis, VoxelTool, clampPlanePointToGround, exteriorAirKeys, exteriorSurfaceVoxels, makePlaneVoxel, planeAxes, projectVoxelToPlane, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine, rasterizePlanarStroke, selectExtrudeLayer, signedExtrudeDelta, toolCellKey, uniqueVoxels } from './voxel-tools'
+import { VoxelFacing, VoxelRotation, VoxelShape, applyVoxelVariant, hasNonCubeVoxels, makeVoxelVariant, recomputeVoxelVariants, rotationFromScreenDelta, voxelFacing, voxelRotation, voxelShape, variantKey } from './voxel-variants'
+import { buildVariantGeometry, variantGeometryCacheKey } from './voxel-variant-geometry'
 import { VoxelToolsGeometryResult, VoxelToolsWorkerClient, VoxelToolsShapeRequest } from './runtime/voxel-tools-client'
 import { adjustHexHsl, hexToHsl } from './color-utils'
 import { SliceLayer, SlicePlane, SliceVoxel, sliceEntityParts, sliceLayerToAsset, slicePlaneLabel } from './slicing'
@@ -111,6 +113,9 @@ type DrawingGesture = {
   extrudeStartScreen?: { x: number; y: number }
   extrudeScreenVector?: { x: number; y: number }
   operation?: DrawOperation
+  variantFacing?: VoxelFacing
+  variantRotation?: VoxelRotation
+  variantRotationLocked?: boolean
 }
 
 type GridMoveResult = {
@@ -894,6 +899,23 @@ function translatedVoxelBoundsWithinScene(bounds: GridVoxelBounds, sceneBounds: 
 
 const sharedVoxelBoxGeometry = new THREE.BoxGeometry(VOXEL_WORLD_SIZE, VOXEL_WORLD_SIZE, VOXEL_WORLD_SIZE)
 sharedVoxelBoxGeometry.userData.sharedRuntimeGeometry = true
+const sharedVariantGeometryCache = new Map<string, THREE.BufferGeometry>()
+
+function sharedVariantThreeGeometry(voxel: Voxel): THREE.BufferGeometry {
+  const shape = voxelShape(voxel)
+  const key = variantGeometryCacheKey(shape as Exclude<VoxelShape, 'cube'>, voxelFacing(voxel), voxelRotation(voxel), voxel.variantId ?? 'default')
+  const cached = sharedVariantGeometryCache.get(key)
+  if (cached) return cached
+  const source = buildVariantGeometry(shape as Exclude<VoxelShape, 'cube'>, voxelFacing(voxel), voxelRotation(voxel), voxel.variantId ?? 'default')
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(source.positions.map((value) => value * VOXEL_WORLD_SIZE), 3))
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(source.normals, 3))
+  geometry.setIndex(source.indices)
+  geometry.computeBoundingSphere()
+  geometry.userData.sharedRuntimeGeometry = true
+  sharedVariantGeometryCache.set(key, geometry)
+  return geometry
+}
 
 function disposeThreeObject(object: THREE.Object3D) {
   const cancelCellBuild = object.userData.cancelCellBuild as (() => void) | undefined
@@ -1294,6 +1316,7 @@ function App() {
   // The UI labels intentionally map the storage XZ plane to the editor's
   // user-facing XY ground plane. Keep the default aligned with that mapping.
   const [drawingPlane, setDrawingPlane] = useState<DrawingPlane>('xz')
+  const [voxelBrushShape, setVoxelBrushShape] = useState<VoxelShape>('cube')
   const [drawOperation, setDrawOperation] = useState<DrawOperation>('add')
   const [brushSize, setBrushSize] = useState(1)
   const [toolboxOpen, setToolboxOpen] = useState(false)
@@ -2484,13 +2507,30 @@ function App() {
         .filter((item) => storedTargetKeys.has(`${voxelEntityId(item)}:${sceneVoxelKey(item)}`))
         .map((item) => voxelEntityId(item)))
       const remaining = draft.customVoxels.filter((item) => !storedTargetKeys.has(`${voxelEntityId(item)}:${sceneVoxelKey(item)}`))
+      const changedByEntity = new Map<string, Set<string>>()
+      storedTargetKeys.forEach((key) => {
+        const separator = key.indexOf(':')
+        if (separator < 0) return
+        const entityId = key.slice(0, separator)
+        const cell = key.slice(separator + 1)
+        const changed = changedByEntity.get(entityId) ?? new Set<string>()
+        changed.add(cell)
+        changedByEntity.set(entityId, changed)
+      })
+      if (changedByEntity.size) {
+        const updatedByKey = new Map<string, Voxel>()
+        changedByEntity.forEach((changed, entityId) => {
+          const entityVoxels = remaining.filter((item) => voxelEntityId(item) === entityId)
+          recomputeVoxelVariants(entityVoxels, changed).forEach((item) => updatedByKey.set(`${entityId}:${sceneVoxelKey(item)}`, item))
+        })
+        draft.customVoxels = remaining.map((item) => updatedByKey.get(`${voxelEntityId(item)}:${sceneVoxelKey(item)}`) ?? item)
+      } else draft.customVoxels = remaining
       // A manually drawn entity keeps its identity after an erasure, even if
       // removing a junction leaves disconnected voxel islands. Splitting the
       // entity here makes only the first island match editEntityId, so the
       // other islands become dimmed as external entities. Preset asset
       // instances use resolveInstanceComponents separately when their parts
       // are edited and therefore remain the only path that splits identities.
-      draft.customVoxels = remaining
       if (removedEntityIds.size) {
         const remainingEntityIds = new Set(remaining.map((item) => voxelEntityId(item)))
         if (draft.customEntityOffsets) {
@@ -2623,6 +2663,14 @@ function App() {
             draft.customVoxels.push(sceneToStoredCustomVoxel(draft, { ...voxel, entityId }, entityId))
             occupiedCustomSceneKeys.add(sceneVoxelKey(voxel))
           })
+          if (filteredInsertable.some((voxel) => voxelShape(voxel) !== 'cube')) {
+            const entityVoxels = draft.customVoxels.filter((voxel) => voxelEntityId(voxel) === entityId)
+            const offset = customEntityOffset(draft, entityId)
+            const changed = new Set(filteredInsertable.map((voxel) => `${voxel.x - offset.x},${voxel.y - offset.y},${voxel.z - offset.z}`))
+            const updated = recomputeVoxelVariants(entityVoxels, changed)
+            const byKey = new Map(updated.map((voxel) => [`${voxel.x},${voxel.y},${voxel.z}`, voxel]))
+            draft.customVoxels = draft.customVoxels.map((voxel) => voxelEntityId(voxel) === entityId ? byKey.get(`${voxel.x},${voxel.y},${voxel.z}`) ?? voxel : voxel)
+          }
           if (editAssemblyId) {
             const assembly = (draft.assemblies ?? []).find((item) => item.id === editAssemblyId)
             if (assembly && !assembly.memberKeys.includes(`voxel:${entityId}`)) assembly.memberKeys.push(`voxel:${entityId}`)
@@ -2658,7 +2706,18 @@ function App() {
           // Keep the material carried by the scene-space candidate. For a
           // brush/shape this is the active swatch; for extrusion it is the
           // corresponding source-layer material.
-          targets.push({ ...local, materialId: voxel.materialId, ...(voxel.paintMaterialId ? { paintMaterialId: voxel.paintMaterialId } : {}) })
+          targets.push({
+            ...local,
+            materialId: voxel.materialId,
+            ...(voxel.paintMaterialId ? { paintMaterialId: voxel.paintMaterialId } : {}),
+            ...(voxel.shape ? {
+              shape: voxel.shape,
+              facing: voxel.facing,
+              rotation: voxel.rotation,
+              neighborMask: voxel.neighborMask,
+              variantId: voxel.variantId,
+            } : {}),
+          })
           assetTargets.set(part.instanceId, targets)
           break
         }
@@ -3833,7 +3892,7 @@ function App() {
       const exportAsset = createVoxelExportAsset(`vox-export-${Date.now()}`, exportName, selectedEntityParts)
       const vox = encodeVox(exportAsset, (voxel) => voxel.paintMaterialId ?? voxel.materialId)
       downloadBinaryFile(vox, `${exportName}-选中实体.vox`, 'application/octet-stream')
-      setNotice(`已导出选中实体 VOX · ${selectedEntityParts.length} 个实体`)
+      setNotice(`${hasNonCubeVoxels(exportAsset.voxels) ? '提示：VOX 不支持非立方体几何，已按逻辑立方体体素降级导出 · ' : ''}已导出选中实体 VOX · ${selectedEntityParts.length} 个实体`)
     } catch (error) {
       setNotice(`VOX 导出失败 · ${error instanceof Error ? error.message : '无法生成文件'}`)
     }
@@ -3867,7 +3926,7 @@ function App() {
       const exportAsset = createVoxelExportAsset(`scene-vox-export-${Date.now()}`, name, allParts)
       const vox = encodeVox(exportAsset, (voxel) => voxel.paintMaterialId ?? voxel.materialId)
       downloadBinaryFile(vox, `${name}-完整场景.vox`, 'application/octet-stream')
-      setNotice(`已导出完整场景 VOX · ${allParts.length} 个实体`)
+      setNotice(`${hasNonCubeVoxels(exportAsset.voxels) ? '提示：VOX 不支持非立方体几何，已按逻辑立方体体素降级导出 · ' : ''}已导出完整场景 VOX · ${allParts.length} 个实体`)
     } catch (error) {
       setNotice(`场景 VOX 导出失败 · ${error instanceof Error ? error.message : '无法生成文件'}`)
     }
@@ -5798,8 +5857,8 @@ function App() {
               </div>}
             </div>
           </div>
-          <MemoizedVoxelViewport project={project} authoritativeProjectRef={projectRef} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} geometryApplying={geometryApplying} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSyncSceneOccupancyTransforms={stableViewportSyncOccupancyTransforms} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onCancelScenePartsMove={stableViewportCancelMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
-          <ToolboxPopover open={toolboxOpen} onClose={() => setToolboxOpen(false)} tool={tool} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} onToolChange={changeTool} onPlaneChange={setDrawingPlane} onOperationChange={setDrawOperation} onBrushSizeChange={setBrushSize} />
+          <MemoizedVoxelViewport project={project} authoritativeProjectRef={projectRef} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} geometryApplying={geometryApplying} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} voxelBrushShape={voxelBrushShape} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSyncSceneOccupancyTransforms={stableViewportSyncOccupancyTransforms} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onCancelScenePartsMove={stableViewportCancelMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
+          <ToolboxPopover open={toolboxOpen} onClose={() => setToolboxOpen(false)} tool={tool} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} voxelBrushShape={voxelBrushShape} onToolChange={changeTool} onPlaneChange={setDrawingPlane} onOperationChange={setDrawOperation} onBrushSizeChange={setBrushSize} onBrushShapeChange={setVoxelBrushShape} />
           <ReferenceImagePopover open={referenceImageOpen} image={referenceImage} index={referenceImageIndex} count={referenceImages.length} onPrevious={() => setReferenceImageIndex((current) => (current - 1 + referenceImages.length) % referenceImages.length)} onNext={() => setReferenceImageIndex((current) => (current + 1) % referenceImages.length)} onClose={() => setReferenceImageOpen(false)} onOpen={openReferenceImagePicker} />
           <div className="viewport-footer">
             <div className="tool-group">
@@ -6562,7 +6621,7 @@ function ReferenceImagePopover({ open, image, index, count, onPrevious, onNext, 
   </section>
 }
 
-function ToolboxPopover({ open, onClose, tool, drawingPlane, drawOperation, brushSize, onToolChange, onPlaneChange, onOperationChange, onBrushSizeChange }: { open: boolean; onClose: () => void; tool: Tool; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; onToolChange: (tool: Tool) => void; onPlaneChange: (plane: DrawingPlane) => void; onOperationChange: (operation: DrawOperation) => void; onBrushSizeChange: (size: number) => void }) {
+function ToolboxPopover({ open, onClose, tool, drawingPlane, drawOperation, brushSize, voxelBrushShape, onToolChange, onPlaneChange, onOperationChange, onBrushSizeChange, onBrushShapeChange }: { open: boolean; onClose: () => void; tool: Tool; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; voxelBrushShape: VoxelShape; onToolChange: (tool: Tool) => void; onPlaneChange: (plane: DrawingPlane) => void; onOperationChange: (operation: DrawOperation) => void; onBrushSizeChange: (size: number) => void; onBrushShapeChange: (shape: VoxelShape) => void }) {
   const [offset, setOffset] = useState({ x: 0, y: 0 })
   const dragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null)
   const dragHandleRef = useRef<HTMLDivElement | null>(null)
@@ -6614,6 +6673,7 @@ function ToolboxPopover({ open, onClose, tool, drawingPlane, drawOperation, brus
     <div className="toolbox-options">
       {(['brush', 'erase', 'line'] as Tool[]).includes(tool) && <label>绘制平面 <select value={drawingPlane} onChange={(event) => onPlaneChange(event.target.value as DrawingPlane)}><option value="xy">XZ</option><option value="xz">XY</option><option value="yz">YZ</option></select></label>}
       {(tool === 'brush' || tool === 'erase' || tool === 'line') && <label>笔刷大小 <input type="range" min="1" max="100" value={brushSize} onChange={(event) => onBrushSizeChange(Number(event.target.value))} /><output>{brushSize}</output></label>}
+      {(['brush', 'line', 'cuboid', 'sphere'] as Tool[]).includes(tool) && <label>体素形状 <select value={voxelBrushShape} onChange={(event) => onBrushShapeChange(event.target.value as VoxelShape)}><option value="cube">立方体</option><option value="tri-prism">三棱柱</option><option value="quarter-cylinder">1/4 圆柱</option><option value="stair">阶梯</option></select></label>}
       {(['brush', 'line', 'cuboid', 'sphere', 'extrude'] as Tool[]).includes(tool) && <div className="toolbox-mode"><span>绘制模式</span>{(['add', 'subtract', 'paint'] as DrawOperation[]).map((mode) => <button key={mode} className={drawOperation === mode ? 'active' : ''} onClick={() => onOperationChange(mode)}>{mode === 'add' ? '加' : mode === 'subtract' ? '减' : '改色'}</button>)}</div>}
     </div>
   </section>
@@ -6962,7 +7022,7 @@ function SliceDialog({ parts, project, name, onClose, onNotice }: { parts: Scene
         entries.push({ name: `${asset.name}.${modelFormat}`, data: asArrayBuffer(data) })
       }
       downloadBlob(new Blob([createZip(entries)], { type: 'application/zip' }), `${name}-${slicePlaneLabel(plane)}-模型切片.zip`)
-      onNotice(`已导出 ${layers.length} 个 ${modelFormat.toUpperCase()} 模型切片`)
+      onNotice(`${modelFormat === 'vox' && layers.some((layer) => hasNonCubeVoxels(layer.voxels)) ? '提示：VOX 不支持非立方体几何，已按逻辑立方体体素降级导出 · ' : ''}已导出 ${layers.length} 个 ${modelFormat.toUpperCase()} 模型切片`)
     } catch (error) {
       onNotice(`模型切片导出失败 · ${error instanceof Error ? error.message : '无法生成文件'}`)
     }
@@ -7797,7 +7857,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   </div>
 }
 
-function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancyIndex, assetTransformCache, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, geometryApplying, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, activeMaterial, materials, dragAxis, placementAsset, copyPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSyncSceneOccupancyTransforms, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onCancelScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; authoritativeProjectRef: React.MutableRefObject<ProjectState>; sceneParts: SceneEntityPart[]; occupancyIndex: SceneOccupancyIndex | null; assetTransformCache: AssetTransformCache; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; geometryApplying: boolean; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSyncSceneOccupancyTransforms: () => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCancelScenePartsMove: () => void; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
+function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancyIndex, assetTransformCache, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, geometryApplying, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, voxelBrushShape, activeMaterial, materials, dragAxis, placementAsset, copyPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSyncSceneOccupancyTransforms, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onCancelScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; authoritativeProjectRef: React.MutableRefObject<ProjectState>; sceneParts: SceneEntityPart[]; occupancyIndex: SceneOccupancyIndex | null; assetTransformCache: AssetTransformCache; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; geometryApplying: boolean; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; voxelBrushShape: VoxelShape; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSyncSceneOccupancyTransforms: () => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCancelScenePartsMove: () => void; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.Camera | null>(null)
@@ -9377,6 +9437,16 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   // Shape tools always use the editor's XY ground plane. The selectable
   // drawing plane remains reserved for brush, erase and line tools.
   const shapeDrawingPlane = EDITOR_GROUND_PLANE
+  const facingFromHitNormal = (normal?: Pick<Voxel, 'x' | 'y' | 'z'>): VoxelFacing => {
+    if (!normal) return '+y'
+    const axis = (['x', 'y', 'z'] as const).reduce((best, candidate) => Math.abs(normal[candidate]) > Math.abs(normal[best]) ? candidate : best, 'y' as 'x' | 'y' | 'z')
+    return `${normal[axis] < 0 ? '-' : '+'}${axis}` as VoxelFacing
+  }
+  const decorateVariantVoxels = (voxels: Voxel[], gesture: DrawingGesture, operation: DrawOperation): Voxel[] => {
+    if (operation !== 'add' || voxelBrushShape === 'cube' || !['brush', 'line', 'cuboid', 'sphere'].includes(tool)) return voxels
+    const variant = makeVoxelVariant(voxelBrushShape, gesture.variantFacing ?? '+y', gesture.variantRotation ?? 0)
+    return voxels.map((voxel) => applyVoxelVariant(voxel, variant))
+  }
   const drawingPlaneWorld = (plane: DrawingPlane, layer: number) => {
     const [, , layerAxis] = planeAxes(plane)
     const normal = layerAxis === 'x'
@@ -9646,7 +9716,12 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     // Draw and erase deliberately share this exact candidate set. The only
     // difference is the batch operation applied to it. This keeps pointer
     // interpolation, plane locking and brush-size semantics symmetrical.
-    const candidates = rasterizePlanarStroke(drawingPlane, from, to, brushSize, activeMaterial)
+    const gesture = drawingGestureRef.current
+    const candidates = decorateVariantVoxels(
+      rasterizePlanarStroke(drawingPlane, from, to, brushSize, activeMaterial),
+      gesture ?? ({ variantFacing: '+y', variantRotation: 0 } as DrawingGesture),
+      operation,
+    )
     const fresh = uniqueVoxels(candidates).filter((voxel) => {
       const key = toolCellKey(voxel)
       if (editStrokeVisitedRef.current.has(key)) return false
@@ -9685,8 +9760,10 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     const request = shapeRequestForGesture(gesture)
     if (!request) return Promise.resolve([] as Voxel[])
     const client = voxelToolsWorkerRef.current
-    if (!client) return Promise.resolve(previewShapeVoxels(gesture))
-    return client.compute(request).catch(() => previewShapeVoxels(gesture))
+    if (!client) return Promise.resolve(decorateVariantVoxels(previewShapeVoxels(gesture), gesture, gesture.operation ?? drawOperation))
+    return client.compute(request)
+      .then((result) => decorateVariantVoxels(result, gesture, gesture.operation ?? drawOperation))
+      .catch(() => decorateVariantVoxels(previewShapeVoxels(gesture), gesture, gesture.operation ?? drawOperation))
   }
 
   const requestShapePreview = (gesture: DrawingGesture) => {
@@ -9706,8 +9783,9 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       : computeShapeVoxels(gesture).then((voxels) => ({ voxels, mesh: null }))
     void previewPromise.then((result) => {
       if (revision !== toolPreviewRevisionRef.current || drawingGestureRef.current !== gesture) return
-      latestToolPreviewVoxelsRef.current = result.voxels
-      setToolPreviewVoxels(result.voxels)
+      const voxels = decorateVariantVoxels(result.voxels, gesture, gesture.operation ?? drawOperation)
+      latestToolPreviewVoxelsRef.current = voxels
+      setToolPreviewVoxels(voxels)
       setToolPreviewMesh(result.mesh)
     })
   }
@@ -9753,6 +9831,14 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   const processDrawingGestureMove = (event: { pointerId: number; clientX: number; clientY: number }) => {
     const drawingGesture = drawingGestureRef.current
     if (!drawingGesture || drawingGesture.pointerId !== event.pointerId) return
+    if (!drawingGesture.variantRotationLocked && drawOperation === 'add' && voxelBrushShape !== 'cube' && ['brush', 'line', 'cuboid', 'sphere'].includes(tool)) {
+      const deltaX = event.clientX - drawingGesture.startClientX
+      const deltaY = event.clientY - drawingGesture.startClientY
+      if (Math.hypot(deltaX, deltaY) >= 4) {
+        drawingGesture.variantRotation = rotationFromScreenDelta(deltaX, deltaY)
+        drawingGesture.variantRotationLocked = true
+      }
+    }
     if (tool === 'cuboid' && drawingGesture.stage === 'depth') {
       const layer = drawingLayerFromPointer(drawingGesture, event)
       drawingGesture.current = { ...(drawingGesture.footprintEnd ?? drawingGesture.start), layer }
@@ -10398,6 +10484,9 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       extrudeStartScreen: tool === 'extrude' ? { x: event.clientX, y: event.clientY } : undefined,
       extrudeScreenVector: extrudeState?.screenVector,
       operation: drawOperation,
+      variantFacing: facingFromHitNormal(drawing?.context.voxelHit?.normal),
+      variantRotation: 0,
+      variantRotationLocked: false,
     }
     const activeGesture = drawingGestureRef.current
     editStrokeVisitedRef.current.clear()
@@ -10928,6 +11017,57 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
   // Color-batched InstancedMeshes only carry their own subset, but adjacency
   // must be tested against every voxel in the editable component.
   componentGroup.userData.customComponentVoxels = component
+  if (component.some((voxel) => voxelShape(voxel) !== 'cube')) {
+    const occupied = new Set(component.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
+    const cubeBatches = new Map<string, { color: THREE.Color; voxels: Voxel[] }>()
+    const variantBatches = new Map<string, { color: THREE.Color; voxel: Voxel; voxels: Voxel[] }>()
+    component.forEach((voxel) => {
+      const color = new THREE.Color(customVoxelRenderColorKey(voxel, materialMap, componentColor))
+      if (voxelShape(voxel) === 'cube') {
+        const key = color.getHexString()
+        const batch = cubeBatches.get(key) ?? { color, voxels: [] }
+        batch.voxels.push(voxel)
+        cubeBatches.set(key, batch)
+        return
+      }
+      const key = `${variantKey(voxel)}:${color.getHexString()}`
+      const batch = variantBatches.get(key) ?? { color, voxel, voxels: [] }
+      batch.voxels.push(voxel)
+      variantBatches.set(key, batch)
+    })
+    const matrix = new THREE.Matrix4()
+    cubeBatches.forEach(({ color, voxels }) => {
+      const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03 }), voxels.length)
+      voxels.forEach((voxel, index) => {
+        matrix.makeTranslation(voxelCenterToWorld(voxel.x - origin.x), voxelCenterToWorld(voxel.z - origin.z), voxelCenterToWorld(voxel.y - origin.y))
+        mesh.setMatrixAt(index, matrix)
+      })
+      mesh.instanceMatrix.needsUpdate = true
+      mesh.userData.customVoxels = voxels
+      mesh.userData.customComponentVoxels = component
+      mesh.userData.customComponentId = voxelComponentId(component)
+      mesh.userData.scenePartId = componentScenePartId
+      mesh.userData.outerVoxel = voxels.some((voxel) => exposedVoxelFaces(voxel, occupied).length > 0)
+      componentGroup.add(mesh)
+    })
+    variantBatches.forEach(({ color, voxel, voxels }) => {
+      const mesh = new THREE.InstancedMesh(sharedVariantThreeGeometry(voxel), new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03 }), voxels.length)
+      voxels.forEach((cell, index) => {
+        matrix.makeTranslation((cell.x - origin.x) * VOXEL_WORLD_SIZE, (cell.z - origin.z) * VOXEL_WORLD_SIZE, (cell.y - origin.y) * VOXEL_WORLD_SIZE)
+        mesh.setMatrixAt(index, matrix)
+      })
+      mesh.instanceMatrix.needsUpdate = true
+      mesh.userData.customVoxels = voxels
+      mesh.userData.customComponentVoxels = component
+      mesh.userData.customComponentId = voxelComponentId(component)
+      mesh.userData.scenePartId = componentScenePartId
+      mesh.userData.outerVoxel = true
+      componentGroup.add(mesh)
+    })
+    componentGroup.userData.variantRendered = true
+    componentGroup.userData.greedyDisabled = true
+    return componentGroup
+  }
   // Cell-preserving results (notably enlargement) never enter the greedy
   // worker path. Do not allocate and scan a second full voxel array for data
   // that this component will not use.
@@ -11164,6 +11304,68 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
     partGroup.userData.instancePartId = partId
     partGroup.userData.instanceVoxelPivot = pivotWorld
     const preserveVoxelCells = component.some((voxel) => voxel.preserveVoxelCells)
+    if (component.some((voxel) => voxelShape(voxel) !== 'cube')) {
+      const occupied = new Set(component.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
+      const cubeBatches = new Map<string, { color: THREE.Color; voxels: Voxel[] }>()
+      const variantBatches = new Map<string, { color: THREE.Color; voxel: Voxel; voxels: Voxel[] }>()
+      component.forEach((voxel) => {
+        const color = renderAssetVoxelColor(voxel, asset, materialMap, colorOverride)
+        if (voxelShape(voxel) === 'cube') {
+          const key = color.getHexString()
+          const batch = cubeBatches.get(key) ?? { color, voxels: [] }
+          batch.voxels.push(voxel)
+          cubeBatches.set(key, batch)
+          return
+        }
+        const key = `${variantKey(voxel)}:${color.getHexString()}`
+        const batch = variantBatches.get(key) ?? { color, voxel, voxels: [] }
+        batch.voxels.push(voxel)
+        variantBatches.set(key, batch)
+      })
+      const matrix = new THREE.Matrix4()
+      const setLocalMatrix = (cell: Voxel, target: THREE.Matrix4) => {
+        const localXIndex = mirror?.x ? asset.width - 1 - cell.x : cell.x
+        const localYIndex = mirror?.z ? asset.height - 1 - cell.y : cell.y
+        const localZIndex = mirror?.y ? asset.depth - 1 - cell.z : cell.z
+        target.makeTranslation(
+          localXIndex * scale - (asset.width / 2) * scale - pivotWorld.x,
+          localZIndex * scale - (asset.depth / 2) * scale - pivotWorld.y,
+          localYIndex * scale - pivotWorld.z,
+        )
+      }
+      cubeBatches.forEach(({ color, voxels }) => {
+        const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03 }), voxels.length)
+        voxels.forEach((cell, index) => {
+          setLocalMatrix(cell, matrix)
+          matrix.elements[12] += scale / 2
+          matrix.elements[13] += scale / 2
+          matrix.elements[14] += scale / 2
+          mesh.setMatrixAt(index, matrix)
+        })
+        mesh.instanceMatrix.needsUpdate = true
+        mesh.userData.instanceVoxels = voxels.map((voxel) => ({ ...voxel }))
+        mesh.userData.instancePartId = partId
+        mesh.userData.outerVoxel = voxels.some((voxel) => exposedVoxelFaces(voxel, occupied).length > 0)
+        partGroup.add(mesh)
+      })
+      variantBatches.forEach(({ color, voxel, voxels }) => {
+        const mesh = new THREE.InstancedMesh(sharedVariantThreeGeometry(voxel), new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03 }), voxels.length)
+        voxels.forEach((cell, index) => {
+          setLocalMatrix(cell, matrix)
+          mesh.setMatrixAt(index, matrix)
+        })
+        mesh.instanceMatrix.needsUpdate = true
+        mesh.userData.instanceVoxels = voxels.map((item) => ({ ...item }))
+        mesh.userData.instancePartId = partId
+        mesh.userData.outerVoxel = true
+        partGroup.add(mesh)
+      })
+      partGroup.userData.instanceVoxelOccupancy = occupied
+      partGroup.userData.instanceVoxelDimensions = { width: asset.width, depth: asset.depth, height: asset.height }
+      partGroup.userData.instanceVoxelMirror = mirror
+      group.add(partGroup)
+      continue
+    }
     if (allowGreedyMesh && component.length > CUSTOM_INSTANCE_RENDER_LIMIT && !preserveVoxelCells) {
       const greedyColorIds = new Map<string, number>()
       const greedyColors: string[] = ['#ffffff']
