@@ -3391,18 +3391,15 @@ function App() {
       sceneMoveValidationRef.current = { project: currentProject, parts, deltaX, deltaY, deltaZ, result }
       return result
     }
-    const bounds = sceneBoundsForProject(currentProject)
-    const cachedBounds = cachedMove?.bounds ?? scenePartsGridBounds(movableParts, sceneOccupancyRef.current)
     const movingIds = cachedMove?.movingIds ?? movableParts.map((part) => part.id)
-    sceneMoveBoundsRef.current = { project: currentProject, sourceParts: parts, parts: currentParts, movingIds, bounds: cachedBounds }
-    if (!cachedBounds) {
-      const result = { moved: false, blocked: true, deltaX: 0, deltaY: 0, deltaZ: 0 }
-      sceneMoveValidationRef.current = { project: currentProject, parts, deltaX, deltaY, deltaZ, result }
-      return result
-    }
+    // Scene dragging is constrained only by actual voxel overlap. The scene
+    // boundary and the ground are not drag collision surfaces: an entity may
+    // temporarily leave the working box while the user is positioning it.
+    // Keeping those checks here caused an AABB/ground rejection to look like
+    // an unexplained snap-back even when no other entity was intersecting.
+    sceneMoveBoundsRef.current = { project: currentProject, sourceParts: parts, parts: currentParts, movingIds, bounds: null }
     const result = resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => {
-      return translatedVoxelBoundsWithinScene(cachedBounds, bounds, stepX, stepY, stepZ)
-        && !sceneOccupancyRef.current!.collidesTranslatedSceneParts(movableParts, { x: stepX, y: stepY, z: stepZ }, movingIds)
+      return !sceneOccupancyRef.current!.collidesTranslatedSceneParts(movableParts, { x: stepX, y: stepY, z: stepZ }, movingIds)
     }, false)
     sceneMoveValidationRef.current = { project: currentProject, parts, deltaX, deltaY, deltaZ, result }
     return result
@@ -3437,10 +3434,7 @@ function App() {
     // project/index immediately before mutating either one. This closes the
     // race where a transition, undo, or another edit changes occupancy after
     // the last pointermove and before pointerup.
-    const freshBounds = scenePartsGridBounds(movableParts, null)
-    const finalMoveValid = Boolean(freshBounds)
-      && translatedVoxelBoundsWithinScene(freshBounds!, sceneBoundsForProject(projectRef.current), result.deltaX, result.deltaY, result.deltaZ)
-      && !sceneOccupancyRef.current!.collidesTranslatedSceneParts(
+    const finalMoveValid = !sceneOccupancyRef.current!.collidesTranslatedSceneParts(
         movableParts,
         { x: result.deltaX, y: result.deltaY, z: result.deltaZ },
         movableParts.map((part) => part.id),
@@ -10300,6 +10294,15 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       const deltaY = worldToVoxel(verticalPoint.z - gesture.startVerticalZ)
       if (deltaY === gesture.lastDeltaY) return
       const moveResult = onPreviewScenePartsMove(gesture.parts, 0, deltaY, 0)
+      // A blocked request means the pointer has moved beyond the last valid
+      // grid position. Keep that last valid position on screen; applying the
+      // result's zero delta here would snap the model back to the gesture
+      // origin for one or more frames. This is especially visible when the
+      // moving model crosses another entity's projected surface.
+      if (!moveResult.moved && moveResult.blocked && (gesture.lastDeltaX || gesture.lastDeltaY || gesture.lastDeltaZ)) {
+        setDragVisualOffset(gesture, gesture.lastDeltaX, gesture.lastDeltaY, gesture.lastDeltaZ)
+        return
+      }
       gesture.lastDeltaX = moveResult.deltaX
       gesture.lastDeltaY = moveResult.deltaY
       gesture.lastDeltaZ = moveResult.deltaZ
@@ -10312,6 +10315,10 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     const deltaZ = worldToVoxel(floorPoint.y - gesture.startGroundY)
     if (deltaX === gesture.lastDeltaX && deltaZ === gesture.lastDeltaZ) return
     const moveResult = onPreviewScenePartsMove(gesture.parts, deltaX, 0, deltaZ)
+    if (!moveResult.moved && moveResult.blocked && (gesture.lastDeltaX || gesture.lastDeltaY || gesture.lastDeltaZ)) {
+      setDragVisualOffset(gesture, gesture.lastDeltaX, gesture.lastDeltaY, gesture.lastDeltaZ)
+      return
+    }
     gesture.lastDeltaX = moveResult.deltaX
     gesture.lastDeltaY = moveResult.deltaY
     gesture.lastDeltaZ = moveResult.deltaZ

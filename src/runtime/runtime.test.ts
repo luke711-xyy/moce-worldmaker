@@ -59,6 +59,26 @@ describe('SceneOccupancyIndex', () => {
     expect(index.collidesTranslatedProjectVoxels(dense, { x: 1, y: 0, z: 0 }, ['dense'])).toBe(true)
   })
 
+  it('does not reuse collision keys after a moving voxel array changes in place', () => {
+    const moving = Array.from({ length: 5000 }, (_, x) => voxel(x, 0, 0))
+    const index = SceneOccupancyIndex.fromParts([
+      part('moving', moving),
+      part('stationary', [voxel(2499, 0, 0)]),
+    ])
+    expect(index.collidesTranslatedProjectVoxels(moving, { x: 0, y: 0, z: 0 }, ['moving'])).toBe(true)
+    moving[2499] = voxel(6000, 0, 0)
+    expect(index.collidesTranslatedProjectVoxels(moving, { x: 0, y: 0, z: 0 }, ['moving'])).toBe(false)
+  })
+
+  it('does not treat an occupied bounding-box extension as a collision', () => {
+    const moving = Array.from({ length: 2500 }, (_, index) => voxel(index * 2, 0, 0))
+    const index = SceneOccupancyIndex.fromParts([
+      part('moving', moving),
+      part('stationary', [voxel(2499, 0, 0)]),
+    ])
+    expect(index.collidesTranslatedProjectVoxels(moving, { x: 0, y: 0, z: 0 }, ['moving'])).toBe(false)
+  })
+
   it('uses the broad phase for large placement previews without excluded owners', () => {
     const largeAsset = Array.from({ length: 5000 }, (_, x) => voxel(x, 0, 0))
     const index = SceneOccupancyIndex.fromParts([

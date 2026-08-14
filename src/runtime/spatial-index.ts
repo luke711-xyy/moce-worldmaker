@@ -48,6 +48,11 @@ type RuntimeVoxelBounds = {
   maxGz: number
 }
 
+type ProjectVoxelCacheEntry<T> = {
+  signature: string
+  value: T
+}
+
 // Sorted coordinate keys are only a fallback for comparing a newly allocated
 // snapshot with a small existing owner. Large owners normally preserve their
 // source array reference across transforms; sorting hundreds of thousands of
@@ -80,6 +85,22 @@ function projectVoxelBounds(voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>)
     bounds.maxGz = Math.max(bounds.maxGz, voxel.y)
   }
   return bounds
+}
+
+// A few editor paths mutate a voxel array in place while a pointer gesture is
+// still active. WeakMap identity alone is therefore not a safe cache key: a
+// cached key set/bounds can describe the previous topology and turn a valid
+// drag into a false collision. This inexpensive fingerprint catches the
+// normal in-place mutations (append, remove, and edits at sampled positions)
+// without scanning a large model on every pointermove. Structural
+// synchronization also invalidates the entry explicitly below.
+function projectVoxelCacheSignature(voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>): string {
+  if (!voxels.length) return '0'
+  const indexes = [...new Set([0, Math.floor((voxels.length - 1) / 2), voxels.length - 1])]
+  return `${voxels.length}|${indexes.map((index) => {
+    const voxel = voxels[index]
+    return `${voxel.x},${voxel.y},${voxel.z}`
+  }).join('|')}`
 }
 
 function scenePartOffset(part: Pick<SceneEntityPart, 'sceneOffset' | 'partSceneOffset'>): { x: number; y: number; z: number } {
@@ -142,8 +163,8 @@ export class SceneOccupancyIndex {
   // voxel in a large entity.
   private readonly ownerSourceRefs = new Map<string, ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>>()
   private readonly ownerBaseOffsets = new Map<string, RuntimeVoxelCoord>()
-  private readonly projectVoxelKeyCache = new WeakMap<object, Set<string>>()
-  private readonly projectVoxelBoundsCache = new WeakMap<object, RuntimeVoxelBounds>()
+  private readonly projectVoxelKeyCache = new WeakMap<object, ProjectVoxelCacheEntry<Set<string>>>()
+  private readonly projectVoxelBoundsCache = new WeakMap<object, ProjectVoxelCacheEntry<RuntimeVoxelBounds>>()
   private readonly materialIdToIndex = new Map<string, number>()
   private nextMaterialIndex = 1
 
@@ -657,10 +678,12 @@ export class SceneOccupancyIndex {
     // and queried every voxel in a large asset for every pointermove, which
     // made a valid preview appear impossible to place.
     const cacheKey = voxels as object
-    let movingBounds = movingBoundsOverride ?? this.projectVoxelBoundsCache.get(cacheKey)
+    const signature = projectVoxelCacheSignature(voxels)
+    const cachedBounds = this.projectVoxelBoundsCache.get(cacheKey)
+    let movingBounds = movingBoundsOverride ?? (cachedBounds?.signature === signature ? cachedBounds.value : undefined)
     if (!movingBounds) {
       movingBounds = projectVoxelBounds(voxels)
-      if (movingBounds) this.projectVoxelBoundsCache.set(cacheKey, movingBounds)
+      if (movingBounds) this.projectVoxelBoundsCache.set(cacheKey, { signature, value: movingBounds })
     }
     if (!movingBounds) return false
     const translatedMovingBounds: RuntimeVoxelBounds = {
@@ -693,8 +716,11 @@ export class SceneOccupancyIndex {
         return hit.ownerIds.some((ownerId) => !excluded.has(ownerId))
       })
     }
-    const movingKeys = this.projectVoxelKeyCache.get(cacheKey) ?? new Set(voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
-    this.projectVoxelKeyCache.set(cacheKey, movingKeys)
+    const cachedKeys = this.projectVoxelKeyCache.get(cacheKey)
+    const movingKeys = cachedKeys?.signature === signature
+      ? cachedKeys.value
+      : new Set(voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
+    this.projectVoxelKeyCache.set(cacheKey, { signature, value: movingKeys })
     for (const [ownerVoxels, translation] of candidates) {
       for (const voxel of ownerVoxels) {
         // ownerVoxels are already stored in effective scene coordinates; only
@@ -842,6 +868,20 @@ export class SceneOccupancyIndex {
   }
 
   private finalizeRemovedOwner(ownerId: string, ownerHandle: number): void {
+    // The source and effective arrays are weak-map keys. Explicitly deleting
+    // them matters when an owner is replaced during a live edit: otherwise a
+    // later drag can reuse collision data from the previous topology if the
+    // same array object is retained by the editor.
+    const sourceVoxels = this.ownerSourceRefs.get(ownerId)
+    const effectiveVoxels = this.ownerVoxelRefs.get(ownerId)
+    if (sourceVoxels) {
+      this.projectVoxelKeyCache.delete(sourceVoxels as object)
+      this.projectVoxelBoundsCache.delete(sourceVoxels as object)
+    }
+    if (effectiveVoxels) {
+      this.projectVoxelKeyCache.delete(effectiveVoxels as object)
+      this.projectVoxelBoundsCache.delete(effectiveVoxels as object)
+    }
     this.ownerVoxels.delete(ownerHandle)
     this.ownerTranslations.delete(ownerHandle)
     this.ownerBounds.delete(ownerHandle)
