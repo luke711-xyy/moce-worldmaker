@@ -291,6 +291,18 @@ export function rasterizeExtrude(plane: DrawingPlane, source: Voxel[], startLaye
     // independent from the drawing plane. Filtering through the plane's
     // layer axis here made a valid X/Y/Z extrusion use the wrong slice.
     if (voxel[layerAxis] !== startLayer) continue
+    // Add mode only creates the layers beyond the clicked layer: the source
+    // layer already exists. Remove and paint modes operate on the whole
+    // dragged span, so the clicked layer must be included as well.
+    if (operation !== 'add') {
+      const target = { ...voxel }
+      if (operation === 'paint') target.materialId = materialId
+      const key = toolCellKey(target)
+      if (!seen.has(key)) {
+        seen.add(key)
+        result.push(target)
+      }
+    }
     for (let layer = startLayer + step; delta > 0 ? layer <= endLayer : layer >= endLayer; layer += step) {
       const target = { ...voxel }
       target[layerAxis] = layer

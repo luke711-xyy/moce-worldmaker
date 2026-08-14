@@ -25,6 +25,7 @@ import { VoxelToolsGeometryResult, VoxelToolsWorkerClient, VoxelToolsShapeReques
 import { adjustHexHsl, hexToHsl } from './color-utils'
 import { SliceLayer, SlicePlane, SliceVoxel, sliceEntityParts, sliceLayerToAsset, slicePlaneLabel } from './slicing'
 import { computeScale, computeShell, GeometryScaleMode, GeometryVoxel, validScaleFactors, VoxelGeometryMesh, VoxelGeometryPreview } from './voxel-geometry'
+import { recordHistoryTransition, redoHistoryTransition, undoHistoryTransition } from './history'
 import { createZip } from './zip'
 import { CloudAssetSummary, CloudProgress, CloudSceneSummary, CloudUsage, deleteCloudAsset, deleteCloudScene, downloadCloudObject, loadCloudAssetPreview, loadCloudLibrary, loadCloudUsage, uploadCloudAsset, uploadCloudScene } from './cloud-backup'
 import { AuthUser, loadAuthUser, loginAuthUser, logoutAuthUser, registerAuthUser, requestPasswordReset, resendVerificationEmail, resetAuthPassword, setCloudAuthRequiredHandler, verifyAuthEmail } from './auth'
@@ -1140,17 +1141,11 @@ type AssetCategoryNode = {
 
 type ProjectHistoryEntry = {
   project: ProjectState
-  parts?: SceneEntityPart[]
   editEntityId: string | null
   selectedId: string
   checkedTreePartIds: string[]
 }
 
-// History entries structurally share project roots, but a derived scene-part
-// array can still retain a large per-voxel grouping for every edit. Keep the
-// small, fast path for ordinary scenes and reconstruct derived parts on undo
-// for large scenes instead of retaining another heavy view of the same model.
-const HISTORY_PARTS_VOXEL_LIMIT = 50_000
 const HISTORY_MAX_ENTRIES = 50
 
 // A drag changes the project root, but usually reuses the same assets and
@@ -1183,10 +1178,25 @@ function historyLimitForProject(project: ProjectState): number {
   return limit
 }
 
-function pushBoundedHistoryEntry(stack: ProjectHistoryEntry[], entry: ProjectHistoryEntry): void {
-  stack.push(entry)
-  const limit = historyLimitForProject(entry.project)
-  if (stack.length > limit) stack.splice(0, stack.length - limit)
+const historyProjectSignatureCache = new WeakMap<object, string>()
+
+function sameHistoryProject(left: ProjectState, right: ProjectState): boolean {
+  if (left === right) return true
+  const signatureFor = (project: ProjectState) => {
+    const cached = historyProjectSignatureCache.get(project as object)
+    if (cached) return cached
+    const signature = sceneContentSignature(project)
+    historyProjectSignatureCache.set(project as object, signature)
+    return signature
+  }
+  try {
+    return signatureFor(left) === signatureFor(right)
+  } catch {
+    // A malformed intermediate project must not be silently treated as a
+    // no-op. The normalizer/validator will report it at the actual commit
+    // boundary, while history remains conservative here.
+    return false
+  }
 }
 
 function sameScenePartOffset(left: { x?: number; y?: number; z?: number } | undefined, right: { x?: number; y?: number; z?: number } | undefined): boolean {
@@ -1319,6 +1329,10 @@ function App() {
   const [project, setProject] = useState<ProjectState>(() => normalizeStoredProject(makeEmptyProject()))
   const projectRef = useRef(project)
   const historyRef = useRef<{ past: ProjectHistoryEntry[]; future: ProjectHistoryEntry[] }>({ past: [], future: [] })
+  // Every committed state publication gets a generation. React transitions
+  // and worker callbacks from an older generation must not repaint the editor
+  // after an undo/redo has restored another snapshot.
+  const historyEpochRef = useRef(0)
   const [historyRevision, setHistoryRevision] = useState(0)
   const [selectedId, setSelectedId] = useState('inst-chinese')
   // Enter the editor in entity placement/selection mode. Drawing remains an
@@ -1540,22 +1554,29 @@ function App() {
   }
 
   const sceneParts = useMemo(() => sceneEntityParts(project), [project])
-  const makeHistoryEntry = (historyProject: ProjectState, historyParts = sceneParts): ProjectHistoryEntry => {
-    let derivedVoxelCount = 0
-    for (const part of historyParts) {
-      derivedVoxelCount += part.voxels.length
-      if (derivedVoxelCount > HISTORY_PARTS_VOXEL_LIMIT) break
-    }
-    return {
-      project: historyProject,
-      // Rebuilding sceneEntityParts on undo is cheaper than retaining a
-      // second large per-voxel grouping for every history entry. Small scenes
-      // keep the cached parts and therefore retain their existing fast undo.
-      ...(derivedVoxelCount <= HISTORY_PARTS_VOXEL_LIMIT ? { parts: historyParts } : {}),
+  const makeHistoryEntry = (historyProject: ProjectState): ProjectHistoryEntry => ({
+    project: historyProject,
+    editEntityId,
+    selectedId,
+    checkedTreePartIds: [...checkedTreePartIds],
+  })
+
+  const recordHistoryBeforeChange = (before: ProjectState, after: ProjectState) => {
+    const afterEntry: ProjectHistoryEntry = {
+      project: after,
       editEntityId,
       selectedId,
       checkedTreePartIds: [...checkedTreePartIds],
     }
+    const recorded = recordHistoryTransition(
+      historyRef.current,
+      makeHistoryEntry(before),
+      afterEntry,
+      (left, right) => sameHistoryProject(left.project, right.project),
+      historyLimitForProject(before),
+    )
+    if (recorded) historyEpochRef.current += 1
+    return recorded
   }
   useEffect(() => {
     // Editing is also a tree-selection state. Keep the checkbox invariant in
@@ -1893,13 +1914,23 @@ function App() {
     // collections it can mutate. Avoid the general persistence normalizer's
     // full asset/voxel clone on pointer-up.
     const next = finalizeVoxelStrokeProject(transaction.draft)
-    pushBoundedHistoryEntry(historyRef.current.past, {
-      ...makeHistoryEntry(transaction.original, initialParts),
-      editEntityId: transaction.historyEditEntityId,
-      selectedId: transaction.historySelectedId,
-      checkedTreePartIds: [...transaction.historyCheckedTreePartIds],
-    })
-    historyRef.current.future = []
+    recordHistoryTransition(
+      historyRef.current,
+      {
+        ...makeHistoryEntry(transaction.original),
+        editEntityId: transaction.historyEditEntityId,
+        selectedId: transaction.historySelectedId,
+        checkedTreePartIds: [...transaction.historyCheckedTreePartIds],
+      },
+      { project: next, editEntityId: editEntityId, selectedId, checkedTreePartIds: [...checkedTreePartIds] },
+      (left, right) => sameHistoryProject(left.project, right.project),
+      historyLimitForProject(transaction.original),
+    )
+    // The stroke publishes synchronously on pointer-up, but a transition from
+    // an earlier operation may still be queued. Advance the same generation
+    // used by move/geometry commits so that an old transition cannot repaint
+    // over the completed stroke.
+    historyEpochRef.current += 1
     const finalParts = sceneEntityParts(next)
     const touchedOwnerIds = new Set(transaction.touchedOwnerIds)
     transaction.touchedOwnerRoots.forEach((instanceId) => {
@@ -1939,10 +1970,7 @@ function App() {
     // path above before reaching this commit boundary.
     const normalizedBase = normalizeStoredProject(next, { normalizeNaming: false })
     const normalizedNext = normalizeProjectNaming(normalizedBase, { clone: false })
-    if (trackHistory) {
-      pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(projectRef.current))
-      historyRef.current.future = []
-    }
+    if (trackHistory) recordHistoryBeforeChange(projectRef.current, normalizedNext)
     const nextParts = sceneEntityParts(normalizedNext)
     const changedOwnerIds = changedOccupancyOwnerIds(sceneParts, nextParts)
     if (changedOwnerIds.size) sceneOccupancyRef.current?.syncOwnerParts(nextParts, changedOwnerIds)
@@ -1950,6 +1978,7 @@ function App() {
     // the sceneParts effect from repeating a full scene synchronization after
     // React publishes the same project root.
     skipSceneOccupancySyncRef.current = true
+    historyEpochRef.current += 1
     projectRef.current = normalizedNext
     markSceneDirty()
     setProject(normalizedNext)
@@ -1964,8 +1993,7 @@ function App() {
     const publishedProject = nextProject.instances.length
       ? normalizeStoredProject(nextProject, { normalizeNaming: false })
       : nextProject
-    pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(projectRef.current))
-    historyRef.current.future = []
+    recordHistoryBeforeChange(projectRef.current, publishedProject)
     if (publishedProject === nextProject) movableParts.forEach((part) => {
       // A move preserves the owner's topology. Let the occupancy index keep
       // its existing chunk data and record only the transform; this removes
@@ -1976,6 +2004,7 @@ function App() {
     // We already updated only the moved owners above. Avoid a second full
     // scene synchronization when the new React project reaches the effect.
     skipSceneOccupancySyncRef.current = true
+    const publishEpoch = ++historyEpochRef.current
     projectRef.current = publishedProject
     markSceneDirty()
     // The Three.js drag preview already moved the scene graph imperatively and
@@ -1985,6 +2014,7 @@ function App() {
     // large entity. A normal synchronous update here made release latency grow
     // with the selected model even though no voxel geometry was rebuilt.
     startTransition(() => {
+      if (historyEpochRef.current !== publishEpoch) return
       setProject(publishedProject)
       setHistoryRevision((value) => value + 1)
     })
@@ -1999,14 +2029,15 @@ function App() {
     // project and normalizeStoredProject() then walks every asset and voxel.
     // The project root and mutable scene arrays were prepared by the caller;
     // history can therefore retain the immutable previous root directly.
-    pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(projectRef.current))
-    historyRef.current.future = []
+    recordHistoryBeforeChange(projectRef.current, next)
     // The occupancy index was updated incrementally above. The following
     // sceneParts effect must not sort and rescan the same large result again.
     skipSceneOccupancySyncRef.current = true
+    const publishEpoch = ++historyEpochRef.current
     projectRef.current = next
     markSceneDirty()
     startTransition(() => {
+      if (historyEpochRef.current !== publishEpoch) return
       setProject(next)
       setHistoryRevision((value) => value + 1)
     })
@@ -2392,48 +2423,86 @@ function App() {
     }
   }, [])
 
+  const cancelPendingHistoryInteractions = () => {
+    // Invalidate every callback that can publish a project after this point.
+    // This is the missing boundary in the old implementation: a queued React
+    // transition or a stroke RAF could repaint the pre-undo project after the
+    // history snapshot had already been restored.
+    historyEpochRef.current += 1
+    interactionActiveRef.current = false
+    sceneMoveValidationRef.current = null
+    sceneMoveBoundsRef.current = null
+    if (voxelStrokePublishFrameRef.current !== null) {
+      cancelAnimationFrame(voxelStrokePublishFrameRef.current)
+      voxelStrokePublishFrameRef.current = null
+    }
+    const transaction = voxelStrokeTransactionRef.current
+    voxelStrokeTransactionRef.current = null
+    voxelStrokePartsRef.current = null
+    voxelStrokeEntityRef.current = null
+    voxelStrokeNoticeRef.current = null
+    if (transaction) {
+      const restoredParts = sceneEntityParts(transaction.original)
+      sceneOccupancyRef.current?.syncParts(restoredParts)
+      skipSceneOccupancySyncRef.current = true
+      projectRef.current = transaction.original
+      setProject(transaction.original)
+    }
+    geometryRequestRevisionRef.current += 1
+    geometryApplyRevisionRef.current += 1
+    setCopyPreview(null)
+    cancelColorPreview()
+    if (!geometryApplyingRef.current) cancelGeometryPreview()
+  }
+
+  const restoreHistoryEntry = (entry: ProjectHistoryEntry, notice: string) => {
+    const currentProject = projectRef.current
+    const currentParts = sceneEntityParts(currentProject)
+    // Derived SceneEntityPart arrays are runtime caches. They can be mutated
+    // in place by append-only voxel publishing or by lazy transform refreshes,
+    // so never retain them in a history entry. Rebuild from the immutable
+    // ProjectState snapshot that is actually being restored.
+    const targetParts = sceneEntityParts(entry.project)
+    const changedOwnerIds = changedOccupancyOwnerIds(currentParts, targetParts)
+    if (changedOwnerIds.size) sceneOccupancyRef.current?.syncOwnerParts(targetParts, changedOwnerIds)
+    skipSceneOccupancySyncRef.current = true
+    projectRef.current = entry.project
+    markSceneDirty()
+    // History restoration is deliberately synchronous. It must win over any
+    // pending transition and make the viewport/inspector agree in the same
+    // React update batch.
+    setProject(entry.project)
+    setEditEntityId(entry.editEntityId)
+    setSelectedId(entry.selectedId)
+    setCheckedTreePartIds([...entry.checkedTreePartIds])
+    setHistoryRevision((value) => value + 1)
+    setNotice(notice)
+  }
+
   const undoProject = () => {
     if (geometryApplyingRef.current) return
-    const previous = historyRef.current.past.pop()
+    cancelPendingHistoryInteractions()
+    const currentProject = projectRef.current
+    const currentEntry = makeHistoryEntry(currentProject)
+    const previous = undoHistoryTransition(historyRef.current, currentEntry, historyLimitForProject(currentProject))
     if (!previous) {
       setNotice('没有可撤销的操作')
       return
     }
-    pushBoundedHistoryEntry(historyRef.current.future, makeHistoryEntry(projectRef.current))
-    const previousParts = previous.parts ?? sceneEntityParts(previous.project)
-    const changedOwnerIds = changedOccupancyOwnerIds(sceneParts, previousParts)
-    if (changedOwnerIds.size) sceneOccupancyRef.current?.syncOwnerParts(previousParts, changedOwnerIds)
-    skipSceneOccupancySyncRef.current = true
-    projectRef.current = previous.project
-    markSceneDirty()
-    setProject(previous.project)
-    setEditEntityId(previous.editEntityId)
-    setSelectedId(previous.selectedId)
-    setCheckedTreePartIds([...previous.checkedTreePartIds])
-    setHistoryRevision((value) => value + 1)
-    setNotice('已撤销')
+    restoreHistoryEntry(previous, '已撤销')
   }
 
   const redoProject = () => {
     if (geometryApplyingRef.current) return
-    const next = historyRef.current.future.pop()
+    cancelPendingHistoryInteractions()
+    const currentProject = projectRef.current
+    const currentEntry = makeHistoryEntry(currentProject)
+    const next = redoHistoryTransition(historyRef.current, currentEntry, historyLimitForProject(currentProject))
     if (!next) {
       setNotice('没有可重做的操作')
       return
     }
-    pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(projectRef.current))
-    const nextParts = next.parts ?? sceneEntityParts(next.project)
-    const changedOwnerIds = changedOccupancyOwnerIds(sceneParts, nextParts)
-    if (changedOwnerIds.size) sceneOccupancyRef.current?.syncOwnerParts(nextParts, changedOwnerIds)
-    skipSceneOccupancySyncRef.current = true
-    projectRef.current = next.project
-    markSceneDirty()
-    setProject(next.project)
-    setEditEntityId(next.editEntityId)
-    setSelectedId(next.selectedId)
-    setCheckedTreePartIds([...next.checkedTreePartIds])
-    setHistoryRevision((value) => value + 1)
-    setNotice('已重做')
+    restoreHistoryEntry(next, '已重做')
   }
 
   const addVoxel = (voxel: Voxel) => {
@@ -4918,13 +4987,14 @@ function App() {
     const normalizedNext = normalizeProjectNaming(normalizeStoredProject(unnormalizedNext, { normalizeNaming: false }), { clone: false })
     const newOwnerIds = new Set<string>([...createdCustomIds].map((entityId) => `custom:${entityId}`))
     sceneEntityParts(normalizedNext).filter((part) => part.instanceId && createdInstanceIds.has(part.instanceId)).forEach((part) => newOwnerIds.add(part.id))
-    pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(sourceProject))
-    historyRef.current.future = []
+    recordHistoryBeforeChange(sourceProject, normalizedNext)
     sceneOccupancyRef.current?.syncOwnerParts(sceneEntityParts(normalizedNext), newOwnerIds)
     skipSceneOccupancySyncRef.current = true
+    const publishEpoch = ++historyEpochRef.current
     projectRef.current = normalizedNext
     markSceneDirty()
     startTransition(() => {
+      if (historyEpochRef.current !== publishEpoch) return
       setProject(normalizedNext)
       setHistoryRevision((value) => value + 1)
     })
@@ -5476,14 +5546,15 @@ function App() {
       if (baseColor) nextCustomColors[entityId] = adjustHexHsl(baseColor, hueDelta, saturationTarget)
     })
     const nextProject: ProjectState = { ...sourceProject, instances: nextInstances, customVoxels: nextCustomVoxels, customColors: nextCustomColors }
-    pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(sourceProject))
-    historyRef.current.future = []
+    recordHistoryBeforeChange(sourceProject, nextProject)
     // Color changes do not alter occupancy. Avoid rehashing every scene voxel
     // while the inspector publishes the new material state.
     skipSceneOccupancySyncRef.current = true
+    const publishEpoch = ++historyEpochRef.current
     projectRef.current = nextProject
     markSceneDirty()
     startTransition(() => {
+      if (historyEpochRef.current !== publishEpoch) return
       setProject(nextProject)
       setHistoryRevision((value) => value + 1)
     })
@@ -5586,14 +5657,14 @@ function App() {
       sceneParts.filter((part) => part.instanceId === instanceId).forEach((part) => changedOwnerIds.add(part.id))
     })
     const nextProject: ProjectState = { ...sourceProject, customVoxels: nextCustomVoxels, instances: nextInstances }
-    pushBoundedHistoryEntry(historyRef.current.past, makeHistoryEntry(sourceProject))
-    historyRef.current.future = []
+    recordHistoryBeforeChange(sourceProject, nextProject)
     const nextParts = sceneEntityParts(nextProject)
     sceneOccupancyRef.current?.syncOwnerParts(nextParts, changedOwnerIds)
     skipSceneOccupancySyncRef.current = true
+    const publishEpoch = ++historyEpochRef.current
     projectRef.current = nextProject
     markSceneDirty()
-    setProject(nextProject)
+    if (historyEpochRef.current === publishEpoch) setProject(nextProject)
     setHistoryRevision((value) => value + 1)
     return true
   }
@@ -5845,7 +5916,7 @@ function App() {
               </div>}
             </div>
           </div>
-          <MemoizedVoxelViewport project={project} authoritativeProjectRef={projectRef} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} geometryApplying={geometryApplying} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} voxelBrushShape={voxelBrushShape} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSyncSceneOccupancyTransforms={stableViewportSyncOccupancyTransforms} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onCancelScenePartsMove={stableViewportCancelMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
+          <MemoizedVoxelViewport project={project} authoritativeProjectRef={projectRef} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} geometryApplying={geometryApplying} historyResetKey={historyRevision} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} voxelBrushShape={voxelBrushShape} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSyncSceneOccupancyTransforms={stableViewportSyncOccupancyTransforms} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onCancelScenePartsMove={stableViewportCancelMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
           <ToolboxPopover open={toolboxOpen} onClose={() => setToolboxOpen(false)} tool={tool} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} voxelBrushShape={voxelBrushShape} onToolChange={changeTool} onPlaneChange={setDrawingPlane} onOperationChange={setDrawOperation} onBrushSizeChange={setBrushSize} onBrushShapeChange={setVoxelBrushShape} />
           <ReferenceImagePopover open={referenceImageOpen} image={referenceImage} index={referenceImageIndex} count={referenceImages.length} onPrevious={() => setReferenceImageIndex((current) => (current - 1 + referenceImages.length) % referenceImages.length)} onNext={() => setReferenceImageIndex((current) => (current + 1) % referenceImages.length)} onClose={() => setReferenceImageOpen(false)} onOpen={openReferenceImagePicker} />
           <div className="viewport-footer">
@@ -7845,7 +7916,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   </div>
 }
 
-function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancyIndex, assetTransformCache, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, geometryApplying, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, voxelBrushShape, activeMaterial, materials, dragAxis, placementAsset, copyPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSyncSceneOccupancyTransforms, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onCancelScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; authoritativeProjectRef: React.MutableRefObject<ProjectState>; sceneParts: SceneEntityPart[]; occupancyIndex: SceneOccupancyIndex | null; assetTransformCache: AssetTransformCache; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; geometryApplying: boolean; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; voxelBrushShape: VoxelShape; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSyncSceneOccupancyTransforms: () => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCancelScenePartsMove: () => void; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
+function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancyIndex, assetTransformCache, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, geometryApplying, historyResetKey, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, voxelBrushShape, activeMaterial, materials, dragAxis, placementAsset, copyPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSyncSceneOccupancyTransforms, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onCancelScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; authoritativeProjectRef: React.MutableRefObject<ProjectState>; sceneParts: SceneEntityPart[]; occupancyIndex: SceneOccupancyIndex | null; assetTransformCache: AssetTransformCache; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; geometryApplying: boolean; historyResetKey: number; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; voxelBrushShape: VoxelShape; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSyncSceneOccupancyTransforms: () => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCancelScenePartsMove: () => void; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.Camera | null>(null)
@@ -7988,6 +8059,37 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     setViewportInteraction(false)
     resetOrbitControlsGesture()
   }, [tool, drawingPlane, toolboxOpen, editEntityId, setViewportInteraction])
+  useEffect(() => {
+    // Undo/redo is a hard interaction boundary. OrbitControls, pointer
+    // capture, queued drawing frames and drag previews are imperative state;
+    // changing the React project alone leaves those old gestures alive and
+    // lets the next pointer event publish a stale transform or rotate the
+    // camera in one burst.
+    if (drawingMoveFrameRef.current !== null) cancelAnimationFrame(drawingMoveFrameRef.current)
+    drawingMoveFrameRef.current = null
+    pendingDrawingPointRef.current = null
+    if (editMoveFrameRef.current !== null) cancelAnimationFrame(editMoveFrameRef.current)
+    editMoveFrameRef.current = null
+    pendingEditPointRef.current = null
+    const previousDrawingGesture = drawingGestureRef.current
+    if (previousDrawingGesture?.extrudeSessionId) voxelToolsWorkerRef.current?.disposeExtrudeSession(previousDrawingGesture.extrudeSessionId)
+    drawingGestureRef.current = null
+    editGestureRef.current = null
+    editStrokeVisitedRef.current.clear()
+    cameraGestureRef.current = null
+    boxSelectGestureRef.current = null
+    setSceneSelectionBox(null)
+    if (selectGestureRef.current) resetDragVisuals(selectGestureRef.current)
+    selectGestureRef.current = null
+    latestToolPreviewVoxelsRef.current = []
+    toolPreviewRevisionRef.current += 1
+    setToolPreviewVoxels([])
+    setToolPreviewMesh(null)
+    onCancelScenePartsMove()
+    setViewportInteraction(false)
+    if (controlsRef.current) controlsRef.current.enabled = true
+    resetOrbitControlsGesture()
+  }, [historyResetKey, onCancelScenePartsMove, setViewportInteraction])
   useEffect(() => {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return

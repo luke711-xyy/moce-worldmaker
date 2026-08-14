@@ -136,7 +136,18 @@ describe('voxel plane tools', () => {
 
   it('marks extrusion preview cells with the active material in paint mode', () => {
     const result = rasterizeExtrude('xy', [{ x: 1, y: 2, z: 0, materialId: 'old' }], 1, 1, 'x', 'new', 'paint')
-    expect(result).toEqual([{ x: 2, y: 2, z: 0, materialId: 'new' }])
+    expect(result).toEqual([
+      { x: 1, y: 2, z: 0, materialId: 'new' },
+      { x: 2, y: 2, z: 0, materialId: 'new' },
+    ])
+  })
+
+  it('includes the clicked layer in subtract extrusion', () => {
+    const result = rasterizeExtrude('xy', [{ x: 1, y: 2, z: 0, materialId: 'old' }], 1, 1, 'x', 'new', 'subtract')
+    expect(result).toEqual([
+      { x: 1, y: 2, z: 0, materialId: 'old' },
+      { x: 2, y: 2, z: 0, materialId: 'old' },
+    ])
   })
 
   it('preserves the selected negative axis direction when converting screen travel', () => {

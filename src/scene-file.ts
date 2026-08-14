@@ -225,9 +225,13 @@ export function sceneContentSignature(project: ProjectState): string {
   const arraySignatureCache = sceneSignatureArrayCache
   const signatureForArray = (values: unknown[]): string => {
     const cached = arraySignatureCache.get(values)
-    if (cached) return cached
+    // Some high-volume edit transactions append to their private voxel array
+    // in place between animation frames. The array identity therefore is not
+    // by itself an immutable-cache key. At minimum, invalidate an append-only
+    // mutation when its length changes; replacement edits use a new array.
+    if (cached && cached.length === values.length) return cached.signature
     const signature = JSON.stringify(values)
-    arraySignatureCache.set(values, signature)
+    arraySignatureCache.set(values, { length: values.length, signature })
     return signature
   }
   const assetSignatures = project.assets
@@ -245,7 +249,7 @@ export function sceneContentSignature(project: ProjectState): string {
   })
 }
 
-const sceneSignatureArrayCache = new WeakMap<object, string>()
+const sceneSignatureArrayCache = new WeakMap<object, { length: number; signature: string }>()
 const sceneSignatureAssetCache = new WeakMap<object, string>()
 
 function signatureForAsset(asset: VoxelAsset): string {
