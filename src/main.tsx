@@ -900,9 +900,17 @@ const sharedVoxelBoxGeometry = new THREE.BoxGeometry(VOXEL_WORLD_SIZE, VOXEL_WOR
 sharedVoxelBoxGeometry.userData.sharedRuntimeGeometry = true
 const sharedVariantGeometryCache = new Map<string, THREE.BufferGeometry>()
 
-function variantMountingFaceCovered(voxel: Pick<Voxel, 'x' | 'y' | 'z' | 'facing'>, occupied: Set<string>): boolean {
+function variantMountingFaceCovered(voxel: Pick<Voxel, 'x' | 'y' | 'z' | 'facing'>, occupied: ReadonlyMap<string, Voxel>): boolean {
   const normal = VOXEL_FACE_FRAMES[voxelFacing(voxel)].normal
-  return occupied.has(`${voxel.x + normal[0]},${voxel.y + normal[1]},${voxel.z + normal[2]}`)
+  const neighbor = occupied.get(`${voxel.x + normal[0]},${voxel.y + normal[1]},${voxel.z + normal[2]}`)
+  if (!neighbor) return false
+  // A neighboring non-cube does not automatically cover this cell's square
+  // mounting face. Only omit the coplanar face when the neighbor is a cube or
+  // its own mounting face points exactly back at this voxel. Otherwise the
+  // two shapes can be adjacent while their visible surfaces are different,
+  // and removing the face produces the missing-texture artifact.
+  return voxelShape(neighbor) === 'cube'
+    || voxelFacing(neighbor) === oppositeVoxelFacing(voxelFacing(voxel))
 }
 
 function sharedVariantThreeGeometry(voxel: Voxel, includeMountingFace = true): THREE.BufferGeometry {
@@ -9421,7 +9429,11 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     // The hit normal points away from the existing voxel.  A newly placed
     // variant is adjacent in that direction, so its full square mounting
     // face must point back toward the hit voxel (the opposite normal).
-    if (!normal) return '-z'
+    // A ground placement is supported from below: the new shape's complete
+    // square mounting face rests on the floor, so its mounting normal is -Y
+    // in project coordinates. The old -Z fallback was a storage/render-axis
+    // mix-up and also made floor rotation use the wrong face basis.
+    if (!normal) return '-y'
     const axis = (['x', 'y', 'z'] as const).reduce((best, candidate) => Math.abs(normal[candidate]) > Math.abs(normal[best]) ? candidate : best, 'y' as 'x' | 'y' | 'z')
     return oppositeVoxelFacing(`${normal[axis] < 0 ? '-' : '+'}${axis}` as VoxelFacing)
   }
@@ -9487,8 +9499,12 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     }
     if (!context.floorPoint) return 0
     const continuous = worldToContinuousProject(context.floorPoint)
+    // The floor is the top surface of the virtual support cell. Its two
+    // meaningful coordinates are project X/Z, not project X/Y. Using the
+    // -Z frame here made v permanently equal to -0.5 because project Y is
+    // the height axis, so every click fell into the same rotation sector.
     const center = { x: Math.round(continuous.x), y: 0, z: Math.round(continuous.z) }
-    const local = faceLocalCoordinates('-z', continuous, center)
+    const local = faceLocalCoordinates('-y', continuous, center)
     return rotationFromFaceLocalCoordinates(local.u, local.v)
   }
 
@@ -9560,6 +9576,15 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
           : hit.voxel
       const point = projectVoxelToPlane(shapeDrawingPlane, anchor)
       return { point: clampPlanePointToGround(shapeDrawingPlane, point), anchor, context }
+    }
+    // Keep the exact floor point in the gesture context. The fixed-layer
+    // fast path intentionally avoids a second occupancy query and therefore
+    // cannot provide it by itself, but shape orientation needs the sub-cell
+    // click position for its four-way rotation.
+    if (context?.floorPoint) {
+      const projectPoint = worldToProjectVoxel(context.floorPoint)
+      const projected = projectVoxelToPlane(shapeDrawingPlane, { ...projectPoint, y: 0 })
+      return { point: clampPlanePointToGround(shapeDrawingPlane, projected), context }
     }
     return pointerDrawingPoint(event, operation, 0, shapeDrawingPlane)
   }
@@ -11046,6 +11071,7 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
   componentGroup.userData.customComponentVoxels = component
   if (component.some((voxel) => voxelShape(voxel) !== 'cube')) {
     const occupied = new Set(component.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
+    const occupiedVoxels = new Map(component.map((voxel) => [`${voxel.x},${voxel.y},${voxel.z}`, voxel] as const))
     const cubeBatches = new Map<string, { color: THREE.Color; voxels: Voxel[] }>()
     const variantBatches = new Map<string, { color: THREE.Color; voxel: Voxel; voxels: Voxel[]; includeMountingFace: boolean }>()
     component.forEach((voxel) => {
@@ -11057,7 +11083,7 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
         cubeBatches.set(key, batch)
         return
       }
-      const includeMountingFace = !variantMountingFaceCovered(voxel, occupied)
+      const includeMountingFace = !variantMountingFaceCovered(voxel, occupiedVoxels)
       const key = `${variantKey(voxel)}:${color.getHexString()}:${includeMountingFace ? 'closed' : 'open'}`
       const batch = variantBatches.get(key) ?? { color, voxel, voxels: [], includeMountingFace }
       batch.voxels.push(voxel)
@@ -11334,6 +11360,7 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
     const preserveVoxelCells = component.some((voxel) => voxel.preserveVoxelCells)
     if (component.some((voxel) => voxelShape(voxel) !== 'cube')) {
       const occupied = new Set(component.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
+      const occupiedVoxels = new Map(component.map((voxel) => [`${voxel.x},${voxel.y},${voxel.z}`, voxel] as const))
       const cubeBatches = new Map<string, { color: THREE.Color; voxels: Voxel[] }>()
       const variantBatches = new Map<string, { color: THREE.Color; voxel: Voxel; voxels: Voxel[]; includeMountingFace: boolean }>()
       component.forEach((voxel) => {
@@ -11345,7 +11372,7 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
           cubeBatches.set(key, batch)
           return
         }
-        const includeMountingFace = !variantMountingFaceCovered(voxel, occupied)
+        const includeMountingFace = !variantMountingFaceCovered(voxel, occupiedVoxels)
         const key = `${variantKey(voxel)}:${color.getHexString()}:${includeMountingFace ? 'closed' : 'open'}`
         const batch = variantBatches.get(key) ?? { color, voxel, voxels: [], includeMountingFace }
         batch.voxels.push(voxel)
