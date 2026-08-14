@@ -298,7 +298,7 @@ export async function encodeGlb(asset: VoxelAsset, colorResolver: ColorResolver 
   asset.voxels.forEach((voxel) => {
     const color = hexRgb(colorResolver(voxel))
     if (voxelShape(voxel) !== 'cube') {
-      const source = buildVariantGeometry(voxelShape(voxel) as Exclude<ReturnType<typeof voxelShape>, 'cube'>, voxelFacing(voxel), voxelRotation(voxel), voxel.variantId ?? 'isolated')
+      const source = buildVariantGeometry(voxelShape(voxel) as Exclude<ReturnType<typeof voxelShape>, 'cube'>, voxelFacing(voxel), voxelRotation(voxel))
       for (let index = 0; index < source.indices.length; index += 3) {
         const triangle = [source.indices[index], source.indices[index + 1], source.indices[index + 2]]
         triangle.forEach((sourceIndex) => {

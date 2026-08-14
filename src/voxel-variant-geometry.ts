@@ -1,4 +1,4 @@
-import type { VoxelFacing, VoxelRotation, VoxelShape } from './voxel-variants'
+import { VOXEL_FACE_FRAMES, type VoxelFacing, type VoxelRotation, type VoxelShape } from './voxel-variants'
 
 export type VariantGeometry = { positions: number[]; normals: number[]; indices: number[] }
 type P = [number, number, number]
@@ -15,80 +15,114 @@ const addTri = (positions: number[], normals: number[], indices: number[], a: P,
   ;[a, b, c].forEach(() => normals.push(...normal))
   indices.push(start, start + 1, start + 2)
 }
-const addBox = (positions: number[], normals: number[], indices: number[], min: P, max: P) => {
-  const [x0, y0, z0] = min, [x1, y1, z1] = max
-  addQuad(positions, normals, indices, [x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [0, -1, 0])
-  addQuad(positions, normals, indices, [x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [0, 1, 0])
-  addQuad(positions, normals, indices, [x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [-1, 0, 0])
-  addQuad(positions, normals, indices, [x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1], [1, 0, 0])
-  addQuad(positions, normals, indices, [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0], [0, 0, -1])
-  addQuad(positions, normals, indices, [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [0, 0, 1])
+const normalize = (v: P): P => { const length = Math.hypot(...v); return length ? [v[0] / length, v[1] / length, v[2] / length] : [0, 0, 0] }
+
+/**
+ * Extrude a closed 2D profile through the local v axis.
+ *
+ * The profile is expressed as [u, 0, n] and is counter-clockwise in the
+ * (u,n) plane. Its u=0 edge is the complete square face that is attached to
+ * the face selected by the user. The other profile edges describe the shape
+ * that extends away from that face.
+ */
+function addExtrudedProfile(
+  positions: number[],
+  normals: number[],
+  indices: number[],
+  profile: P[],
+  capTriangles: Array<[number, number, number]>,
+  includeMountingFace = true,
+) {
+  const front = profile.map(([u, _v, n]) => [u, 0, n] as P)
+  const back = profile.map(([u, _v, n]) => [u, 1, n] as P)
+
+  capTriangles.forEach(([a, b, c]) => {
+    addTri(positions, normals, indices, front[a], front[b], front[c], [0, -1, 0])
+    addTri(positions, normals, indices, back[a], back[c], back[b], [0, 1, 0])
+  })
+
+  for (let index = 0; index < profile.length; index += 1) {
+    const next = (index + 1) % profile.length
+    const [u0, _v0, n0] = profile[index]
+    const [u1, _v1, n1] = profile[next]
+    // The profile edge at u=0 is the complete square face that mounts
+    // against the voxel selected by the user.  It is part of the closed
+    // export mesh, but the realtime renderer can omit it when a neighbouring
+    // occupied voxel already owns the coplanar face.
+    if (!includeMountingFace && Math.abs(u0) < 1e-7 && Math.abs(u1) < 1e-7) continue
+    const outward = normalize([n1 - n0, 0, -(u1 - u0)])
+    addQuad(positions, normals, indices, front[index], back[index], back[next], front[next], outward)
+  }
 }
 
-const cross = (a: P, b: P): P => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-const normalize = (v: P): P => { const length = Math.hypot(...v); return length ? [v[0] / length, v[1] / length, v[2] / length] : [0, 0, 0] }
-const sub = (a: P, b: P): P => [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-
-function canonical(shape: Exclude<VoxelShape, 'cube'>): VariantGeometry {
+function canonical(shape: Exclude<VoxelShape, 'cube'>, includeMountingFace = true): VariantGeometry {
   const positions: number[] = [], normals: number[] = [], indices: number[] = []
   if (shape === 'tri-prism') {
-    // Right triangular prism: z <= x, extruded along local Y.
-    const a: P = [0, 0, 0], b: P = [1, 0, 0], c: P = [1, 0, 1]
-    const d: P = [0, 1, 0], e: P = [1, 1, 0], f: P = [1, 1, 1]
-    addQuad(positions, normals, indices, a, b, e, d, [0, -1, 0])
-    addQuad(positions, normals, indices, b, c, f, e, normalize([1, 0, -1]))
-    addQuad(positions, normals, indices, a, d, f, c, normalize([-1, 0, 1]))
-    addTri(positions, normals, indices, a, c, b, [0, 0, -1])
-    addTri(positions, normals, indices, d, e, f, [0, 0, 1])
+    // The profile is a right triangle of area 1/2. Its top edge n=1 is the
+    // complete square mounting face; the hypotenuse is the ramp. At rotation
+    // 0 the thick/high side is on the left, so the ramp descends to the right.
+    const profile: P[] = [[0, 0, 0], [1, 0, 1], [0, 0, 1]]
+    addExtrudedProfile(positions, normals, indices, profile, [[0, 1, 2]], includeMountingFace)
   } else if (shape === 'quarter-cylinder') {
     const segments = 12
-    const bottomCenter: P = [0, 0, 0]
-    const topCenter: P = [0, 0, 1]
+    // A quarter disk in the (u,n) cross-section, extruded along v. The arc
+    // starts at the thick/high left side and ends at the thin right side.
+    const profile: P[] = [[0, 0, 0]]
     for (let index = 0; index < segments; index += 1) {
-      const a = index * Math.PI / 2 / segments, b = (index + 1) * Math.PI / 2 / segments
-      const p1: P = [Math.cos(a), Math.sin(a), 0], p2: P = [Math.cos(b), Math.sin(b), 0]
-      const q1: P = [p1[0], p1[1], 1], q2: P = [p2[0], p2[1], 1]
-      addQuad(positions, normals, indices, p1, p2, q2, q1, normalize([Math.cos((a + b) / 2), Math.sin((a + b) / 2), 0]))
-      addTri(positions, normals, indices, bottomCenter, p2, p1, [0, 0, -1])
-      addTri(positions, normals, indices, topCenter, q1, q2, [0, 0, 1])
+      const angle = (index + 1) * Math.PI / 2 / segments
+      profile.push([Math.sin(angle), 0, 1 - Math.cos(angle)])
     }
-    addQuad(positions, normals, indices, [0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1], [0, -1, 0])
-    addQuad(positions, normals, indices, [0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0], [-1, 0, 0])
+    profile.push([0, 0, 1])
+    const capTriangles: Array<[number, number, number]> = []
+    for (let index = 1; index < profile.length - 1; index += 1) capTriangles.push([0, index, index + 1])
+    addExtrudedProfile(positions, normals, indices, profile, capTriangles, includeMountingFace)
   } else {
-    // Lower half full; upper half occupies x=[0,.5]: 3/4 cell volume.
-    addBox(positions, normals, indices, [0, 0, 0], [1, 0.5, 1])
-    addBox(positions, normals, indices, [0, 0.5, 0], [0.5, 1, 1])
+    // A concave stepped profile with area 3/4: the left half fills the
+    // complete depth, while the right half keeps only the outer half. The
+    // mounting edge n=1 still spans the entire u range.
+    const profile: P[] = [[0, 0, 0], [0.5, 0, 0], [0.5, 0, 0.5], [1, 0, 0.5], [1, 0, 1], [0, 0, 1]]
+    addExtrudedProfile(positions, normals, indices, profile, [
+      [0, 1, 2], [0, 2, 5], [2, 3, 4], [2, 4, 5],
+    ], includeMountingFace)
   }
   return { positions, normals, indices }
 }
 
-const basis: Record<VoxelFacing, { right: P; up: P; normal: P }> = {
-  '+x': { right: [0, 0, -1], up: [0, 1, 0], normal: [1, 0, 0] },
-  '-x': { right: [0, 0, 1], up: [0, 1, 0], normal: [-1, 0, 0] },
-  '+y': { right: [1, 0, 0], up: [0, 0, 1], normal: [0, 1, 0] },
-  '-y': { right: [1, 0, 0], up: [0, 0, -1], normal: [0, -1, 0] },
-  '+z': { right: [1, 0, 0], up: [0, 1, 0], normal: [0, 0, 1] },
-  '-z': { right: [-1, 0, 0], up: [0, 1, 0], normal: [0, 0, -1] },
-}
-
 function transformPoint(point: P, facing: VoxelFacing, rotation: VoxelRotation): P {
-  const frame = basis[facing]
-  const u = point[0] - 0.5, v = point[1] - 0.5, n = point[2] - 0.5
+  const frame = VOXEL_FACE_FRAMES[facing]
+  // The canonical profile uses u as the depth axis.  Its u=0 edge is the
+  // complete square mounting face; v/n are the two coordinates on that
+  // face.  Rotate v/n around the face normal, never u/v as the old path did.
+  const depth = point[0] - 0.5, faceRight = point[1] - 0.5, faceUp = point[2] - 0.5
   const angle = rotation * Math.PI / 2
-  const ru = u * Math.cos(angle) - v * Math.sin(angle), rv = u * Math.sin(angle) + v * Math.cos(angle)
-  return [0.5 + frame.right[0] * ru + frame.up[0] * rv + frame.normal[0] * n, 0.5 + frame.right[1] * ru + frame.up[1] * rv + frame.normal[1] * n, 0.5 + frame.right[2] * ru + frame.up[2] * rv + frame.normal[2] * n]
+  const rotatedRight = faceRight * Math.cos(angle) - faceUp * Math.sin(angle)
+  const rotatedUp = faceRight * Math.sin(angle) + faceUp * Math.cos(angle)
+  // The mounting face is at u=0 and has local outward normal -u.  Mapping
+  // -u to frame.normal makes `facing` describe the actual face touching the
+  // neighbouring voxel, while the shape extends into the opposite side of
+  // the cell.
+  return [
+    0.5 - frame.normal[0] * depth + frame.right[0] * rotatedRight + frame.up[0] * rotatedUp,
+    0.5 - frame.normal[1] * depth + frame.right[1] * rotatedRight + frame.up[1] * rotatedUp,
+    0.5 - frame.normal[2] * depth + frame.right[2] * rotatedRight + frame.up[2] * rotatedUp,
+  ]
 }
 
 function transformNormal(normal: P, facing: VoxelFacing, rotation: VoxelRotation): P {
-  const frame = basis[facing]
+  const frame = VOXEL_FACE_FRAMES[facing]
   const angle = rotation * Math.PI / 2
-  const ru = normal[0] * Math.cos(angle) - normal[1] * Math.sin(angle), rv = normal[0] * Math.sin(angle) + normal[1] * Math.cos(angle)
-  return normalize([frame.right[0] * ru + frame.up[0] * rv + frame.normal[0] * normal[2], frame.right[1] * ru + frame.up[1] * rv + frame.normal[1] * normal[2], frame.right[2] * ru + frame.up[2] * rv + frame.normal[2] * normal[2]])
+  const rotatedRight = normal[1] * Math.cos(angle) - normal[2] * Math.sin(angle)
+  const rotatedUp = normal[1] * Math.sin(angle) + normal[2] * Math.cos(angle)
+  return normalize([
+    -frame.normal[0] * normal[0] + frame.right[0] * rotatedRight + frame.up[0] * rotatedUp,
+    -frame.normal[1] * normal[0] + frame.right[1] * rotatedRight + frame.up[1] * rotatedUp,
+    -frame.normal[2] * normal[0] + frame.right[2] * rotatedRight + frame.up[2] * rotatedUp,
+  ])
 }
 
 /** Returns unit-cell geometry in Three world-local coordinates (storage X/Z/Y mapping applied). */
-export function buildVariantGeometry(shape: Exclude<VoxelShape, 'cube'>, facing: VoxelFacing = '+y', rotation: VoxelRotation = 0, variantId = 'isolated'): VariantGeometry {
-  const source = canonical(shape)
+export function buildVariantGeometry(shape: Exclude<VoxelShape, 'cube'>, facing: VoxelFacing = '+y', rotation: VoxelRotation = 0, includeMountingFace = true): VariantGeometry {
+  const source = canonical(shape, includeMountingFace)
   const positions: number[] = [], normals: number[] = []
   for (let index = 0; index < source.positions.length; index += 3) {
     const storage = transformPoint([source.positions[index], source.positions[index + 1], source.positions[index + 2]], facing, rotation)
@@ -96,14 +130,13 @@ export function buildVariantGeometry(shape: Exclude<VoxelShape, 'cube'>, facing:
     const normal = transformNormal([source.normals[index], source.normals[index + 1], source.normals[index + 2]], facing, rotation)
     normals.push(normal[0], normal[2], normal[1])
   }
-  // Derived topology variants use deterministic mirrored/turned local geometry.
-  // Keeping this small and shared avoids generating a separate mesh for every cell.
-  if (variantId === 'corner' || variantId === 'outer' || variantId === 'mirror') {
-    for (let index = 0; index < positions.length; index += 3) positions[index] = 1 - positions[index]
-  }
+  // The mounting-frame transform itself reverses orientation once (the
+  // profile's +u axis points away from the mounting face), and the storage
+  // X/Y/Z -> Three X/Z/Y permutation reverses it a second time. The two
+  // reflections cancel, so the canonical triangle winding remains valid.
   return { positions, normals, indices: source.indices }
 }
 
-export function variantGeometryCacheKey(shape: Exclude<VoxelShape, 'cube'>, facing: VoxelFacing, rotation: VoxelRotation, variantId: string): string {
-  return `${shape}:${facing}:${rotation}:${variantId}`
+export function variantGeometryCacheKey(shape: Exclude<VoxelShape, 'cube'>, facing: VoxelFacing, rotation: VoxelRotation, includeMountingFace = true): string {
+  return `${shape}:${facing}:${rotation}:${includeMountingFace ? 'closed' : 'open'}`
 }

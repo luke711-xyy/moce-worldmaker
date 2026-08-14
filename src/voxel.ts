@@ -25,8 +25,6 @@ export type Voxel = {
   shape?: import('./voxel-variants').VoxelShape
   facing?: import('./voxel-variants').VoxelFacing
   rotation?: import('./voxel-variants').VoxelRotation
-  neighborMask?: number
-  variantId?: string
 }
 
 export type VoxelNormal = Pick<Voxel, 'x' | 'y' | 'z'>
@@ -726,8 +724,6 @@ export function resolveInstanceVoxels(asset: VoxelAsset, overrides: VoxelOverrid
           shape: override.shape,
           facing: override.facing,
           rotation: override.rotation,
-          neighborMask: override.neighborMask,
-          variantId: override.variantId,
         } : {}),
       })
     }
@@ -1915,7 +1911,7 @@ function stlMeshFromVariants(voxels: Voxel[]): { vertices: StlPoint[]; triangles
   const triangles = [...mesh.triangles]
   for (const voxel of voxels) {
     if (voxelShape(voxel) === 'cube') continue
-    const source = buildVariantGeometry(voxelShape(voxel) as Exclude<ReturnType<typeof voxelShape>, 'cube'>, voxelFacing(voxel), voxelRotation(voxel), voxel.variantId ?? 'isolated')
+    const source = buildVariantGeometry(voxelShape(voxel) as Exclude<ReturnType<typeof voxelShape>, 'cube'>, voxelFacing(voxel), voxelRotation(voxel))
     const start = vertices.length
     for (let index = 0; index < source.positions.length; index += 3) {
       // Runtime geometry is expressed as Three X/Z/Y. STL remains in the

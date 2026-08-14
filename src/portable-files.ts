@@ -75,8 +75,6 @@ function validateVoxel(value: unknown, label: string) {
   if (voxel.shape !== undefined && (typeof voxel.shape !== 'string' || !['cube', 'tri-prism', 'quarter-cylinder', 'stair'].includes(voxel.shape))) throw new PortableFileError(`${label}.shape无效`)
   if (voxel.facing !== undefined && (typeof voxel.facing !== 'string' || !['+x', '-x', '+y', '-y', '+z', '-z'].includes(voxel.facing))) throw new PortableFileError(`${label}.facing无效`)
   if (voxel.rotation !== undefined && (typeof voxel.rotation !== 'number' || ![0, 1, 2, 3].includes(voxel.rotation))) throw new PortableFileError(`${label}.rotation无效`)
-  if (voxel.neighborMask !== undefined && (typeof voxel.neighborMask !== 'number' || !Number.isInteger(voxel.neighborMask) || voxel.neighborMask < 0 || voxel.neighborMask > 63)) throw new PortableFileError(`${label}.neighborMask无效`)
-  if (voxel.variantId !== undefined) text(voxel.variantId, `${label}.variantId`)
 }
 
 function validateAsset(value: unknown, label: string): asserts value is VoxelAsset {

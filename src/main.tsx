@@ -19,7 +19,7 @@ import { MAX_PREVIEW_VOXELS, mergePreviewFaceCells, previewVoxelKey, selectPrevi
 import { clearLocalSceneDraft, LocalSceneDraft, LocalSceneRef, readLocalSceneDraft, readLocalSceneRef, writeLocalSceneDraft, writeLocalSceneRef } from './local-scene-session'
 import { commitNumericDraft, sanitizeNumericDraft } from './numeric-input'
 import { DrawingPlane, DrawOperation, EDITOR_GROUND_PLANE, VoxelAxis, VoxelTool, clampPlanePointToGround, exteriorAirKeys, exteriorSurfaceVoxels, makePlaneVoxel, planeAxes, projectVoxelToPlane, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine, rasterizePlanarStroke, selectExtrudeLayer, signedExtrudeDelta, toolCellKey, uniqueVoxels } from './voxel-tools'
-import { VoxelFacing, VoxelRotation, VoxelShape, applyVoxelVariant, hasNonCubeVoxels, makeVoxelVariant, recomputeVoxelVariants, rotationFromScreenDelta, voxelFacing, voxelRotation, voxelShape, variantKey } from './voxel-variants'
+import { VoxelFacing, VoxelRotation, VoxelShape, VOXEL_FACE_FRAMES, applyVoxelVariant, faceLocalCoordinates, hasNonCubeVoxels, makeVoxelVariant, oppositeVoxelFacing, rotationFromFaceLocalCoordinates, voxelFacing, voxelRotation, voxelShape, variantKey } from './voxel-variants'
 import { buildVariantGeometry, variantGeometryCacheKey } from './voxel-variant-geometry'
 import { VoxelToolsGeometryResult, VoxelToolsWorkerClient, VoxelToolsShapeRequest } from './runtime/voxel-tools-client'
 import { adjustHexHsl, hexToHsl } from './color-utils'
@@ -115,7 +115,6 @@ type DrawingGesture = {
   operation?: DrawOperation
   variantFacing?: VoxelFacing
   variantRotation?: VoxelRotation
-  variantRotationLocked?: boolean
 }
 
 type GridMoveResult = {
@@ -901,12 +900,17 @@ const sharedVoxelBoxGeometry = new THREE.BoxGeometry(VOXEL_WORLD_SIZE, VOXEL_WOR
 sharedVoxelBoxGeometry.userData.sharedRuntimeGeometry = true
 const sharedVariantGeometryCache = new Map<string, THREE.BufferGeometry>()
 
-function sharedVariantThreeGeometry(voxel: Voxel): THREE.BufferGeometry {
+function variantMountingFaceCovered(voxel: Pick<Voxel, 'x' | 'y' | 'z' | 'facing'>, occupied: Set<string>): boolean {
+  const normal = VOXEL_FACE_FRAMES[voxelFacing(voxel)].normal
+  return occupied.has(`${voxel.x + normal[0]},${voxel.y + normal[1]},${voxel.z + normal[2]}`)
+}
+
+function sharedVariantThreeGeometry(voxel: Voxel, includeMountingFace = true): THREE.BufferGeometry {
   const shape = voxelShape(voxel)
-  const key = variantGeometryCacheKey(shape as Exclude<VoxelShape, 'cube'>, voxelFacing(voxel), voxelRotation(voxel), voxel.variantId ?? 'default')
+  const key = variantGeometryCacheKey(shape as Exclude<VoxelShape, 'cube'>, voxelFacing(voxel), voxelRotation(voxel), includeMountingFace)
   const cached = sharedVariantGeometryCache.get(key)
   if (cached) return cached
-  const source = buildVariantGeometry(shape as Exclude<VoxelShape, 'cube'>, voxelFacing(voxel), voxelRotation(voxel), voxel.variantId ?? 'default')
+  const source = buildVariantGeometry(shape as Exclude<VoxelShape, 'cube'>, voxelFacing(voxel), voxelRotation(voxel), includeMountingFace)
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(source.positions.map((value) => value * VOXEL_WORLD_SIZE), 3))
   geometry.setAttribute('normal', new THREE.Float32BufferAttribute(source.normals, 3))
@@ -2507,24 +2511,10 @@ function App() {
         .filter((item) => storedTargetKeys.has(`${voxelEntityId(item)}:${sceneVoxelKey(item)}`))
         .map((item) => voxelEntityId(item)))
       const remaining = draft.customVoxels.filter((item) => !storedTargetKeys.has(`${voxelEntityId(item)}:${sceneVoxelKey(item)}`))
-      const changedByEntity = new Map<string, Set<string>>()
-      storedTargetKeys.forEach((key) => {
-        const separator = key.indexOf(':')
-        if (separator < 0) return
-        const entityId = key.slice(0, separator)
-        const cell = key.slice(separator + 1)
-        const changed = changedByEntity.get(entityId) ?? new Set<string>()
-        changed.add(cell)
-        changedByEntity.set(entityId, changed)
-      })
-      if (changedByEntity.size) {
-        const updatedByKey = new Map<string, Voxel>()
-        changedByEntity.forEach((changed, entityId) => {
-          const entityVoxels = remaining.filter((item) => voxelEntityId(item) === entityId)
-          recomputeVoxelVariants(entityVoxels, changed).forEach((item) => updatedByKey.set(`${entityId}:${sceneVoxelKey(item)}`, item))
-        })
-        draft.customVoxels = remaining.map((item) => updatedByKey.get(`${voxelEntityId(item)}:${sceneVoxelKey(item)}`) ?? item)
-      } else draft.customVoxels = remaining
+      // Shape variants are determined at placement time from the clicked face.
+      // Erasing a neighbour must not recalculate or mirror the remaining
+      // shapes: topology-derived corner/tee variants are intentionally gone.
+      draft.customVoxels = remaining
       // A manually drawn entity keeps its identity after an erasure, even if
       // removing a junction leaves disconnected voxel islands. Splitting the
       // entity here makes only the first island match editEntityId, so the
@@ -2663,14 +2653,6 @@ function App() {
             draft.customVoxels.push(sceneToStoredCustomVoxel(draft, { ...voxel, entityId }, entityId))
             occupiedCustomSceneKeys.add(sceneVoxelKey(voxel))
           })
-          if (filteredInsertable.some((voxel) => voxelShape(voxel) !== 'cube')) {
-            const entityVoxels = draft.customVoxels.filter((voxel) => voxelEntityId(voxel) === entityId)
-            const offset = customEntityOffset(draft, entityId)
-            const changed = new Set(filteredInsertable.map((voxel) => `${voxel.x - offset.x},${voxel.y - offset.y},${voxel.z - offset.z}`))
-            const updated = recomputeVoxelVariants(entityVoxels, changed)
-            const byKey = new Map(updated.map((voxel) => [`${voxel.x},${voxel.y},${voxel.z}`, voxel]))
-            draft.customVoxels = draft.customVoxels.map((voxel) => voxelEntityId(voxel) === entityId ? byKey.get(`${voxel.x},${voxel.y},${voxel.z}`) ?? voxel : voxel)
-          }
           if (editAssemblyId) {
             const assembly = (draft.assemblies ?? []).find((item) => item.id === editAssemblyId)
             if (assembly && !assembly.memberKeys.includes(`voxel:${entityId}`)) assembly.memberKeys.push(`voxel:${entityId}`)
@@ -2714,8 +2696,6 @@ function App() {
               shape: voxel.shape,
               facing: voxel.facing,
               rotation: voxel.rotation,
-              neighborMask: voxel.neighborMask,
-              variantId: voxel.variantId,
             } : {}),
           })
           assetTargets.set(part.instanceId, targets)
@@ -9438,9 +9418,12 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   // drawing plane remains reserved for brush, erase and line tools.
   const shapeDrawingPlane = EDITOR_GROUND_PLANE
   const facingFromHitNormal = (normal?: Pick<Voxel, 'x' | 'y' | 'z'>): VoxelFacing => {
-    if (!normal) return '+y'
+    // The hit normal points away from the existing voxel.  A newly placed
+    // variant is adjacent in that direction, so its full square mounting
+    // face must point back toward the hit voxel (the opposite normal).
+    if (!normal) return '-z'
     const axis = (['x', 'y', 'z'] as const).reduce((best, candidate) => Math.abs(normal[candidate]) > Math.abs(normal[best]) ? candidate : best, 'y' as 'x' | 'y' | 'z')
-    return `${normal[axis] < 0 ? '-' : '+'}${axis}` as VoxelFacing
+    return oppositeVoxelFacing(`${normal[axis] < 0 ? '-' : '+'}${axis}` as VoxelFacing)
   }
   const decorateVariantVoxels = (voxels: Voxel[], gesture: DrawingGesture, operation: DrawOperation): Voxel[] => {
     if (operation !== 'add' || voxelBrushShape === 'cube' || !['brush', 'line', 'cuboid', 'sphere'].includes(tool)) return voxels
@@ -9460,6 +9443,54 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   }
 
   const worldToProjectVoxel = (world: THREE.Vector3) => ({ x: worldToVoxelCell(world.x), y: worldToVoxelCell(world.z), z: worldToVoxelCell(world.y) })
+
+  const worldToContinuousProject = (world: THREE.Vector3) => ({
+    x: world.x / VOXEL_WORLD_SIZE - 0.5,
+    y: world.z / VOXEL_WORLD_SIZE - 0.5,
+    z: world.y / VOXEL_WORLD_SIZE - 0.5,
+  })
+
+  /**
+   * Resolve the four-way variant rotation from the point clicked on the
+   * logical voxel face. The face is split by its two diagonals into four
+   * triangles; dragging is deliberately not involved in this decision.
+   */
+  const rotationFromPointerFace = (
+    context: { voxelHit: SceneVoxelRayHit | null; floorPoint: THREE.Vector3 | null },
+    facing: VoxelFacing,
+  ): VoxelRotation => {
+    const hit = context.voxelHit
+    if (hit) {
+      const frame = VOXEL_FACE_FRAMES[facing]
+      // The mounting face belongs to the newly placed adjacent voxel.  Its
+      // center is one cell along the hit normal; using the hit voxel center
+      // here would sample the opposite face and make the orientation appear
+      // mirrored/disconnected.
+      const target = adjacentVoxel(hit.voxel, hit.normal)
+      const center = toSceneWorld(
+        voxelCenterToWorld(target.x),
+        voxelCenterToWorld(target.y),
+        voxelCenterToWorld(target.z),
+      )
+      const normal = new THREE.Vector3(frame.normal[0], frame.normal[2], frame.normal[1])
+      const facePlane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+        normal,
+        center.clone().addScaledVector(normal, VOXEL_WORLD_SIZE / 2),
+      )
+      const point = raycasterRef.current.ray.intersectPlane(facePlane, new THREE.Vector3())
+      if (point) {
+        const continuous = worldToContinuousProject(point)
+        const local = faceLocalCoordinates(facing, continuous, target)
+        return rotationFromFaceLocalCoordinates(local.u, local.v)
+      }
+      return 0
+    }
+    if (!context.floorPoint) return 0
+    const continuous = worldToContinuousProject(context.floorPoint)
+    const center = { x: Math.round(continuous.x), y: 0, z: Math.round(continuous.z) }
+    const local = faceLocalCoordinates('-z', continuous, center)
+    return rotationFromFaceLocalCoordinates(local.u, local.v)
+  }
 
   const pointerDrawingPoint = (event: { clientX: number; clientY: number }, operation: DrawOperation | 'extrude', fixedLayer?: number, plane: DrawingPlane = drawingPlane) => {
     // Once a gesture has a fixed layer, the pointer is no longer allowed to
@@ -9831,14 +9862,6 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   const processDrawingGestureMove = (event: { pointerId: number; clientX: number; clientY: number }) => {
     const drawingGesture = drawingGestureRef.current
     if (!drawingGesture || drawingGesture.pointerId !== event.pointerId) return
-    if (!drawingGesture.variantRotationLocked && drawOperation === 'add' && voxelBrushShape !== 'cube' && ['brush', 'line', 'cuboid', 'sphere'].includes(tool)) {
-      const deltaX = event.clientX - drawingGesture.startClientX
-      const deltaY = event.clientY - drawingGesture.startClientY
-      if (Math.hypot(deltaX, deltaY) >= 4) {
-        drawingGesture.variantRotation = rotationFromScreenDelta(deltaX, deltaY)
-        drawingGesture.variantRotationLocked = true
-      }
-    }
     if (tool === 'cuboid' && drawingGesture.stage === 'depth') {
       const layer = drawingLayerFromPointer(drawingGesture, event)
       drawingGesture.current = { ...(drawingGesture.footprintEnd ?? drawingGesture.start), layer }
@@ -10484,9 +10507,13 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       extrudeStartScreen: tool === 'extrude' ? { x: event.clientX, y: event.clientY } : undefined,
       extrudeScreenVector: extrudeState?.screenVector,
       operation: drawOperation,
-      variantFacing: facingFromHitNormal(drawing?.context.voxelHit?.normal),
-      variantRotation: 0,
-      variantRotationLocked: false,
+      // The second pointer-down of a cuboid is only the height phase. Keep
+      // the face and quarter-turn selected by its footprint click instead of
+      // resetting the variant because that phase has no new ray hit.
+      variantFacing: existingCuboid?.variantFacing ?? facingFromHitNormal(drawing?.context.voxelHit?.normal),
+      variantRotation: existingCuboid?.variantRotation ?? (drawing
+        ? rotationFromPointerFace(drawing.context, facingFromHitNormal(drawing.context.voxelHit?.normal))
+        : 0),
     }
     const activeGesture = drawingGestureRef.current
     editStrokeVisitedRef.current.clear()
@@ -11020,7 +11047,7 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
   if (component.some((voxel) => voxelShape(voxel) !== 'cube')) {
     const occupied = new Set(component.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
     const cubeBatches = new Map<string, { color: THREE.Color; voxels: Voxel[] }>()
-    const variantBatches = new Map<string, { color: THREE.Color; voxel: Voxel; voxels: Voxel[] }>()
+    const variantBatches = new Map<string, { color: THREE.Color; voxel: Voxel; voxels: Voxel[]; includeMountingFace: boolean }>()
     component.forEach((voxel) => {
       const color = new THREE.Color(customVoxelRenderColorKey(voxel, materialMap, componentColor))
       if (voxelShape(voxel) === 'cube') {
@@ -11030,8 +11057,9 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
         cubeBatches.set(key, batch)
         return
       }
-      const key = `${variantKey(voxel)}:${color.getHexString()}`
-      const batch = variantBatches.get(key) ?? { color, voxel, voxels: [] }
+      const includeMountingFace = !variantMountingFaceCovered(voxel, occupied)
+      const key = `${variantKey(voxel)}:${color.getHexString()}:${includeMountingFace ? 'closed' : 'open'}`
+      const batch = variantBatches.get(key) ?? { color, voxel, voxels: [], includeMountingFace }
       batch.voxels.push(voxel)
       variantBatches.set(key, batch)
     })
@@ -11050,8 +11078,8 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
       mesh.userData.outerVoxel = voxels.some((voxel) => exposedVoxelFaces(voxel, occupied).length > 0)
       componentGroup.add(mesh)
     })
-    variantBatches.forEach(({ color, voxel, voxels }) => {
-      const mesh = new THREE.InstancedMesh(sharedVariantThreeGeometry(voxel), new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03 }), voxels.length)
+    variantBatches.forEach(({ color, voxel, voxels, includeMountingFace }) => {
+      const mesh = new THREE.InstancedMesh(sharedVariantThreeGeometry(voxel, includeMountingFace), new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }), voxels.length)
       voxels.forEach((cell, index) => {
         matrix.makeTranslation((cell.x - origin.x) * VOXEL_WORLD_SIZE, (cell.z - origin.z) * VOXEL_WORLD_SIZE, (cell.y - origin.y) * VOXEL_WORLD_SIZE)
         mesh.setMatrixAt(index, matrix)
@@ -11307,7 +11335,7 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
     if (component.some((voxel) => voxelShape(voxel) !== 'cube')) {
       const occupied = new Set(component.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
       const cubeBatches = new Map<string, { color: THREE.Color; voxels: Voxel[] }>()
-      const variantBatches = new Map<string, { color: THREE.Color; voxel: Voxel; voxels: Voxel[] }>()
+      const variantBatches = new Map<string, { color: THREE.Color; voxel: Voxel; voxels: Voxel[]; includeMountingFace: boolean }>()
       component.forEach((voxel) => {
         const color = renderAssetVoxelColor(voxel, asset, materialMap, colorOverride)
         if (voxelShape(voxel) === 'cube') {
@@ -11317,8 +11345,9 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
           cubeBatches.set(key, batch)
           return
         }
-        const key = `${variantKey(voxel)}:${color.getHexString()}`
-        const batch = variantBatches.get(key) ?? { color, voxel, voxels: [] }
+        const includeMountingFace = !variantMountingFaceCovered(voxel, occupied)
+        const key = `${variantKey(voxel)}:${color.getHexString()}:${includeMountingFace ? 'closed' : 'open'}`
+        const batch = variantBatches.get(key) ?? { color, voxel, voxels: [], includeMountingFace }
         batch.voxels.push(voxel)
         variantBatches.set(key, batch)
       })
@@ -11348,8 +11377,8 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
         mesh.userData.outerVoxel = voxels.some((voxel) => exposedVoxelFaces(voxel, occupied).length > 0)
         partGroup.add(mesh)
       })
-      variantBatches.forEach(({ color, voxel, voxels }) => {
-        const mesh = new THREE.InstancedMesh(sharedVariantThreeGeometry(voxel), new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03 }), voxels.length)
+      variantBatches.forEach(({ color, voxel, voxels, includeMountingFace }) => {
+        const mesh = new THREE.InstancedMesh(sharedVariantThreeGeometry(voxel, includeMountingFace), new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }), voxels.length)
         voxels.forEach((cell, index) => {
           setLocalMatrix(cell, matrix)
           mesh.setMatrixAt(index, matrix)
