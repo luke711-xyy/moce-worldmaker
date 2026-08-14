@@ -59,6 +59,15 @@ describe('SceneOccupancyIndex', () => {
     expect(index.collidesTranslatedProjectVoxels(dense, { x: 1, y: 0, z: 0 }, ['dense'])).toBe(true)
   })
 
+  it('uses the broad phase for large placement previews without excluded owners', () => {
+    const largeAsset = Array.from({ length: 5000 }, (_, x) => voxel(x, 0, 0))
+    const index = SceneOccupancyIndex.fromParts([
+      part('stationary', [voxel(10000, 0, 0)]),
+    ])
+    expect(index.collidesTranslatedProjectVoxels(largeAsset, { x: 0, y: 0, z: 0 })).toBe(false)
+    expect(index.collidesTranslatedProjectVoxels(largeAsset, { x: 10000, y: 0, z: 0 })).toBe(true)
+  })
+
   it('includes both owners base offsets and lazy translations in dense collision scans', () => {
     const movingTopology = Array.from({ length: 5000 }, (_, x) => voxel(x, 0, 0))
     const moving = { ...part('moving', movingTopology), sceneOffset: { x: 100, y: 0, z: 0 } }

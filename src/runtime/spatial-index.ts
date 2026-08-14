@@ -652,73 +652,60 @@ export class SceneOccupancyIndex {
     const runtimeDelta = projectVoxelToRuntime(delta)
     const excluded = new Set(excludedOwnerIds)
 
-    // First use owner AABBs as a broad phase. A large imported model often
-    // has only a handful of nearby stationary owners; scanning all of its
-    // voxels for every pointermove is unnecessary when their bounds do not
-    // overlap. The narrow phase below remains exact at voxel resolution.
-    if (excluded.size) {
-      const cacheKey = voxels as object
-      let movingBounds = movingBoundsOverride ?? this.projectVoxelBoundsCache.get(cacheKey)
-      if (!movingBounds) {
-        movingBounds = projectVoxelBounds(voxels)
-        if (movingBounds) this.projectVoxelBoundsCache.set(cacheKey, movingBounds)
-      }
-      if (!movingBounds) return false
-      const translatedMovingBounds: RuntimeVoxelBounds = {
-        minGx: movingBounds.minGx + runtimeDelta.gx,
-        minGy: movingBounds.minGy + runtimeDelta.gy,
-        minGz: movingBounds.minGz + runtimeDelta.gz,
-        maxGx: movingBounds.maxGx + runtimeDelta.gx,
-        maxGy: movingBounds.maxGy + runtimeDelta.gy,
-        maxGz: movingBounds.maxGz + runtimeDelta.gz,
-      }
-      const candidates: Array<[ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>, RuntimeVoxelCoord | undefined]> = []
-      let candidateVoxelCount = 0
-      for (const [ownerId, ownerVoxels] of this.ownerVoxelRefs) {
-        if (excluded.has(ownerId)) continue
-        const ownerHandle = this.ownerIdToHandle.get(ownerId)
-        const translation = ownerHandle ? this.ownerTranslations.get(ownerHandle) : undefined
-        const bounds = ownerHandle ? this.ownerBounds.get(ownerHandle) : undefined
-        if (!bounds || !boundsOverlap(bounds, translatedMovingBounds, translation)) continue
-        candidates.push([ownerVoxels, translation])
-        candidateVoxelCount += ownerVoxels.length
-      }
-      if (!candidates.length) return false
-      // Scan the smaller side of the exact intersection. A small selected
-      // part beside a huge stationary model should not pay for the huge
-      // model's entire voxel array on every pointermove. queryRuntimeVoxel()
-      // remains exact for the moving-side path and already accounts for lazy
-      // translations and overlapping owners.
-      if (voxels.length <= candidateVoxelCount) {
-        return voxels.some((voxel) => {
-          const translated = translateRuntimeVoxel(projectVoxelToRuntime(voxel), runtimeDelta)
-          const hit = this.queryRuntimeVoxel(translated)
-          return hit.ownerIds.some((ownerId) => !excluded.has(ownerId))
-        })
-      }
-      // Only the stationary-side scan needs a coordinate Set for the moving
-      // model. Building this before the branch made a large preview pay the
-      // full allocation cost even when the moving-side query was cheaper.
-      const movingKeys = this.projectVoxelKeyCache.get(cacheKey) ?? new Set(voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
-      this.projectVoxelKeyCache.set(cacheKey, movingKeys)
-      for (const [ownerVoxels, translation] of candidates) {
-        for (const voxel of ownerVoxels) {
-          // ownerVoxels are already stored in effective scene coordinates;
-          // only a deferred drag translation remains to apply here.
-          const currentX = voxel.x + (translation?.gx ?? 0)
-          const currentY = voxel.y + (translation?.gz ?? 0)
-          const currentZ = voxel.z + (translation?.gy ?? 0)
-          if (movingKeys.has(`${currentX - delta.x},${currentY - delta.y},${currentZ - delta.z}`)) return true
-        }
-      }
-      return false
+    // Always use owner AABBs as a broad phase, including placement where the
+    // excluded-owner set is empty. Previously placement skipped this branch
+    // and queried every voxel in a large asset for every pointermove, which
+    // made a valid preview appear impossible to place.
+    const cacheKey = voxels as object
+    let movingBounds = movingBoundsOverride ?? this.projectVoxelBoundsCache.get(cacheKey)
+    if (!movingBounds) {
+      movingBounds = projectVoxelBounds(voxels)
+      if (movingBounds) this.projectVoxelBoundsCache.set(cacheKey, movingBounds)
     }
-
-    return voxels.some((voxel) => {
-      const translated = translateRuntimeVoxel(projectVoxelToRuntime(voxel), runtimeDelta)
-      const hit = this.queryRuntimeVoxel(translated)
-      return hit.ownerIds.some((ownerId) => !excluded.has(ownerId))
-    })
+    if (!movingBounds) return false
+    const translatedMovingBounds: RuntimeVoxelBounds = {
+      minGx: movingBounds.minGx + runtimeDelta.gx,
+      minGy: movingBounds.minGy + runtimeDelta.gy,
+      minGz: movingBounds.minGz + runtimeDelta.gz,
+      maxGx: movingBounds.maxGx + runtimeDelta.gx,
+      maxGy: movingBounds.maxGy + runtimeDelta.gy,
+      maxGz: movingBounds.maxGz + runtimeDelta.gz,
+    }
+    const candidates: Array<[ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>, RuntimeVoxelCoord | undefined]> = []
+    let candidateVoxelCount = 0
+    for (const [ownerId, ownerVoxels] of this.ownerVoxelRefs) {
+      if (excluded.has(ownerId)) continue
+      const ownerHandle = this.ownerIdToHandle.get(ownerId)
+      const translation = ownerHandle ? this.ownerTranslations.get(ownerHandle) : undefined
+      const bounds = ownerHandle ? this.ownerBounds.get(ownerHandle) : undefined
+      if (!bounds || !boundsOverlap(bounds, translatedMovingBounds, translation)) continue
+      candidates.push([ownerVoxels, translation])
+      candidateVoxelCount += ownerVoxels.length
+    }
+    if (!candidates.length) return false
+    // Scan the smaller side of the exact intersection. A small selected part
+    // beside a huge stationary model should not pay for the huge model's
+    // entire voxel array on every pointermove.
+    if (voxels.length <= candidateVoxelCount) {
+      return voxels.some((voxel) => {
+        const translated = translateRuntimeVoxel(projectVoxelToRuntime(voxel), runtimeDelta)
+        const hit = this.queryRuntimeVoxel(translated)
+        return hit.ownerIds.some((ownerId) => !excluded.has(ownerId))
+      })
+    }
+    const movingKeys = this.projectVoxelKeyCache.get(cacheKey) ?? new Set(voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
+    this.projectVoxelKeyCache.set(cacheKey, movingKeys)
+    for (const [ownerVoxels, translation] of candidates) {
+      for (const voxel of ownerVoxels) {
+        // ownerVoxels are already stored in effective scene coordinates; only
+        // a deferred drag translation remains to apply here.
+        const currentX = voxel.x + (translation?.gx ?? 0)
+        const currentY = voxel.y + (translation?.gz ?? 0)
+        const currentZ = voxel.z + (translation?.gy ?? 0)
+        if (movingKeys.has(`${currentX - delta.x},${currentY - delta.y},${currentZ - delta.z}`)) return true
+      }
+    }
+    return false
   }
 
   /**

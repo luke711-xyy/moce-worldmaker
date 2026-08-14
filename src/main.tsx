@@ -27,6 +27,7 @@ import { SliceLayer, SlicePlane, SliceVoxel, sliceEntityParts, sliceLayerToAsset
 import { computeScale, computeShell, GeometryScaleMode, GeometryVoxel, validScaleFactors, VoxelGeometryMesh, VoxelGeometryPreview } from './voxel-geometry'
 import { recordHistoryTransition, redoHistoryTransition, undoHistoryTransition } from './history'
 import { createZip } from './zip'
+import { assetPreviewAsset, withAssetThumbnail } from './asset-thumbnail'
 import { CloudAssetSummary, CloudProgress, CloudSceneSummary, CloudUsage, deleteCloudAsset, deleteCloudScene, downloadCloudObject, loadCloudAssetPreview, loadCloudLibrary, loadCloudUsage, uploadCloudAsset, uploadCloudScene } from './cloud-backup'
 import { AuthUser, loadAuthUser, loginAuthUser, logoutAuthUser, registerAuthUser, requestPasswordReset, resendVerificationEmail, resetAuthPassword, setCloudAuthRequiredHandler, verifyAuthEmail } from './auth'
 import './styles.css'
@@ -1600,6 +1601,7 @@ function App() {
     originX: number
     originZ: number
     pairs: Array<{ partId: string; local: Voxel; scene: Voxel }>
+    sceneVoxels: Voxel[]
     bounds: GridVoxelBounds | null
   }>())
   const sceneOccupancyRef = useRef<SceneOccupancyIndex | null>(null)
@@ -2904,11 +2906,13 @@ function App() {
       overrides: [],
     }
     const pairs = instanceVoxelPairs(canonicalInstance, asset)
+    const sceneVoxels = pairs.map((pair) => pair.scene)
     const next = {
       originX,
       originZ,
       pairs,
-      bounds: gridVoxelBounds(pairs.map((pair) => pair.scene)),
+      sceneVoxels,
+      bounds: gridVoxelBounds(sceneVoxels),
     }
     placementGeometryCacheRef.current.set(asset, next)
     return next
@@ -2949,7 +2953,7 @@ function App() {
     const geometry = placementGeometryFor(asset)
     const delta = placementDeltaFor(asset, x, y, z)
     return sceneOccupancyRef.current!.collidesTranslatedProjectVoxels(
-      geometry.pairs.map((pair) => pair.scene),
+      geometry.sceneVoxels,
       delta,
     )
   }
@@ -4115,7 +4119,8 @@ function App() {
     pending.forEach((summary) => {
       void loadCloudAssetPreview(summary.id).then((asset) => {
         if (cancelled) return
-        setCloudAssetPreviews((current) => current[summary.id] ? current : { ...current, [summary.id]: asset })
+        const previewAsset = withAssetThumbnail(asset)
+        setCloudAssetPreviews((current) => current[summary.id] ? current : { ...current, [summary.id]: previewAsset })
       }).catch((error) => {
         if (cancelled) return
         setCloudAssetPreviewErrors((current) => ({ ...current, [summary.id]: error instanceof Error ? error.message : '预览加载失败' }))
@@ -4174,8 +4179,9 @@ function App() {
   const backupAssetToCloud = async (assetId: string, conflictMode?: 'replace' | 'copy', conflictId?: string) => {
     const asset = projectRef.current.assets.find((item) => item.id === assetId && item.isTemplate !== false)
     if (!asset) return
+    setNotice(`正在准备云端实体备份 · ${asset.name}`)
     try {
-      await uploadCloudAsset(asset, normalizeAssetCategoryPath(asset.categoryPath), conflictMode, conflictId, setCloudTransferProgress)
+      await uploadCloudAsset(withAssetThumbnail(asset), normalizeAssetCategoryPath(asset.categoryPath), conflictMode, conflictId, setCloudTransferProgress)
       clearCompletedCloudTransfers('asset', 'upload')
       await refreshCloudLibrary()
       setNotice(`已备份实体到云端 · ${asset.name}`)
@@ -4193,6 +4199,10 @@ function App() {
   }
 
   const backupSceneProjectToCloud = async (sourceProject: ProjectState, defaultName: string, requestedName?: string, conflictMode?: 'replace' | 'copy', conflictId?: string) => {
+    setNotice('正在准备云端场景备份…')
+    // Give the notice a chance to paint before createSceneFile walks a large
+    // scene and serializes its embedded asset snapshots on the main thread.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
     let sceneFile: MoceSceneFile
     try { sceneFile = createSceneFile(sourceProject) } catch (error) { setNotice(`云端场景备份失败 · ${error instanceof Error ? error.message : '场景数据无效'}`); return }
     const cloudName = requestedName ?? window.prompt('请输入云端场景名称', defaultName.trim() || sceneFile.scene.name)?.trim()
@@ -4258,14 +4268,14 @@ function App() {
         } else nextAsset.id = existing.id
       }
       nextAsset.isTemplate = true
-      await saveLocalAsset(nextAsset)
+      const storedAsset = await saveLocalAsset(nextAsset)
       updateProject((draft) => {
-        const index = draft.assets.findIndex((item) => item.id === nextAsset.id)
-        if (index >= 0) draft.assets[index] = nextAsset
-        else draft.assets.push(nextAsset)
+        const index = draft.assets.findIndex((item) => item.id === storedAsset.id)
+        if (index >= 0) draft.assets[index] = storedAsset
+        else draft.assets.push(storedAsset)
       })
       await refreshLibrary()
-      setNotice(`已下载云端实体 · ${nextAsset.name}`)
+      setNotice(`已下载云端实体 · ${storedAsset.name}`)
       saved = true
     } catch (error) {
       const message = error instanceof Error ? error.message : '请检查网络连接'
@@ -4450,8 +4460,8 @@ function App() {
       // Confirm the durable remote write before presenting the asset as saved.
       // This prevents a refresh racing an unfinished R2/D1 request from
       // making a just-created template appear to have disappeared.
-      await saveLocalAsset(asset)
-      updateProject((draft) => { draft.assets.push(asset) })
+      const storedAsset = await saveLocalAsset(asset)
+      updateProject((draft) => { draft.assets.push(storedAsset) })
     } catch (error) {
       setPersistenceStatus('offline')
       setNotice(`保存实体到资产库失败 · ${error instanceof Error ? error.message : '请检查线上连接'}`)
@@ -6160,12 +6170,15 @@ function AssetSidebar({ assets, categoryPaths, query, setQuery, selectedAssetIds
   const renderAssetCard = (asset: VoxelAsset) => {
     const cloudAsset = cloudById.get(asset.id)
     const cloudProgress = cloudTransfers[`upload:asset:${asset.id}`]
-    const progressText = cloudProgress?.status === 'reconnecting'
+    const cloudError = cloudTransferErrors[`upload:asset:${asset.id}`] ?? cloudProgress?.error
+    const progressText = cloudError || cloudProgress?.status === 'failed'
+      ? `失败 · ${cloudError ?? '上传失败'}`
+      : cloudProgress?.status === 'reconnecting'
       ? '正在重连…'
       : cloudProgress
         ? `${Math.round((cloudProgress.transferredBytes / Math.max(1, cloudProgress.transfer.totalBytes)) * 100)}%`
         : null
-    return <div className={`asset-card ${cloudAsset ? 'cloud-present' : ''} ${selectedAssetIds.includes(asset.id) ? 'selected' : ''} ${cloudProgress ? 'cloud-uploading' : ''}`} key={asset.id} role="button" tabIndex={0} onPointerDown={(event) => { if (event.button !== 0) return; event.preventDefault(); draggedAssetRef.current = true; onBeginPlacement(asset) }} onPointerUp={(event) => { if (event.button !== 0) return; event.preventDefault(); draggedAssetRef.current = false; onEndPlacement() }} onPointerCancel={() => { draggedAssetRef.current = false; onEndPlacement() }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onContextMenu(asset.id, event.clientX, event.clientY) }} onClick={() => { if (draggedAssetRef.current) { draggedAssetRef.current = false; return } onNotice('请按住组件拖动到三维场地后放置') }} title="按住拖动到场地放置">
+    return <div className={`asset-card ${cloudAsset ? 'cloud-present' : ''} ${selectedAssetIds.includes(asset.id) ? 'selected' : ''} ${cloudProgress ? 'cloud-uploading' : ''} ${cloudError || cloudProgress?.status === 'failed' ? 'cloud-upload-failed' : ''}`} key={asset.id} role="button" tabIndex={0} onPointerDown={(event) => { if (event.button !== 0) return; event.preventDefault(); draggedAssetRef.current = true; onBeginPlacement(asset) }} onPointerUp={(event) => { if (event.button !== 0) return; event.preventDefault(); draggedAssetRef.current = false; onEndPlacement() }} onPointerCancel={() => { draggedAssetRef.current = false; onEndPlacement() }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); onContextMenu(asset.id, event.clientX, event.clientY) }} onClick={() => { if (draggedAssetRef.current) { draggedAssetRef.current = false; return } onNotice('请按住组件拖动到三维场地后放置') }} title="按住拖动到场地放置">
       <label className="asset-select-box" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><input type="checkbox" checked={selectedAssetIds.includes(asset.id)} onChange={() => onToggleAssetSelection(asset.id)} aria-label={`选择${asset.name}`} /></label>
       {renderThumbnailShell(<VoxelThumbnail asset={asset} />, cloudAsset)}
       <span>{asset.name.replace('·主屋', '')}</span>
@@ -6291,7 +6304,8 @@ function ModelImportDialog({ state, targetSizeVoxels, mode, onTargetSizeChange, 
 }
 
 const VoxelThumbnail = React.memo(function VoxelThumbnail({ asset }: { asset: VoxelAsset }) {
-  return <div className="thumbnail-scene" aria-label={`${asset.name} 3D 预览`}><VoxelMiniPreview voxels={asset.voxels} asset={asset} exteriorOnly /></div>
+  const previewAsset = assetPreviewAsset(asset)
+  return <div className="thumbnail-scene" aria-label={`${asset.name} 3D 预览`}><VoxelMiniPreview voxels={previewAsset.voxels} asset={previewAsset} exteriorOnly /></div>
 })
 
 const previewVoxelArrayIds = new WeakMap<object, number>()
@@ -6517,11 +6531,13 @@ function SceneLibraryDialog({ library, busy, selectedSceneLoading, selectionRevi
     setEntityContextMenu(null)
   }
   useEffect(() => () => cancelMenuClose(), [])
-  const sceneUploadProgress = Object.values(cloudTransfers).find((progress) => progress.transfer.direction === 'upload' && progress.transfer.objectKind === 'scene' && ['queued', 'transferring', 'reconnecting'].includes(progress.status))
+  const sceneUploadProgress = Object.values(cloudTransfers).find((progress) => progress.transfer.direction === 'upload' && progress.transfer.objectKind === 'scene' && ['queued', 'transferring', 'reconnecting', 'failed'].includes(progress.status))
+  const sceneUploadActive = sceneUploadProgress && ['queued', 'transferring', 'reconnecting'].includes(sceneUploadProgress.status)
+  const sceneUploadError = sceneUploadProgress?.status === 'failed' ? (cloudTransferErrors[`upload:scene:${sceneUploadProgress.transfer.objectId}`] ?? sceneUploadProgress.error) : undefined
   return <div className="modal-backdrop" onPointerDown={(event) => event.target === event.currentTarget && onClose()}>
     <section className="library-dialog" role="dialog" aria-modal="true" aria-label="场景库" onPointerDown={(event) => { const target = event.target as HTMLElement; if (!target.closest('button, input, .scene-library-context-menu')) closeMenus() }}>
       <div className="library-dialog-heading"><div><h2>场景库</h2><p>场景文件与场景实体由当前工程自动管理</p></div><button className="icon-button" aria-label="关闭场景库" onClick={onClose}><X size={17} /></button></div>
-      <div className="library-dialog-toolbar"><span>{error ? '场景库暂时无法访问' : `${library.scenes.length} 个本地场景 · ${cloudScenes.length} 个云端场景 · ${selectedSceneId ? `${selectedSceneProject ? selectedSceneParts.length : '…'} 个实体` : '未选择场景'}`}</span><div className="library-toolbar-actions"><button className="tiny-button" onClick={onBackupCurrentScene} disabled={sceneUploadProgress?.status === 'transferring' || sceneUploadProgress?.status === 'reconnecting'}><Cloud size={13} /> {sceneUploadProgress?.status === 'reconnecting' ? '正在重连…' : sceneUploadProgress ? `备份 ${Math.round((sceneUploadProgress.transferredBytes / Math.max(1, sceneUploadProgress.transfer.totalBytes)) * 100)}%` : '备份当前场景'}</button></div></div>
+      <div className="library-dialog-toolbar"><span>{error ? '场景库暂时无法访问' : `${library.scenes.length} 个本地场景 · ${cloudScenes.length} 个云端场景 · ${selectedSceneId ? `${selectedSceneProject ? selectedSceneParts.length : '…'} 个实体` : '未选择场景'}`}</span><div className="library-toolbar-actions"><button className="tiny-button" onClick={onBackupCurrentScene} disabled={Boolean(sceneUploadActive)}><Cloud size={13} /> {sceneUploadError ? `备份失败 · ${sceneUploadError}` : sceneUploadProgress?.status === 'reconnecting' ? '正在重连…' : sceneUploadActive ? `备份 ${Math.round((sceneUploadProgress.transferredBytes / Math.max(1, sceneUploadProgress.transfer.totalBytes)) * 100)}%` : '备份当前场景'}</button></div></div>
       {cloudUsage && <div className="cloud-usage-strip"><span>云端资产 {formatBytesUi(cloudUsage.assetBytes)} / {formatBytesUi(cloudUsage.assetQuotaBytes)}</span><span>云端场景 {formatBytesUi(cloudUsage.sceneBytes)} / {formatBytesUi(cloudUsage.sceneQuotaBytes)}</span></div>}
       {cloudError && <div className="cloud-error-strip"><Cloud size={13} /> 云端暂不可用：{cloudError}</div>}
       {error && <div className="library-error" role="alert"><span>加载失败：{error}</span><button className="tiny-button" onClick={() => window.location.reload()}>刷新页面重试</button></div>}
@@ -7535,6 +7551,26 @@ function createVoxelOutlineGeometry() {
   return geometry
 }
 
+/**
+ * Selection lines are deliberately rendered with depth testing enabled so
+ * hidden edges do not show through the model.  Their vertices still sit on
+ * the voxel surface, though, which makes them fight the solid mesh in the
+ * depth buffer at oblique camera angles.  A tiny clip-space bias breaks that
+ * tie without moving the outline in world space or disabling occlusion.
+ */
+function configureSelectionOutlineMaterial(material: THREE.LineBasicMaterial, cacheKey: string) {
+  material.depthTest = true
+  material.depthWrite = false
+  material.depthFunc = THREE.LessEqualDepth
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <project_vertex>',
+      '#include <project_vertex>\n      gl_Position.z -= 0.00003 * gl_Position.w;'
+    )
+  }
+  material.customProgramCacheKey = () => cacheKey
+}
+
 function addVoxelHighlight(mesh: THREE.Mesh) {
   // Deferred large cell meshes start with count=0 while their matrices and
   // colors are uploaded over animation frames. Do not cache an empty outline
@@ -7594,7 +7630,9 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
   } else {
     edgeGeometry = createVoxelOutlineGeometry()
   }
-  const glow = new THREE.LineSegments(edgeGeometry, new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.2, depthTest: true, depthWrite: false }))
+  const glowMaterial = new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.2 })
+  configureSelectionOutlineMaterial(glowMaterial, 'moce-selection-outline-glow-v2')
+  const glow = new THREE.LineSegments(edgeGeometry, glowMaterial)
   if (!(mesh instanceof THREE.InstancedMesh) && !mesh.userData.greedyMesh) glow.scale.setScalar(1.055)
   glow.renderOrder = 20
   glow.userData.selectionGlow = true
@@ -7603,7 +7641,9 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
   // EdgesGeometry doubled the allocation/copy cost exactly when a high
   // resolution model first became selected; the materials still provide the
   // soft underlay and crisp line as separate render passes.
-  const edge = new THREE.LineSegments(edgeGeometry, new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.9, depthTest: true, depthWrite: false }))
+  const edgeMaterial = new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.9 })
+  configureSelectionOutlineMaterial(edgeMaterial, 'moce-selection-outline-edge-v2')
+  const edge = new THREE.LineSegments(edgeGeometry, edgeMaterial)
   if (!(mesh instanceof THREE.InstancedMesh) && !mesh.userData.greedyMesh) edge.scale.setScalar(1.012)
   edge.renderOrder = 21
   edge.userData.selectionGlow = true
@@ -8127,6 +8167,54 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   // in the editor's conventional XY ground plane with Z as the vertical axis.
   const toSceneWorld = (x: number, y: number, z: number) => new THREE.Vector3(x, z, y)
 
+  // Orbiting a selection must use the effective scene-space geometry, not the
+  // asset's canonical origin.  sceneParts already expands an assembly into
+  // its member parts, so this also covers nested assemblies and multi-select.
+  // Calculate an AABB center without materializing scenePartVoxels() for large
+  // imported models; the part offsets are applied directly to the canonical
+  // voxel bounds.
+  const selectedOrbitCenter = useMemo(() => {
+    if (!selectedPartIds.length) return null
+    const selectedIds = new Set(selectedPartIds)
+    let minX = Number.POSITIVE_INFINITY
+    let minY = Number.POSITIVE_INFINITY
+    let minZ = Number.POSITIVE_INFINITY
+    let maxX = Number.NEGATIVE_INFINITY
+    let maxY = Number.NEGATIVE_INFINITY
+    let maxZ = Number.NEGATIVE_INFINITY
+    let hasGeometry = false
+
+    sceneParts.forEach((part) => {
+      if (!selectedIds.has(part.id)) return
+      const bounds = voxelBounds(part.voxels)
+      if (!bounds) return
+      const rootOffset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
+      const partOffset = part.partSceneOffset ?? { x: 0, y: 0, z: 0 }
+      const offsetX = rootOffset.x + partOffset.x
+      const offsetY = rootOffset.y + partOffset.y
+      const offsetZ = rootOffset.z + partOffset.z
+      minX = Math.min(minX, bounds.min.x + offsetX)
+      minY = Math.min(minY, bounds.min.y + offsetY)
+      minZ = Math.min(minZ, bounds.min.z + offsetZ)
+      maxX = Math.max(maxX, bounds.max.x + offsetX)
+      maxY = Math.max(maxY, bounds.max.y + offsetY)
+      maxZ = Math.max(maxZ, bounds.max.z + offsetZ)
+      hasGeometry = true
+    })
+
+    if (!hasGeometry) return null
+    // Voxel bounds are inclusive. Add half a cell on each side so the pivot
+    // is the geometric center of the occupied cell volume, not the center of
+    // the corner coordinates.
+    return toSceneWorld(
+      ((minX + maxX + 1) / 2) * VOXEL_WORLD_SIZE,
+      ((minY + maxY + 1) / 2) * VOXEL_WORLD_SIZE,
+      ((minZ + maxZ + 1) / 2) * VOXEL_WORLD_SIZE,
+    )
+  }, [sceneParts, selectedPartIds])
+  const selectedOrbitCenterRef = useRef<THREE.Vector3 | null>(null)
+  selectedOrbitCenterRef.current = selectedOrbitCenter
+
   const scheduleZoomReport = () => {
     if (zoomReportTimerRef.current !== null) window.clearTimeout(zoomReportTimerRef.current)
     zoomReportTimerRef.current = window.setTimeout(() => {
@@ -8145,6 +8233,28 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   // footer buttons both call it; React only receives the coalesced value for
   // the percentage ruler and never drives the camera during a gesture.
   const sceneViewTarget = (bounds: SceneBounds) => new THREE.Vector3(0, 0, bounds.z * VOXEL_WORLD_SIZE / 2)
+
+  const desiredOrbitTarget = () => selectedOrbitCenterRef.current?.clone()
+    ?? sceneViewTarget(sceneBoundsForProject(authoritativeProjectRef.current))
+
+  // OrbitControls rotates around controls.target.  When selection changes,
+  // translate both cameras by the same delta before replacing the target so
+  // changing the pivot does not visually jump the current view.  The inactive
+  // camera is translated too, otherwise switching between orthographic and
+  // perspective would resurrect the old scene-centered pivot.
+  const syncOrbitTarget = () => {
+    const cameras = camerasRef.current
+    const controls = controlsRef.current
+    if (!cameras || !controls) return
+    const nextTarget = desiredOrbitTarget()
+    const delta = nextTarget.clone().sub(controls.target)
+    if (delta.lengthSq() < 0.00000001) return
+    cameras.orthographic.position.add(delta)
+    cameras.perspective.position.add(delta)
+    controls.target.copy(nextTarget)
+    controls.update()
+    invalidateRenderRef.current(220)
+  }
 
   // Keep the orthographic camera outside the scene volume. Orthographic
   // projection does not need a distance for framing, but it still has a near
@@ -8829,7 +8939,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     controls.update()
     controls.enableDamping = dampingEnabled
     const sceneBounds = sceneBoundsForProject(project)
-    const target = sceneViewTarget(sceneBounds)
+    const target = selectedOrbitCenterRef.current?.clone() ?? sceneViewTarget(sceneBounds)
     let direction = new THREE.Vector3(16, 18, 18).normalize()
     let up = new THREE.Vector3(0, 0, 1)
     if (view !== 'default') {
@@ -8872,11 +8982,22 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   const rotateCameraByInput = (deltaX: number, deltaY: number) => {
     const controls = controlsRef.current
     if (!controls) return
+    // A camera pan or a previous view command can leave OrbitControls' target
+    // away from the selected geometry. Re-anchor immediately before each
+    // joystick gesture so the rotation is always selection-relative.
+    syncOrbitTarget()
     controls.rotateLeft(deltaX * 0.008)
     controls.rotateUp(deltaY * 0.008)
     controls.update()
     invalidateRenderRef.current(220)
   }
+
+  // Keep the pivot aligned as soon as selection changes, including selection
+  // from the file tree. This makes the first joystick movement feel anchored
+  // instead of requiring a hidden preparatory drag.
+  useEffect(() => {
+    syncOrbitTarget()
+  }, [selectedOrbitCenter, project.sceneBounds?.x, project.sceneBounds?.y, project.sceneBounds?.z, project.sceneSizeCm])
 
   useEffect(() => {
     onCameraApiChange({

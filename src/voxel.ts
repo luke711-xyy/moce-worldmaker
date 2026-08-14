@@ -63,6 +63,15 @@ export type VoxelAsset = {
   isTemplate?: boolean
   /** Stable link back to the template used to create a scene snapshot. */
   templateSourceId?: string
+  /** Persisted, bounded preview payload used by asset-library cards. */
+  thumbnail?: AssetThumbnail
+}
+
+export type AssetThumbnail = {
+  version: 1
+  sourceSignature: string
+  sourceVoxelCount: number
+  voxels: Voxel[]
 }
 
 export type AssetAssembly = {

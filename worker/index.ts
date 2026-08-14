@@ -50,6 +50,18 @@ const AUTH_RATE_BLOCK_MS = 15 * 60 * 1000
 type AccessJwk = JsonWebKey & { kid?: string }
 let accessJwksCache: { issuer: string; expiresAt: number; keys: AccessJwk[] } | null = null
 
+class CloudApiError extends Error {
+  status: number
+  code?: string
+
+  constructor(message: string, status: number, code?: string) {
+    super(message)
+    this.name = 'CloudApiError'
+    this.status = status
+    this.code = code
+  }
+}
+
 function json(data: unknown, status = 200, request?: Request, env?: Env) {
   const headers = new Headers(JSON_HEADERS)
   const origin = env?.ALLOWED_ORIGIN ?? request?.headers.get('Origin')
@@ -61,7 +73,8 @@ function json(data: unknown, status = 200, request?: Request, env?: Env) {
 }
 
 function errorResponse(error: unknown, status = 500, request?: Request, env?: Env) {
-  return json({ error: error instanceof Error ? error.message : '持久化服务失败' }, status, request, env)
+  const typed = error as Error & { code?: string }
+  return json({ error: error instanceof Error ? error.message : '持久化服务失败', ...(typed.code ? { code: typed.code } : {}) }, status, request, env)
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -712,7 +725,7 @@ async function cloudUsage(env: Env & { DB: D1Database }, owner: string) {
 }
 
 function quotaError(message: string) {
-  return new Error(`云端配额不足 · ${message}`)
+  return new CloudApiError(`云端配额不足 · ${message}`, 413, 'CLOUD_QUOTA_EXCEEDED')
 }
 
 async function assertCloudQuota(env: Env & { DB: D1Database }, owner: string, kind: 'asset' | 'scene', incomingBytes: number, replacingBytes = 0) {
@@ -1266,7 +1279,14 @@ export default {
       return new Response('莫测造境 Worker 已启动，但尚未配置静态资源绑定', { status: 503 })
     } catch (error) {
       if (error instanceof Response) return error
-      return errorResponse(error, error instanceof Error && /云端配额不足/.test(error.message) ? 413 : error instanceof Error && /不是有效|结构|必须|不支持|未包含|资产文件|普通实体/.test(error.message) ? 400 : 500, request, env)
+      const status = error instanceof CloudApiError
+        ? error.status
+        : error instanceof Error && /云端配额不足/.test(error.message)
+          ? 413
+          : error instanceof Error && /不是有效|结构|必须|不支持|未包含|资产文件|普通实体|请求体超过|传输分块/.test(error.message)
+            ? 400
+            : 500
+      return errorResponse(error, status, request, env)
     }
   },
 }

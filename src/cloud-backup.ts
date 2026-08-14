@@ -79,6 +79,12 @@ type TransferStartResponse = {
   effectiveName?: string
 }
 
+type CloudRequestError = Error & {
+  status?: number
+  code?: string
+  conflicts?: CloudConflict[]
+}
+
 function apiPath(path: string) {
   return path
 }
@@ -93,7 +99,8 @@ async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
     try {
       const body = await response.json() as { error?: string; code?: string; objectKind?: 'asset' | 'scene'; conflicts?: Array<{ id: string; name: string; reason: 'name' | 'id' }> }
       if (body.code === 'CLOUD_CONFLICT') {
-        const error = new Error('云端对象存在冲突') as Error & { code?: string; conflicts?: CloudConflict[] }
+        const error = new Error('云端对象存在冲突') as CloudRequestError
+        error.status = response.status
         error.code = body.code
         error.conflicts = (body.conflicts ?? []).map((conflict) => ({ objectKind: body.objectKind ?? 'asset', ...conflict }))
         throw error
@@ -102,7 +109,15 @@ async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
     } catch (error) {
       if (error instanceof Error && 'code' in error) throw error
     }
-    throw new Error(message)
+    const error = new Error(message) as CloudRequestError
+    error.status = response.status
+    try {
+      const body = await response.clone().json() as { code?: string }
+      error.code = body.code
+    } catch {
+      // The original response body has already been consumed above.
+    }
+    throw error
   }
   return response.json() as Promise<T>
 }
@@ -129,12 +144,36 @@ function isRetryable(error: unknown) {
   // HTTP errors are deterministic unless they are a gateway/rate-limit
   // failure. Retrying a missing R2 object for two minutes only makes the UI
   // look like the user's network is broken.
-  const status = error.message.match(/[（(](\d{3})[）)]/)?.[1]
+  const status = (error as CloudRequestError).status?.toString() ?? error.message.match(/[（(](\d{3})[）)]/)?.[1]
   if (status) {
     const code = Number(status)
     return code === 408 || code === 429 || code >= 500
   }
   return !/401|403|400|404|409|410|413|415|422|配额|格式|不存在|参数|校验失败/.test(error.message)
+}
+
+function preparingTransfer(objectKind: 'asset' | 'scene', objectId: string, name: string): CloudTransfer {
+  return {
+    transferId: `preparing-${objectKind}-${objectId}`,
+    direction: 'upload',
+    objectKind,
+    objectId,
+    name,
+    totalBytes: 0,
+    totalParts: 0,
+    completedParts: [],
+    blobHash: '',
+    status: 'queued',
+    expiresAt: '',
+  }
+}
+
+function yieldToUi() {
+  return new Promise<void>((resolve) => setTimeout(resolve, 0))
+}
+
+function progressError(error: unknown) {
+  return error instanceof Error ? error.message : '云端备份失败'
 }
 
 async function withReconnect<T>(operation: () => Promise<T>, onStatus: (status: 'transferring' | 'reconnecting', error?: string) => void): Promise<T> {
@@ -243,20 +282,49 @@ async function downloadBytes(transfer: CloudTransfer, onProgress?: (progress: Cl
 }
 
 export async function uploadCloudAsset(asset: VoxelAsset, categoryPath: string[], conflictMode?: 'replace' | 'copy', conflictId?: string, onProgress?: (progress: CloudProgress) => void) {
-  const bytes = encodeJson(asset)
-  const blobHash = await hashBytes(bytes)
-  const started = await startTransfer({ direction: 'upload', objectKind: 'asset', objectId: asset.id, name: asset.name, blobHash, totalBytes: bytes.byteLength, totalParts: Math.ceil(bytes.byteLength / CLOUD_TRANSFER_PART_BYTES), conflictMode, conflictId, metadata: { categoryPath } })
-  const transfer = await uploadBytes(bytes, started.transfer, onProgress)
-  return { transfer, effectiveId: started.effectiveId ?? asset.id, effectiveName: started.effectiveName ?? asset.name }
+  const preparing = preparingTransfer('asset', asset.id, asset.name)
+  onProgress?.({ transfer: preparing, transferredBytes: 0, status: 'queued', error: '正在准备实体数据…' })
+  let started: TransferStartResponse | undefined
+  try {
+    // Let React paint the queued state before JSON serialization and hashing.
+    await yieldToUi()
+    onProgress?.({ transfer: { ...preparing, status: 'transferring' }, transferredBytes: 0, status: 'transferring', error: '正在序列化实体并校验…' })
+    const bytes = encodeJson(asset)
+    const blobHash = await hashBytes(bytes)
+    started = await startTransfer({ direction: 'upload', objectKind: 'asset', objectId: asset.id, name: asset.name, blobHash, totalBytes: bytes.byteLength, totalParts: Math.ceil(bytes.byteLength / CLOUD_TRANSFER_PART_BYTES), conflictMode, conflictId, metadata: { categoryPath } })
+    const transfer = await uploadBytes(bytes, started.transfer, onProgress)
+    return { transfer, effectiveId: started.effectiveId ?? asset.id, effectiveName: started.effectiveName ?? asset.name }
+  } catch (error) {
+    const typed = error as CloudRequestError
+    if (typed.code !== 'CLOUD_CONFLICT') {
+      onProgress?.({ transfer: { ...(started?.transfer ?? preparing), status: 'failed' }, transferredBytes: 0, status: 'failed', error: progressError(error) })
+    }
+    if (started) await jsonRequest(`/api/cloud/transfers/${encodeURIComponent(started.transfer.transferId)}`, { method: 'DELETE' }).catch(() => undefined)
+    throw error
+  }
 }
 
 export async function uploadCloudScene(scene: MoceSceneFile, conflictMode?: 'replace' | 'copy', conflictId?: string, onProgress?: (progress: CloudProgress) => void) {
-  const bytes = encodeJson(scene)
-  const blobHash = await hashBytes(bytes)
-  const summary = { instanceCount: scene.scene.instances.length, entityCount: scene.scene.instances.length + new Set(scene.scene.customVoxels.map((voxel) => voxel.entityId).filter(Boolean)).size, assemblyCount: scene.scene.assemblies?.length ?? 0 }
-  const started = await startTransfer({ direction: 'upload', objectKind: 'scene', objectId: scene.scene.name, name: scene.scene.name, blobHash, totalBytes: bytes.byteLength, totalParts: Math.ceil(bytes.byteLength / CLOUD_TRANSFER_PART_BYTES), conflictMode, conflictId, metadata: { summary } })
-  const transfer = await uploadBytes(bytes, started.transfer, onProgress)
-  return { transfer, effectiveId: started.effectiveId ?? scene.scene.name, effectiveName: started.effectiveName ?? scene.scene.name }
+  const preparing = preparingTransfer('scene', scene.scene.name, scene.scene.name)
+  onProgress?.({ transfer: preparing, transferredBytes: 0, status: 'queued', error: '正在准备场景数据…' })
+  let started: TransferStartResponse | undefined
+  try {
+    await yieldToUi()
+    onProgress?.({ transfer: { ...preparing, status: 'transferring' }, transferredBytes: 0, status: 'transferring', error: '正在序列化场景并校验…' })
+    const bytes = encodeJson(scene)
+    const blobHash = await hashBytes(bytes)
+    const summary = { instanceCount: scene.scene.instances.length, entityCount: scene.scene.instances.length + new Set(scene.scene.customVoxels.map((voxel) => voxel.entityId).filter(Boolean)).size, assemblyCount: scene.scene.assemblies?.length ?? 0 }
+    started = await startTransfer({ direction: 'upload', objectKind: 'scene', objectId: scene.scene.name, name: scene.scene.name, blobHash, totalBytes: bytes.byteLength, totalParts: Math.ceil(bytes.byteLength / CLOUD_TRANSFER_PART_BYTES), conflictMode, conflictId, metadata: { summary } })
+    const transfer = await uploadBytes(bytes, started.transfer, onProgress)
+    return { transfer, effectiveId: started.effectiveId ?? scene.scene.name, effectiveName: started.effectiveName ?? scene.scene.name }
+  } catch (error) {
+    const typed = error as CloudRequestError
+    if (typed.code !== 'CLOUD_CONFLICT') {
+      onProgress?.({ transfer: { ...(started?.transfer ?? preparing), status: 'failed' }, transferredBytes: 0, status: 'failed', error: progressError(error) })
+    }
+    if (started) await jsonRequest(`/api/cloud/transfers/${encodeURIComponent(started.transfer.transferId)}`, { method: 'DELETE' }).catch(() => undefined)
+    throw error
+  }
 }
 
 export async function downloadCloudObject(kind: 'asset' | 'scene', id: string, versionId?: string, onProgress?: (progress: CloudProgress) => void): Promise<{ bytes: Uint8Array; transfer: CloudTransfer }> {

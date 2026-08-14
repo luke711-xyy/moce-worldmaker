@@ -1,5 +1,6 @@
 import { MoceSceneFile } from './scene-file'
 import { VoxelAsset } from './voxel'
+import { withAssetThumbnail } from './asset-thumbnail'
 
 export type LocalLibraryAssetSummary = Pick<VoxelAsset, 'id' | 'name' | 'kind' | 'style' | 'width' | 'depth' | 'height'> & {
   voxelCount: number
@@ -148,8 +149,8 @@ export async function loadLocalAssets(): Promise<VoxelAsset[]> {
   return readAll<VoxelAsset>(ASSETS_STORE)
 }
 
-export async function saveLocalAsset(asset: VoxelAsset): Promise<void> {
-  const stored = { ...structuredClone(asset), isTemplate: asset.isTemplate !== false }
+export async function saveLocalAsset(asset: VoxelAsset): Promise<VoxelAsset> {
+  const stored = { ...structuredClone(withAssetThumbnail(asset)), isTemplate: asset.isTemplate !== false }
   await put(ASSETS_STORE, stored)
   await put(ASSET_REVISIONS_STORE, {
     key: `${stored.id}:${new Date().toISOString()}:${crypto.randomUUID()}`,
@@ -158,6 +159,7 @@ export async function saveLocalAsset(asset: VoxelAsset): Promise<void> {
     asset: stored,
     createdAt: new Date().toISOString(),
   })
+  return stored
 }
 
 export async function deleteLocalAsset(assetId: string): Promise<void> {
@@ -229,10 +231,14 @@ export async function loadLocalLibrary(): Promise<LocalLibrarySnapshot> {
 
 export async function initializeLocalLibrary(defaultAssets: VoxelAsset[]): Promise<{ assets: VoxelAsset[]; categories: string[][] }> {
   const stored = await loadLocalAssets()
+  const preparedStored = stored.map(withAssetThumbnail)
+  const migrated = preparedStored.filter((asset, index) => asset !== stored[index])
+  if (migrated.length) await Promise.all(migrated.map((asset) => saveLocalAsset(asset)))
+  const preparedDefaults = defaultAssets.map(withAssetThumbnail)
   const categories = await loadLocalAssetCategories()
   return {
-    assets: [...defaultAssets.map((asset) => structuredClone(asset)), ...stored.filter((asset) => !defaultAssets.some((item) => item.id === asset.id))],
-    categories: collectCategories([...defaultAssets, ...stored], categories),
+    assets: [...preparedDefaults.map((asset) => structuredClone(asset)), ...preparedStored.filter((asset) => !defaultAssets.some((item) => item.id === asset.id))],
+    categories: collectCategories([...preparedDefaults, ...preparedStored], categories),
   }
 }
 
