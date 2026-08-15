@@ -3,6 +3,7 @@ import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
 import { MATERIALS, Voxel, VoxelAsset, deduplicateVoxels, voxelBounds } from './voxel'
 import { buildVariantGeometry } from './voxel-variant-geometry'
 import { voxelFacing, voxelRotation, voxelShape } from './voxel-variants'
+import { buildVoxelSurfaceMesh } from './voxel-surface'
 
 export type VoxImportResult = {
   asset: VoxelAsset
@@ -285,6 +286,32 @@ function hexRgb(value: string): [number, number, number] {
 
 export async function encodeGlb(asset: VoxelAsset, colorResolver: ColorResolver = (voxel) => voxel.materialId, voxelSizeMm = 1): Promise<ArrayBuffer> {
   if (!asset.voxels.length) throw new Error('没有可导出的体素')
+  const surface = buildVoxelSurfaceMesh(asset.voxels, (voxel) => normalizeHex(colorResolver(voxel)))
+  if (!surface.positions.length) throw new Error('体素没有可见表面')
+  const scale = Math.max(0.0001, voxelSizeMm) / 1000
+  const positions = Array.from(surface.positions, (value) => value * scale)
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(Array.from(surface.normals), 3))
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(Array.from(surface.colors), 3))
+  geometry.setIndex(new THREE.BufferAttribute(surface.indices, 1))
+  const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0 })
+  const mesh = new THREE.Mesh(geometry, material)
+  mesh.name = asset.name
+  const scene = new THREE.Scene()
+  scene.add(mesh)
+  try {
+    const result = await new GLTFExporter().parseAsync(scene, { binary: true, onlyVisible: true })
+    if (!(result instanceof ArrayBuffer)) throw new Error('GLB 导出器返回了非二进制数据')
+    return result
+  } finally {
+    geometry.dispose()
+    material.dispose()
+  }
+}
+
+export async function encodeGlbLegacy(asset: VoxelAsset, colorResolver: ColorResolver = (voxel) => voxel.materialId, voxelSizeMm = 1): Promise<ArrayBuffer> {
+  if (!asset.voxels.length) throw new Error('没有可导出的体素')
   const occupied = new Set(asset.voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
   const positions: number[] = []
   const normals: number[] = []
@@ -327,7 +354,7 @@ export async function encodeGlb(asset: VoxelAsset, colorResolver: ColorResolver 
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
   geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3))
   geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
-  const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.82, metalness: 0 })
+  const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0 })
   const mesh = new THREE.Mesh(geometry, material)
   mesh.name = asset.name
   const scene = new THREE.Scene()

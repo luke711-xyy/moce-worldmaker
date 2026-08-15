@@ -29,6 +29,7 @@ export class ChunkMeshWorkerClient {
       pending.resolve({
         positions: response.positions,
         normals: response.normals,
+        ao: response.ao,
         materialIds: response.materialIds,
         indices: response.indices,
         outlinePositions: response.outlinePositions,

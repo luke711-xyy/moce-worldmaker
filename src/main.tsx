@@ -21,6 +21,7 @@ import { commitNumericDraft, sanitizeNumericDraft } from './numeric-input'
 import { DrawingPlane, DrawOperation, EDITOR_GROUND_PLANE, VoxelAxis, VoxelTool, clampPlanePointToGround, exteriorAirKeys, exteriorSurfaceVoxels, makePlaneVoxel, planeAxes, projectVoxelToPlane, rasterizeAnchoredSphere, rasterizeCuboid, rasterizeExtrude, rasterizeLine, rasterizePlanarStroke, selectExtrudeLayer, signedExtrudeDelta, toolCellKey, uniqueVoxels } from './voxel-tools'
 import { VoxelFacing, VoxelRotation, VoxelShape, VOXEL_FACE_FRAMES, applyVoxelVariant, faceLocalCoordinates, hasNonCubeVoxels, makeVoxelVariant, oppositeVoxelFacing, rotationFromFaceLocalCoordinates, voxelFacing, voxelRotation, voxelShape, variantKey } from './voxel-variants'
 import { buildVariantGeometry, variantGeometryCacheKey } from './voxel-variant-geometry'
+import { buildVoxelSurfaceMesh } from './voxel-surface'
 import { VoxelToolsGeometryResult, VoxelToolsWorkerClient, VoxelToolsShapeRequest } from './runtime/voxel-tools-client'
 import { adjustHexHsl, hexToHsl } from './color-utils'
 import { SliceLayer, SlicePlane, SliceVoxel, sliceEntityParts, sliceLayerToAsset, slicePlaneLabel } from './slicing'
@@ -6379,6 +6380,11 @@ function SceneLibraryDialog({ library, busy, selectedSceneLoading, selectionRevi
       y: voxel.y,
       z: voxel.z,
       color: scenePartVoxelDisplayColorResolver(voxel, part),
+      ...(voxelShape(voxel) !== 'cube' ? {
+        shape: voxelShape(voxel),
+        facing: voxel.facing,
+        rotation: voxel.rotation,
+      } : {}),
     })))
   }, [selectedSceneProject, selectedSceneParts, scenePartVoxelDisplayColorResolver, selectionRevision])
   const sceneEntityAssetCacheRef = useRef(new Map<string, VoxelAsset>())
@@ -7106,6 +7112,16 @@ function SliceDialog({ parts, project, name, onClose, onNotice }: { parts: Scene
 }
 
 const SceneLibraryPreview = React.memo(function SceneLibraryPreview({ cacheKey, voxels, maxVoxels, exteriorOnly = false }: { cacheKey: string; voxels: ScenePreviewInputVoxel[]; maxVoxels: number; exteriorOnly?: boolean }) {
+  const hasVariantVoxels = useMemo(() => voxels.some((voxel) => voxel.shape && voxel.shape !== 'cube'), [voxels])
+  const variantVoxels = useMemo<Voxel[]>(() => voxels.map((voxel) => ({
+    x: voxel.x,
+    y: voxel.y,
+    z: voxel.z,
+    materialId: voxel.color,
+    shape: voxel.shape,
+    facing: voxel.facing,
+    rotation: voxel.rotation,
+  })), [voxels])
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [payload, setPayload] = useState<ScenePreviewPayload | null>(null)
   const [loading, setLoading] = useState(false)
@@ -7125,7 +7141,7 @@ const SceneLibraryPreview = React.memo(function SceneLibraryPreview({ cacheKey, 
 
   useEffect(() => {
     const worker = workerRef.current
-    if (!worker || !voxels.length) {
+    if (!worker || !voxels.length || hasVariantVoxels) {
       requestRef.current += 1
       setLoading(false)
       setFailed(false)
@@ -7154,7 +7170,7 @@ const SceneLibraryPreview = React.memo(function SceneLibraryPreview({ cacheKey, 
       resultCacheRef.current.set(resolvedCacheKey, nextPayload)
       setPayload(nextPayload)
     })
-  }, [cacheKey, voxels, maxVoxels, exteriorOnly])
+  }, [cacheKey, hasVariantVoxels, voxels, maxVoxels, exteriorOnly])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -7237,11 +7253,61 @@ const SceneLibraryPreview = React.memo(function SceneLibraryPreview({ cacheKey, 
     return () => observer.disconnect()
   }, [payload])
 
+  if (hasVariantVoxels) return <VariantSurfaceMiniPreview voxels={variantVoxels} maxPreviewVoxels={maxVoxels} exteriorOnly={exteriorOnly} />
   if (loading && !payload) return <div className="empty-panel preview-loading">正在生成场景预览…</div>
   if (failed) return <div className="empty-panel">场景预览生成失败</div>
   if (!payload) return <div className="empty-panel">正在准备场景预览…</div>
   return <canvas ref={canvasRef} className="scene-preview-canvas" aria-label={`场景预览，显示 ${payload.sampledVoxelCount} 个预览体素`} />
 })
+
+function VariantSurfaceMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, materialColors = {}, maxPreviewVoxels, exteriorOnly = false }: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string>; maxPreviewVoxels?: number; exteriorOnly?: boolean }) {
+  if (!voxels.length) return <div className="mini-preview-empty">暂无预览</div>
+  const source = exteriorOnly ? exteriorSurfaceVoxels(voxels) : voxels
+  const previewVoxels = selectPreviewVoxels(source, maxPreviewVoxels ?? MAX_PREVIEW_VOXELS).voxels
+  const colorFor = (voxel: Voxel) => {
+    const key = `${voxel.x},${voxel.y},${voxel.z}`
+    return voxelColors[key]
+      ?? (voxel.paintMaterialId ? materialColors[voxel.paintMaterialId] ?? (voxel.paintMaterialId.startsWith('#') ? voxel.paintMaterialId : undefined) : undefined)
+      ?? colorOverride
+      ?? asset?.templateColor
+      ?? (voxel.materialId.startsWith('#') ? voxel.materialId : materialColors[voxel.materialId] ?? MATERIALS.find((material) => material.id === voxel.materialId)?.color ?? '#6c827d')
+  }
+  const surface = buildVoxelSurfaceMesh(previewVoxels, colorFor)
+  if (!surface.positions.length) return <div className="mini-preview-empty">暂无预览</div>
+  const points: Array<[number, number, number]> = []
+  let minX = Infinity
+  let minY = Infinity
+  let minZ = Infinity
+  for (let index = 0; index < surface.positions.length; index += 3) {
+    const point: [number, number, number] = [surface.positions[index], surface.positions[index + 1], surface.positions[index + 2]]
+    points.push(point)
+    minX = Math.min(minX, point[0])
+    minY = Math.min(minY, point[1])
+    minZ = Math.min(minZ, point[2])
+  }
+  const tileX = 8
+  const tileZ = 4.5
+  const tileY = Math.hypot(tileX, tileZ)
+  const rawProject = (x: number, y: number, z: number): [number, number] => [(z - x) * tileX, (x + z) * tileZ - y * tileY]
+  const projected = points.map((point) => rawProject(point[0] - minX, point[1] - minY, point[2] - minZ))
+  const projectedBounds = projected.reduce((result, point) => ({ minX: Math.min(result.minX, point[0]), minY: Math.min(result.minY, point[1]), maxX: Math.max(result.maxX, point[0]), maxY: Math.max(result.maxY, point[1]) }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity })
+  const width = Math.max(28, projectedBounds.maxX - projectedBounds.minX + 28)
+  const height = Math.max(28, projectedBounds.maxY - projectedBounds.minY + 28)
+  const project = (point: [number, number, number]): [number, number] => [14 + (rawProject(point[0] - minX, point[1] - minY, point[2] - minZ)[0] - projectedBounds.minX), 14 + (rawProject(point[0] - minX, point[1] - minY, point[2] - minZ)[1] - projectedBounds.minY)]
+  const rgb = (index: number) => [surface.colors[index * 3], surface.colors[index * 3 + 1], surface.colors[index * 3 + 2]]
+  const triangles = Array.from({ length: surface.indices.length / 3 }, (_, triangleIndex) => {
+    const indices = [surface.indices[triangleIndex * 3], surface.indices[triangleIndex * 3 + 1], surface.indices[triangleIndex * 3 + 2]]
+    const trianglePoints = indices.map((index) => points[index])
+    const color = indices.map(rgb).reduce((sum, value) => sum.map((channel, index) => channel + value[index]), [0, 0, 0]).map((value) => Math.round(value / 3 * 255))
+    const normal = indices.map((index) => [surface.normals[index * 3], surface.normals[index * 3 + 1], surface.normals[index * 3 + 2]]).reduce((sum, value) => sum.map((channel, index) => channel + value[index]), [0, 0, 0])
+    const light = Math.max(0.42, Math.min(1, 0.68 + normal[0] * 0.12 + normal[1] * 0.16 + normal[2] * 0.08))
+    const ao = indices.reduce((sum, index) => sum + surface.ao[index], 0) / 3
+    const fill = `rgb(${color.map((channel) => Math.round(channel * light * ao)).join(', ')})`
+    const depth = trianglePoints.reduce((sum, point) => sum + point[0] + point[2] + point[1] * 0.02, 0)
+    return { points: trianglePoints.map(project), fill, depth }
+  }).sort((left, right) => left.depth - right.depth)
+  return <div className="mini-preview" aria-label="固定斜前方实体预览"><svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet" role="img" aria-label="统一表面体素预览">{triangles.map((triangle, index) => <polygon key={index} points={triangle.points.map(([x, y]) => `${x},${y}`).join(' ')} fill={triangle.fill} />)}</svg></div>
+}
 
 const SynchronousVoxelMiniPreview = React.memo(function SynchronousVoxelMiniPreview({ voxels, asset, colorOverride, voxelColors = {}, materialColors = {}, maxPreviewVoxels, exteriorOnly = false }: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string>; maxPreviewVoxels?: number; exteriorOnly?: boolean }) {
   if (!voxels.length) return <div className="mini-preview-empty">暂无预览</div>
@@ -7385,6 +7451,7 @@ const WorkerVoxelMiniPreview = React.memo(function WorkerVoxelMiniPreview({ voxe
  * not block selection, camera movement, or the inspector itself.
  */
 const VoxelMiniPreview = React.memo(function VoxelMiniPreview(props: { voxels: Voxel[]; asset?: VoxelAsset; colorOverride?: string; voxelColors?: Record<string, string>; materialColors?: Record<string, string>; maxPreviewVoxels?: number; exteriorOnly?: boolean }) {
+  if (props.voxels.some((voxel) => voxelShape(voxel) !== 'cube')) return <VariantSurfaceMiniPreview {...props} />
   return props.voxels.length > LARGE_MINI_PREVIEW_THRESHOLD
     ? <WorkerVoxelMiniPreview {...props} />
     : <SynchronousVoxelMiniPreview {...props} />
@@ -7479,7 +7546,7 @@ function exposedVoxelFaces(voxel: Pick<Voxel, 'x' | 'y' | 'z'>, occupied: Set<st
   return voxelFaceDirections.filter(({ neighbor: [dx, dy, dz] }) => !occupied.has(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`)).map(({ key }) => key)
 }
 
-function configureHslPreviewMaterial(material: THREE.MeshStandardMaterial, cacheKey: string) {
+function configureHslPreviewMaterial(material: THREE.MeshStandardMaterial, cacheKey: string, enableVoxelAo = false) {
   const state = { hueDelta: 0, saturationTarget: 100, enabled: false }
   material.userData.moceHslPreviewState = state
   material.onBeforeCompile = (shader) => {
@@ -7513,18 +7580,85 @@ function configureHslPreviewMaterial(material: THREE.MeshStandardMaterial, cache
         return hsl.z + (rgb - 0.5) * chroma;
       }
     `
-    shader.fragmentShader = shader.fragmentShader.replace('void main() {', `uniform float moceHueDelta;\n      uniform float moceSaturationTarget;\n      uniform float moceHslPreviewEnabled;\n      ${helpers}\nvoid main() {`)
-      .replace('#include <color_fragment>', '#include <color_fragment>\n      if (moceHslPreviewEnabled > 0.5) {\n        vec3 moceSrgb = vec3(moceLinearToSrgb(diffuseColor.r), moceLinearToSrgb(diffuseColor.g), moceLinearToSrgb(diffuseColor.b));\n        vec3 moceHsl = moceRgbToHsl(moceSrgb);\n        moceHsl.x = fract(moceHsl.x + moceHueDelta);\n        moceHsl.y = clamp(moceSaturationTarget, 0.0, 1.0);\n        vec3 moceRgb = moceHslToRgb(moceHsl);\n        diffuseColor.rgb = vec3(moceSrgbToLinear(moceRgb.r), moceSrgbToLinear(moceRgb.g), moceSrgbToLinear(moceRgb.b));\n      }')
+    if (enableVoxelAo) {
+      shader.vertexShader = `attribute float moceAo;\nvarying float vMoceAo;\n${shader.vertexShader}`
+        .replace('#include <project_vertex>', '#include <project_vertex>\n      vMoceAo = moceAo;')
+      shader.fragmentShader = `varying float vMoceAo;\n${shader.fragmentShader}`
+    }
+    const colorFragment = `#include <color_fragment>
+      if (moceHslPreviewEnabled > 0.5) {
+        vec3 moceSrgb = vec3(moceLinearToSrgb(diffuseColor.r), moceLinearToSrgb(diffuseColor.g), moceLinearToSrgb(diffuseColor.b));
+        vec3 moceHsl = moceRgbToHsl(moceSrgb);
+        moceHsl.x = fract(moceHsl.x + moceHueDelta);
+        moceHsl.y = clamp(moceSaturationTarget, 0.0, 1.0);
+        vec3 moceRgb = moceHslToRgb(moceHsl);
+        diffuseColor.rgb = vec3(moceSrgbToLinear(moceRgb.r), moceSrgbToLinear(moceRgb.g), moceSrgbToLinear(moceRgb.b));
+      }
+      ${enableVoxelAo ? 'diffuseColor.rgb *= mix(0.74, 1.0, clamp(vMoceAo, 0.0, 1.0));' : ''}`
+    shader.fragmentShader = shader.fragmentShader.replace('void main() {', `uniform float moceHueDelta;
+      uniform float moceSaturationTarget;
+      uniform float moceHslPreviewEnabled;
+      ${helpers}
+void main() {`).replace('#include <color_fragment>', colorFragment)
   }
   material.customProgramCacheKey = () => cacheKey
 }
 
 function configureGreedyPreviewMaterial(material: THREE.MeshStandardMaterial) {
-  configureHslPreviewMaterial(material, 'moce-greedy-hsl-preview-v2')
+  configureHslPreviewMaterial(material, 'moce-greedy-hsl-preview-v3-ao', true)
 }
 
 function configureInstancedVoxelPreviewMaterial(material: THREE.MeshStandardMaterial) {
   configureHslPreviewMaterial(material, 'moce-instanced-voxel-hsl-preview-v1')
+}
+
+function attachVoxelAoAttribute(geometry: THREE.BufferGeometry, ao: Float32Array | undefined, vertexCount: number) {
+  if (ao && ao.length === vertexCount) geometry.setAttribute('moceAo', new THREE.BufferAttribute(ao, 1))
+}
+
+/**
+ * Render a mixed cube/variant component through the same exterior-surface
+ * path used by GLB/STL. The logical cells remain on the mesh userData for
+ * selection and editing; only the render representation changes.
+ */
+function createVoxelSurfaceRenderMesh(
+  voxels: Voxel[],
+  origin: { x: number; y: number; z: number },
+  colorResolver: (voxel: Voxel) => string,
+  scenePartId: string,
+): THREE.Mesh {
+  const surface = buildVoxelSurfaceMesh(voxels, colorResolver)
+  const positions = new Float32Array(surface.positions.length)
+  const normals = new Float32Array(surface.normals.length)
+  for (let index = 0; index < surface.positions.length; index += 3) {
+    // Surface data uses storage X/Y/Z; Three's editor scene uses X/Z/Y.
+    positions[index] = (surface.positions[index] - origin.x) * VOXEL_WORLD_SIZE
+    positions[index + 1] = (surface.positions[index + 2] - origin.z) * VOXEL_WORLD_SIZE
+    positions[index + 2] = (surface.positions[index + 1] - origin.y) * VOXEL_WORLD_SIZE
+    normals[index] = surface.normals[index]
+    normals[index + 1] = surface.normals[index + 2]
+    normals[index + 2] = surface.normals[index + 1]
+  }
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3, true))
+  geometry.setAttribute('color', new THREE.BufferAttribute(surface.colors, 3))
+  attachVoxelAoAttribute(geometry, surface.ao, positions.length / 3)
+  geometry.setIndex(new THREE.BufferAttribute(surface.indices, 1))
+  geometry.computeBoundingSphere()
+  const material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0 })
+  configureHslPreviewMaterial(material, 'moce-surface-hsl-v1', true)
+  const mesh = new THREE.Mesh(geometry, material)
+  mesh.userData.surfaceMesh = true
+  mesh.userData.customVoxels = voxels
+  mesh.userData.customComponentVoxels = voxels
+  mesh.userData.renderSurfaceOrigin = origin
+  mesh.userData.scenePartId = scenePartId
+  mesh.userData.outerVoxel = true
+  mesh.userData.baseRenderColor = 0xffffff
+  mesh.castShadow = false
+  mesh.receiveShadow = false
+  return mesh
 }
 
 function createVoxelOutlineGeometry() {
@@ -7588,6 +7722,8 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
     edgeGeometry = mesh.userData.customVoxels
       ? createCustomVoxelOutlineGeometry(mesh)
       : createInstancedVoxelOutlineGeometry(mesh)
+  } else if (mesh.userData.surfaceMesh) {
+    edgeGeometry = createSurfaceVoxelOutlineGeometry(mesh)
   } else if (mesh.userData.greedyMesh) {
     const workerOutlinePositions = mesh.userData.greedyOutlinePositions as Float32Array | undefined
     const greedyVoxels = mesh.userData.greedyVoxels as Array<{ gx: number; gy: number; gz: number }> | undefined
@@ -7627,7 +7763,7 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
   const glowMaterial = new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.2 })
   configureSelectionOutlineMaterial(glowMaterial, 'moce-selection-outline-glow-v2')
   const glow = new THREE.LineSegments(edgeGeometry, glowMaterial)
-  if (!(mesh instanceof THREE.InstancedMesh) && !mesh.userData.greedyMesh) glow.scale.setScalar(1.055)
+  if (!(mesh instanceof THREE.InstancedMesh) && !mesh.userData.greedyMesh && !mesh.userData.surfaceMesh) glow.scale.setScalar(1.055)
   glow.renderOrder = 20
   glow.userData.selectionGlow = true
   glow.raycast = () => {}
@@ -7638,7 +7774,7 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
   const edgeMaterial = new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.9 })
   configureSelectionOutlineMaterial(edgeMaterial, 'moce-selection-outline-edge-v2')
   const edge = new THREE.LineSegments(edgeGeometry, edgeMaterial)
-  if (!(mesh instanceof THREE.InstancedMesh) && !mesh.userData.greedyMesh) edge.scale.setScalar(1.012)
+  if (!(mesh instanceof THREE.InstancedMesh) && !mesh.userData.greedyMesh && !mesh.userData.surfaceMesh) edge.scale.setScalar(1.012)
   edge.renderOrder = 21
   edge.userData.selectionGlow = true
   edge.raycast = () => {}
@@ -7646,6 +7782,32 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
   const parts = [glow, edge]
   mesh.userData.selectionGlowParts = parts
   return parts
+}
+
+function createSurfaceVoxelOutlineGeometry(mesh: THREE.Mesh): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry()
+  const voxels = mesh.userData.customVoxels as Array<{ x: number; y: number; z: number }> | undefined
+  const origin = mesh.userData.renderSurfaceOrigin as { x: number; y: number; z: number } | undefined
+  if (!voxels?.length || !origin) return geometry
+  const occupied = new Set(voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
+  const scale = VOXEL_WORLD_SIZE
+  const half = scale / 2
+  const edgePairs: Array<[number, number]> = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]
+  const neighbors = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
+  const positions: number[] = []
+  for (const voxel of voxels) {
+    if (!neighbors.some(([dx, dy, dz]) => !occupied.has(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`))) continue
+    const cx = (voxel.x - origin.x + 0.5) * scale
+    const cy = (voxel.z - origin.z + 0.5) * scale
+    const cz = (voxel.y - origin.y + 0.5) * scale
+    const corners: Array<[number, number, number]> = [
+      [cx - half, cy - half, cz - half], [cx + half, cy - half, cz - half], [cx + half, cy + half, cz - half], [cx - half, cy + half, cz - half],
+      [cx - half, cy - half, cz + half], [cx + half, cy - half, cz + half], [cx + half, cy + half, cz + half], [cx - half, cy + half, cz + half],
+    ]
+    edgePairs.forEach(([start, end]) => positions.push(...corners[start], ...corners[end]))
+  }
+  if (positions.length) geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  return geometry
 }
 
 function createCustomVoxelOutlineGeometry(mesh: THREE.InstancedMesh): THREE.BufferGeometry {
@@ -8364,7 +8526,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     invalidateRenderRef.current(220)
   }
 
-  const materialMap = useMemo(() => new Map(project.materials.map((material) => [material.id, new THREE.MeshStandardMaterial({ color: material.color, roughness: 0.72, metalness: 0.03 })])), [project.materials])
+  const materialMap = useMemo(() => new Map(project.materials.map((material) => [material.id, new THREE.MeshStandardMaterial({ color: material.color, roughness: 0.9, metalness: 0 })])), [project.materials])
   // Keep transform-only commits off the expensive geometry effects below.
   // Position, custom-entity offsets and partial part offsets are applied by a
   // small transform pass; this key changes only when a mesh must be rebuilt.
@@ -8394,6 +8556,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       const geometry = new THREE.BufferGeometry()
       geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
       geometry.setAttribute('normal', new THREE.BufferAttribute(toolPreviewMesh.normals, 3, true))
+      attachVoxelAoAttribute(geometry, toolPreviewMesh.ao, positions.length / 3)
       geometry.setIndex(new THREE.BufferAttribute(toolPreviewMesh.indices, 1))
       const subtractPreview = drawOperation === 'subtract'
       if (!subtractPreview) {
@@ -8410,7 +8573,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
         geometry.setAttribute('color', new THREE.BufferAttribute(vertexColors, 3))
       }
       geometry.computeBoundingSphere()
-      const material = new THREE.MeshStandardMaterial({ color: subtractPreview ? '#e06b5b' : '#ffffff', vertexColors: !subtractPreview, transparent: true, opacity: 0.34, depthWrite: false, roughness: 0.7 })
+      const material = new THREE.MeshStandardMaterial({ color: subtractPreview ? '#e06b5b' : '#ffffff', vertexColors: !subtractPreview, transparent: true, opacity: 0.34, depthWrite: false, roughness: 0.9, metalness: 0 })
       const surface = new THREE.Mesh(geometry, material)
       surface.position.copy(toSceneWorld(voxelToWorld(toolPreviewMesh.minX), voxelToWorld(toolPreviewMesh.minY), voxelToWorld(toolPreviewMesh.minZ)))
       surface.userData.toolPreview = true
@@ -8435,7 +8598,8 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
         transparent: true,
         opacity: 0.38,
         depthWrite: false,
-        roughness: 0.7,
+        roughness: 0.9,
+        metalness: 0,
       })
       toolPreviewMaterialRef.current = material
     } else material.color.set(previewColor instanceof THREE.Color ? previewColor : previewColor)
@@ -8505,6 +8669,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       const geometry = new THREE.BufferGeometry()
       geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
       geometry.setAttribute('normal', new THREE.BufferAttribute(previewMesh.normals, 3, true))
+      attachVoxelAoAttribute(geometry, previewMesh.ao, positions.length / 3)
       geometry.setIndex(new THREE.BufferAttribute(previewMesh.indices, 1))
       const invalid = !previewState.valid
       if (!invalid) {
@@ -8527,7 +8692,8 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
         transparent: true,
         opacity: invalid ? 0.18 : 0.34,
         depthWrite: false,
-        roughness: 0.7,
+        roughness: 0.9,
+        metalness: 0,
       })
       const mesh = new THREE.Mesh(geometry, material)
       mesh.position.copy(toSceneWorld(voxelToWorld(previewMesh.minX), voxelToWorld(previewMesh.minY), voxelToWorld(previewMesh.minZ)))
@@ -8547,7 +8713,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       else byColor.set(color, [voxel])
     })
     byColor.forEach((voxels, color) => {
-      const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, new THREE.MeshStandardMaterial({ color, transparent: true, opacity: previewState?.valid ? 0.34 : 0.18, depthWrite: false, roughness: 0.7 }), voxels.length)
+      const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, new THREE.MeshStandardMaterial({ color, transparent: true, opacity: previewState?.valid ? 0.34 : 0.18, depthWrite: false, roughness: 0.9, metalness: 0 }), voxels.length)
       const matrix = new THREE.Matrix4()
       voxels.forEach((voxel, index) => { matrix.makeTranslation(voxelCenterToWorld(voxel.x), voxelCenterToWorld(voxel.z), voxelCenterToWorld(voxel.y)); mesh.setMatrixAt(index, matrix) })
       mesh.instanceMatrix.needsUpdate = true
@@ -8575,6 +8741,9 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     perspective.lookAt(0, 0, 0)
     const camera = orthographic
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
+    renderer.outputColorSpace = THREE.SRGBColorSpace
+    renderer.toneMapping = THREE.ACESFilmicToneMapping
+    renderer.toneMappingExposure = 1.05
     // Keep the WebGL back buffer at one stable size for the lifetime of the
     // viewport. Resizing it while a pointer gesture is in progress makes the
     // canvas briefly clear/reallocate, which is perceived as a flash even
@@ -8607,12 +8776,18 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     controls.panSpeed = 0.8
     controls.zoomSpeed = 0.85
     controls.target.set(0, 0, 0)
-    const ambient = new THREE.HemisphereLight('#f4f0e8', '#263238', 2.4)
+    const ambient = new THREE.HemisphereLight('#fff7ec', '#34434a', 1.25)
     scene.add(ambient)
-    const key = new THREE.DirectionalLight('#fff0d8', 3.5)
-    key.position.set(10, 10, 22)
+    const key = new THREE.DirectionalLight('#fff0d8', 1.45)
+    key.position.set(14, 18, 22)
     key.castShadow = true
     scene.add(key)
+    const fill = new THREE.DirectionalLight('#b9d5ff', 0.62)
+    fill.position.set(-18, 10, -14)
+    scene.add(fill)
+    const rim = new THREE.DirectionalLight('#ffd8bc', 0.28)
+    rim.position.set(2, 8, -24)
+    scene.add(rim)
     const initialBounds = sceneBoundsForProject(project)
     // The bottom of voxel row y=0 is the scene ground at z=0. Keep the floor
     // on that exact datum; depthWrite is disabled so the coplanar floor does
@@ -9311,6 +9486,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       const geometry = new THREE.BufferGeometry()
       geometry.setAttribute('position', new THREE.BufferAttribute(payload.positions, 3))
       geometry.setAttribute('normal', new THREE.BufferAttribute(payload.normals, 3, true))
+      attachVoxelAoAttribute(geometry, payload.ao, payload.positions.length / 3)
       const hasMultipleColors = materialIdsAreOneBased ? materialKeys.length > 2 : materialKeys.length > 1
       if (hasMultipleColors) {
         const parsedColors = materialKeys.map((key) => {
@@ -9332,8 +9508,8 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       const material = new THREE.MeshStandardMaterial({
         color: hasMultipleColors ? '#ffffff' : (solidColorKey?.startsWith('#') ? solidColorKey : (materialMap.get(solidColorKey)?.color ?? materialMap.get('terracotta')?.color ?? '#6c827d')),
         vertexColors: hasMultipleColors,
-        roughness: 0.72,
-        metalness: 0.03,
+        roughness: 0.9,
+        metalness: 0,
       })
       configureGreedyPreviewMaterial(material)
       const greedyMesh = new THREE.Mesh(geometry, material)
@@ -9492,7 +9668,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       const scenePartId = object.userData.scenePartId as string | undefined
       const isPreviewed = Boolean(colorPreview && scenePartId && selected.has(scenePartId))
       const meshMaterial = object.material as THREE.MeshStandardMaterial
-      if (object.userData.greedyMesh || object.userData.instancedVoxelColors) {
+      if (object.userData.greedyMesh || object.userData.instancedVoxelColors || object.userData.surfaceMesh) {
         const state = meshMaterial.userData.moceHslPreviewState as { hueDelta: number; saturationTarget: number; enabled: boolean } | undefined
         const uniforms = meshMaterial.userData.moceHslPreviewUniforms as { moceHueDelta?: { value: number }; moceSaturationTarget?: { value: number }; moceHslPreviewEnabled?: { value: number } } | undefined
         if (state) {
@@ -11094,7 +11270,7 @@ const MemoizedVoxelViewport = React.memo(VoxelViewport)
 const voxelRenderSignatureCache = new WeakMap<Voxel[], Map<string, { length: number; token: number }>>()
 const voxelRenderOriginCache = new WeakMap<ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>, { x: number; y: number; z: number }>()
 const pendingGeometryMeshCache = new Map<string, { mesh: VoxelGeometryMesh; voxelCount: number }>()
-type GreedyRenderMeshPayload = Pick<VoxelGeometryMesh, 'positions' | 'normals' | 'materialIds' | 'indices' | 'outlinePositions'>
+type GreedyRenderMeshPayload = Pick<VoxelGeometryMesh, 'positions' | 'normals' | 'ao' | 'materialIds' | 'indices' | 'outlinePositions'>
 let nextVoxelRenderSignatureToken = 1
 
 function voxelRenderSignature(component: Voxel[], componentColor?: string, forceCellRender = false): string {
@@ -11300,54 +11476,20 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
   // must be tested against every voxel in the editable component.
   componentGroup.userData.customComponentVoxels = component
   if (component.some((voxel) => voxelShape(voxel) !== 'cube')) {
-    const occupied = new Set(component.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
-    const occupiedVoxels = new Map(component.map((voxel) => [`${voxel.x},${voxel.y},${voxel.z}`, voxel] as const))
-    const cubeBatches = new Map<string, { color: THREE.Color; voxels: Voxel[] }>()
-    const variantBatches = new Map<string, { color: THREE.Color; voxel: Voxel; voxels: Voxel[]; includeMountingFace: boolean }>()
-    component.forEach((voxel) => {
-      const color = new THREE.Color(customVoxelRenderColorKey(voxel, materialMap, componentColor))
-      if (voxelShape(voxel) === 'cube') {
-        const key = color.getHexString()
-        const batch = cubeBatches.get(key) ?? { color, voxels: [] }
-        batch.voxels.push(voxel)
-        cubeBatches.set(key, batch)
-        return
-      }
-      const includeMountingFace = !variantMountingFaceCovered(voxel, occupiedVoxels)
-      const key = `${variantKey(voxel)}:${color.getHexString()}:${includeMountingFace ? 'closed' : 'open'}`
-      const batch = variantBatches.get(key) ?? { color, voxel, voxels: [], includeMountingFace }
-      batch.voxels.push(voxel)
-      variantBatches.set(key, batch)
-    })
-    const matrix = new THREE.Matrix4()
-    cubeBatches.forEach(({ color, voxels }) => {
-      const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03 }), voxels.length)
-      voxels.forEach((voxel, index) => {
-        matrix.makeTranslation(voxelCenterToWorld(voxel.x - origin.x), voxelCenterToWorld(voxel.z - origin.z), voxelCenterToWorld(voxel.y - origin.y))
-        mesh.setMatrixAt(index, matrix)
-      })
-      mesh.instanceMatrix.needsUpdate = true
-      mesh.userData.customVoxels = voxels
-      mesh.userData.customComponentVoxels = component
-      mesh.userData.customComponentId = voxelComponentId(component)
-      mesh.userData.scenePartId = componentScenePartId
-      mesh.userData.outerVoxel = voxels.some((voxel) => exposedVoxelFaces(voxel, occupied).length > 0)
-      componentGroup.add(mesh)
-    })
-    variantBatches.forEach(({ color, voxel, voxels, includeMountingFace }) => {
-      const mesh = new THREE.InstancedMesh(sharedVariantThreeGeometry(voxel, includeMountingFace), new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }), voxels.length)
-      voxels.forEach((cell, index) => {
-        matrix.makeTranslation((cell.x - origin.x) * VOXEL_WORLD_SIZE, (cell.z - origin.z) * VOXEL_WORLD_SIZE, (cell.y - origin.y) * VOXEL_WORLD_SIZE)
-        mesh.setMatrixAt(index, matrix)
-      })
-      mesh.instanceMatrix.needsUpdate = true
-      mesh.userData.customVoxels = voxels
-      mesh.userData.customComponentVoxels = component
-      mesh.userData.customComponentId = voxelComponentId(component)
-      mesh.userData.scenePartId = componentScenePartId
-      mesh.userData.outerVoxel = true
-      componentGroup.add(mesh)
-    })
+    // Variant cells and cubes must share one external-surface representation.
+    // Keeping them as independent closed meshes creates coplanar mounting
+    // faces, which show up as flicker/cracks and can become non-manifold on
+    // export. The surface builder removes covered faces, welds compatible
+    // vertices, and preserves hard normals and per-voxel colors.
+    const surfaceMesh = createVoxelSurfaceRenderMesh(
+      component,
+      origin,
+      (voxel) => customVoxelRenderColorKey(voxel, materialMap, componentColor),
+      componentScenePartId,
+    )
+    surfaceMesh.userData.customComponentId = voxelComponentId(component)
+    surfaceMesh.userData.customComponentVoxels = component
+    componentGroup.add(surfaceMesh)
     componentGroup.userData.variantRendered = true
     componentGroup.userData.greedyDisabled = true
     return componentGroup
@@ -11441,7 +11583,7 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
     const initialColor = new THREE.Color(initialColorKey)
     for (let start = 0; start < component.length; start += cellChunkSize) {
       const end = Math.min(component.length, start + cellChunkSize)
-      const meshMaterial = new THREE.MeshStandardMaterial({ color: '#ffffff', vertexColors: true, roughness: 0.72, metalness: 0.03 })
+      const meshMaterial = new THREE.MeshStandardMaterial({ color: '#ffffff', vertexColors: true, roughness: 0.9, metalness: 0 })
       configureInstancedVoxelPreviewMaterial(meshMaterial)
       const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, meshMaterial, end - start)
       mesh.count = 0
@@ -11519,7 +11661,7 @@ function buildCustomComponentGroup(component: Voxel[], entityId: string, materia
     batches.set(key, batch)
   })
   batches.forEach(({ color, voxels }) => {
-    const meshMaterial = new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03 })
+    const meshMaterial = new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0 })
     const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, meshMaterial, voxels.length)
     const matrix = new THREE.Matrix4()
     voxels.forEach((voxel, index) => {
@@ -11575,7 +11717,7 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
     })()
   group.rotation.set(rotationX * Math.PI / 180, rotationY * Math.PI / 180, -(rotation + rotationZ) * Math.PI / 180)
   if (!resolvedComponents.length) {
-    const placeholder = new THREE.Mesh(new THREE.BoxGeometry(asset.width * scale, asset.depth * scale, asset.height * scale), new THREE.MeshStandardMaterial({ color: asset.color, roughness: 0.76 }))
+    const placeholder = new THREE.Mesh(new THREE.BoxGeometry(asset.width * scale, asset.depth * scale, asset.height * scale), new THREE.MeshStandardMaterial({ color: asset.color, roughness: 0.9, metalness: 0 }))
     placeholder.position.set(-pivotWorld.x, -pivotWorld.y, asset.height * scale / 2 - pivotWorld.z)
     placeholder.userData.instanceId = asset.id
     group.add(placeholder)
@@ -11620,7 +11762,7 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
         )
       }
       cubeBatches.forEach(({ color, voxels }) => {
-        const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03 }), voxels.length)
+        const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0 }), voxels.length)
         voxels.forEach((cell, index) => {
           setLocalMatrix(cell, matrix)
           matrix.elements[12] += scale / 2
@@ -11635,7 +11777,7 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
         partGroup.add(mesh)
       })
       variantBatches.forEach(({ color, voxel, voxels, includeMountingFace }) => {
-        const mesh = new THREE.InstancedMesh(sharedVariantThreeGeometry(voxel, includeMountingFace), new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }), voxels.length)
+        const mesh = new THREE.InstancedMesh(sharedVariantThreeGeometry(voxel, includeMountingFace), new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0 }), voxels.length)
         voxels.forEach((cell, index) => {
           setLocalMatrix(cell, matrix)
           mesh.setMatrixAt(index, matrix)
@@ -11701,7 +11843,7 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
       batches.set(key, batch)
     })
     batches.forEach(({ color, voxels }) => {
-      const material = new THREE.MeshStandardMaterial({ color, roughness: 0.72, metalness: 0.03 })
+      const material = new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0 })
       const mesh = new THREE.InstancedMesh(sharedVoxelBoxGeometry, material, voxels.length)
       const matrix = new THREE.Matrix4()
       voxels.forEach((voxel, index) => {

@@ -3,6 +3,9 @@ export type ScenePreviewInputVoxel = {
   y: number
   z: number
   color: string
+  shape?: import('../voxel-variants').VoxelShape
+  facing?: import('../voxel-variants').VoxelFacing
+  rotation?: import('../voxel-variants').VoxelRotation
 }
 
 export type ScenePreviewFace = {

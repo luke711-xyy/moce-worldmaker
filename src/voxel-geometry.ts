@@ -29,6 +29,8 @@ export type VoxelGeometryPreview = {
 export type VoxelGeometryMesh = {
   positions: Float32Array
   normals: Int8Array
+  /** Per-vertex ambient occlusion, in the range 0..1. */
+  ao: Float32Array
   materialIds: Uint8Array
   indices: Uint32Array
   outlinePositions?: Float32Array

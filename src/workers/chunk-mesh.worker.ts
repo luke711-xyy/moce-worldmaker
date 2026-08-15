@@ -16,6 +16,7 @@ export type ChunkMeshWorkerResponse = {
   revision: number
   positions: Float32Array
   normals: Int8Array
+  ao: Float32Array
   materialIds: Uint8Array
   indices: Uint32Array
   outlinePositions?: Float32Array
@@ -46,6 +47,7 @@ self.onmessage = (event: MessageEvent<ChunkMeshWorkerRequest>) => {
     transfer: [
       response.positions.buffer,
       response.normals.buffer,
+      response.ao.buffer,
       response.materialIds.buffer,
       response.indices.buffer,
       ...(response.outlinePositions ? [response.outlinePositions.buffer] : []),

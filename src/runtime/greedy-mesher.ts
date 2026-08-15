@@ -8,6 +8,7 @@ export type MesherVoxel = {
 export type GreedyMeshPayload = {
   positions: Float32Array
   normals: Int8Array
+  ao: Float32Array
   materialIds: Uint8Array
   indices: Uint32Array
   outlinePositions?: Float32Array
@@ -66,6 +67,7 @@ export function buildGreedyMesh(voxels: ReadonlyArray<MesherVoxel>, options: Gre
   if (!voxels.length) return {
     positions: new Float32Array(),
     normals: new Int8Array(),
+    ao: new Float32Array(),
     materialIds: new Uint8Array(),
     indices: new Uint32Array(),
     outlinePositions: options.includeOutline ? new Float32Array() : undefined,
@@ -93,6 +95,7 @@ export function buildGreedyMesh(voxels: ReadonlyArray<MesherVoxel>, options: Gre
   voxels.forEach((voxel) => occupied.set(key(voxel.gx - min[0], voxel.gy - min[1], voxel.gz - min[2]), voxel.materialId))
   const positions: number[] = []
   const normals: number[] = []
+  const aoValues: number[] = []
   const materialIds: number[] = []
   const indices: number[] = []
   let quadCount = 0
@@ -161,6 +164,24 @@ export function buildGreedyMesh(voxels: ReadonlyArray<MesherVoxel>, options: Gre
             const normal = [0, 0, 0]
             normal[axis] = cell.sign
             normals.push(...normal)
+            const faceCell = base.map((value, index) => value + (cell.sign < 0 ? q[index] : 0))
+            const deltaU = cornerIndex === 0 || cornerIndex === 3 ? -1 : 1
+            const deltaV = cornerIndex === 0 || cornerIndex === 1 ? -1 : 1
+            const sideU = [...faceCell]
+            const sideV = [...faceCell]
+            const corner = [...faceCell]
+            sideU[u] += deltaU
+            sideV[v] += deltaV
+            corner[u] += deltaU
+            corner[v] += deltaV
+            const occupiedAt = (point: number[]) => occupied.has(key(point[0] - min[0], point[1] - min[1], point[2] - min[2]))
+            const sideUOccupied = occupiedAt(sideU)
+            const sideVOccupied = occupiedAt(sideV)
+            const cornerOccupied = occupiedAt(corner)
+            const ao = sideUOccupied && sideVOccupied
+              ? 0.52
+              : 1 - (sideUOccupied ? 0.18 : 0) - (sideVOccupied ? 0.18 : 0) - (cornerOccupied ? 0.10 : 0)
+            aoValues.push(ao)
             materialIds.push(cell.materialId)
           })
           indices.push(firstVertex, firstVertex + 1, firstVertex + 2, firstVertex, firstVertex + 2, firstVertex + 3)
@@ -179,6 +200,7 @@ export function buildGreedyMesh(voxels: ReadonlyArray<MesherVoxel>, options: Gre
   return {
     positions: positionBuffer,
     normals: normalBuffer,
+    ao: new Float32Array(aoValues),
     materialIds: new Uint8Array(materialIds),
     indices: new Uint32Array(indices),
     outlinePositions: options.includeOutline ? buildOutlinePositions(positionBuffer, normalBuffer, quadCount) : undefined,

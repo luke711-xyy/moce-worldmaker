@@ -1,3 +1,4 @@
+import { buildVoxelSurfaceMesh } from './voxel-surface'
 import { buildVariantGeometry } from './voxel-variant-geometry'
 import { voxelFacing, voxelRotation, voxelShape } from './voxel-variants'
 
@@ -1914,6 +1915,39 @@ function stlMeshFromVoxels(voxels: Voxel[]): { vertices: StlPoint[]; triangles: 
 
 /** Export render variants as real geometry while preserving cube occupancy. */
 function stlMeshFromVariants(voxels: Voxel[]): { vertices: StlPoint[]; triangles: StlTriangle[] } {
+  const surface = buildVoxelSurfaceMesh(voxels)
+  const vertices: StlPoint[] = []
+  const vertexIds = new Map<string, number>()
+  const remap: number[] = []
+  for (let index = 0; index < surface.positions.length; index += 3) {
+    const point: StlPoint = [surface.positions[index], surface.positions[index + 1], surface.positions[index + 2]]
+    // STL has no normals/vertex colors. Weld by exact voxel-grid position so
+    // hard-normal and multi-color splits used by the render mesh do not make
+    // a geometrically closed shell look non-manifold to slicers.
+    const key = point.map((value) => value.toFixed(6)).join(',')
+    const existing = vertexIds.get(key)
+    if (existing !== undefined) {
+      remap.push(existing)
+      continue
+    }
+    const id = vertices.length
+    vertices.push(point)
+    vertexIds.set(key, id)
+    remap.push(id)
+  }
+  const triangles: StlTriangle[] = []
+  for (let index = 0; index < surface.indices.length; index += 3) {
+    const triangle: StlTriangle = [
+      remap[surface.indices[index]],
+      remap[surface.indices[index + 1]],
+      remap[surface.indices[index + 2]],
+    ]
+    if (new Set(triangle).size === 3) triangles.push(triangle)
+  }
+  return { vertices, triangles }
+}
+
+function stlMeshFromVariantsLegacy(voxels: Voxel[]): { vertices: StlPoint[]; triangles: StlTriangle[] } {
   const cubes = voxels.filter((voxel) => voxelShape(voxel) === 'cube')
   const mesh = stlMeshFromVoxels(cubes)
   const vertices = [...mesh.vertices]
@@ -1942,15 +1976,82 @@ function stlEdgeKey(left: number, right: number): string {
   return left < right ? `${left}:${right}` : `${right}:${left}`
 }
 
-function countNonManifoldEdges(mesh: { triangles: StlTriangle[] }): number {
-  const edges = new Map<string, number>()
+function stlPointKey(point: StlPoint): string {
+  return point.map((value) => value.toFixed(6)).join(',')
+}
+
+function stlPointOnSegment(point: StlPoint, start: StlPoint, end: StlPoint): boolean {
+  const direction: StlPoint = [end[0] - start[0], end[1] - start[1], end[2] - start[2]]
+  const relative: StlPoint = [point[0] - start[0], point[1] - start[1], point[2] - start[2]]
+  const length = Math.hypot(...direction)
+  if (length < 1e-8) return false
+  const cross: StlPoint = [
+    direction[1] * relative[2] - direction[2] * relative[1],
+    direction[2] * relative[0] - direction[0] * relative[2],
+    direction[0] * relative[1] - direction[1] * relative[0],
+  ]
+  if (Math.hypot(...cross) > 1e-6 * length) return false
+  const projection = (relative[0] * direction[0] + relative[1] * direction[1] + relative[2] * direction[2]) / (length * length)
+  return projection > 1e-6 && projection < 1 - 1e-6
+}
+
+function stlPointInsideTriangle(point: StlPoint, triangle: StlPoint[]): boolean {
+  const [a, b, c] = triangle
+  const ab: StlPoint = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+  const ac: StlPoint = [c[0] - a[0], c[1] - a[1], c[2] - a[2]]
+  const ap: StlPoint = [point[0] - a[0], point[1] - a[1], point[2] - a[2]]
+  const normal: StlPoint = [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]]
+  const normalLength = Math.hypot(...normal)
+  if (normalLength < 1e-8 || Math.abs(normal[0] * ap[0] + normal[1] * ap[1] + normal[2] * ap[2]) > 1e-6 * normalLength) return false
+  const dot = (left: StlPoint, right: StlPoint) => left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+  const v0 = ac
+  const v1 = ab
+  const v2 = ap
+  const d00 = dot(v0, v0)
+  const d01 = dot(v0, v1)
+  const d11 = dot(v1, v1)
+  const d20 = dot(v2, v0)
+  const d21 = dot(v2, v1)
+  const denominator = d00 * d11 - d01 * d01
+  if (Math.abs(denominator) < 1e-8) return false
+  const v = (d11 * d20 - d01 * d21) / denominator
+  const w = (d00 * d21 - d01 * d20) / denominator
+  const u = 1 - v - w
+  return u >= -1e-6 && v >= -1e-6 && w >= -1e-6
+}
+
+function countNonManifoldEdges(mesh: { vertices: StlPoint[]; triangles: StlTriangle[] }): number {
+  const allPoints = new Map<string, StlPoint>()
+  mesh.vertices.forEach((point) => allPoints.set(stlPointKey(point), point))
+  const edges = new Map<string, { count: number; start: StlPoint; end: StlPoint }>()
   mesh.triangles.forEach(([a, b, c]) => {
-    for (const [left, right] of [[a, b], [b, c], [c, a]]) {
-      const key = stlEdgeKey(left, right)
-      edges.set(key, (edges.get(key) ?? 0) + 1)
+    for (const [startId, endId] of [[a, b], [b, c], [c, a]]) {
+      const start = mesh.vertices[startId]
+      const end = mesh.vertices[endId]
+      const direction: StlPoint = [end[0] - start[0], end[1] - start[1], end[2] - start[2]]
+      const lengthSquared = direction[0] ** 2 + direction[1] ** 2 + direction[2] ** 2
+      const points = [start, end, ...[...allPoints.values()].filter((point) => stlPointOnSegment(point, start, end))]
+      points.sort((left, right) => {
+        const leftT = ((left[0] - start[0]) * direction[0] + (left[1] - start[1]) * direction[1] + (left[2] - start[2]) * direction[2]) / lengthSquared
+        const rightT = ((right[0] - start[0]) * direction[0] + (right[1] - start[1]) * direction[1] + (right[2] - start[2]) * direction[2]) / lengthSquared
+        return leftT - rightT
+      })
+      for (let index = 0; index < points.length - 1; index += 1) {
+        const left = stlPointKey(points[index])
+        const right = stlPointKey(points[index + 1])
+        if (left === right) continue
+        const key = left < right ? `${left}:${right}` : `${right}:${left}`
+        const existing = edges.get(key)
+        edges.set(key, existing ? { ...existing, count: existing.count + 1 } : { count: 1, start: points[index], end: points[index + 1] })
+      }
     }
   })
-  return [...edges.values()].filter((count) => count !== 2).length
+  return [...edges.values()].filter(({ count, start, end }) => {
+    if (count === 2) return false
+    const midpoint: StlPoint = [(start[0] + end[0]) / 2, (start[1] + end[1]) / 2, (start[2] + end[2]) / 2]
+    if ((count === 1 || count === 3) && mesh.triangles.some(([a, b, c]) => stlPointInsideTriangle(midpoint, [mesh.vertices[a], mesh.vertices[b], mesh.vertices[c]]))) return false
+    return true
+  }).length
 }
 
 function stlNormal(vertices: StlPoint[], [a, b, c]: StlTriangle): StlPoint {

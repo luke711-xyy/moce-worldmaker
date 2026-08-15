@@ -75,13 +75,13 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
     if (request.kind === 'shell') {
       const geometry = computeShell(request.voxels, request.thickness)
       const mesh = buildGeometryPreviewMesh(geometry)
-      self.postMessage({ id, geometry, mesh }, mesh ? [mesh.positions.buffer, mesh.normals.buffer, mesh.materialIds.buffer, mesh.indices.buffer] : [])
+      self.postMessage({ id, geometry, mesh }, mesh ? [mesh.positions.buffer, mesh.normals.buffer, mesh.ao.buffer, mesh.materialIds.buffer, mesh.indices.buffer] : [])
       return
     }
     if (request.kind === 'scale') {
       const geometry = computeScale(request.voxels, request.mode, request.factor)
       const mesh = buildGeometryPreviewMesh(geometry)
-      self.postMessage({ id, geometry, mesh }, mesh ? [mesh.positions.buffer, mesh.normals.buffer, mesh.materialIds.buffer, mesh.indices.buffer] : [])
+      self.postMessage({ id, geometry, mesh }, mesh ? [mesh.positions.buffer, mesh.normals.buffer, mesh.ao.buffer, mesh.materialIds.buffer, mesh.indices.buffer] : [])
       return
     }
     if (request.kind === 'shell-options') {
@@ -120,7 +120,7 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
     const response = request.kind === 'extrude' && request.includeVoxels === false
       ? { id, voxels: undefined, mesh }
       : { id, voxels, mesh: null }
-    self.postMessage(response, mesh ? [mesh.positions.buffer, mesh.normals.buffer, mesh.materialIds.buffer, mesh.indices.buffer] : [])
+    self.postMessage(response, mesh ? [mesh.positions.buffer, mesh.normals.buffer, mesh.ao.buffer, mesh.materialIds.buffer, mesh.indices.buffer] : [])
   } catch (error) {
     self.postMessage({ id, error: error instanceof Error ? error.message : '体素工具 Worker 执行失败' })
   }
