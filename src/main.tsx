@@ -3421,13 +3421,17 @@ function App() {
 
   const commitScenePartsMove = (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number): GridMoveResult => {
     const cachedValidation = sceneMoveValidationRef.current
-    const result = cachedValidation
+    const matchingValidation = cachedValidation
       && cachedValidation.project === projectRef.current
       && cachedValidation.parts === parts
       && cachedValidation.deltaX === deltaX
       && cachedValidation.deltaY === deltaY
       && cachedValidation.deltaZ === deltaZ
-      ? cachedValidation.result
+      ? cachedValidation
+      : null
+    const hasCachedValidation = Boolean(matchingValidation)
+    const result = matchingValidation
+      ? matchingValidation.result
       : previewScenePartsMove(parts, deltaX, deltaY, deltaZ)
     sceneMoveValidationRef.current = null
     if (!result.moved) {
@@ -3442,29 +3446,30 @@ function App() {
       && sceneMoveBoundsRef.current.sourceParts === parts
       ? sceneMoveBoundsRef.current.parts
       : resolveCurrentSceneParts(parts)
-    sceneOccupancyRef.current?.syncOwnerTransforms(sceneEntityParts(projectRef.current))
     const movableParts = effectiveParts.filter((part) => !scenePartIsLocked(projectRef.current, part))
-    // The preview result is only a proposal. Re-check against the current
-    // project/index immediately before mutating either one. This closes the
-    // race where a transition, undo, or another edit changes occupancy after
-    // the last pointermove and before pointerup.
-    const freshBounds = scenePartsGridBounds(movableParts, null)
-    const movingIdsForCommit = movableParts.map((part) => part.id)
-    const isMoveValid = (candidate: GridMoveResult) => Boolean(freshBounds)
-      && translatedVoxelBoundsWithinScene(freshBounds!, sceneBoundsForProject(projectRef.current), candidate.deltaX, candidate.deltaY, candidate.deltaZ)
-      && !sceneOccupancyRef.current!.collidesTranslatedSceneParts(
-        movableParts,
-        { x: candidate.deltaX, y: candidate.deltaY, z: candidate.deltaZ },
-        movingIdsForCommit,
-      )
-    // A pointer-up can race a scene edit/undo or an occupancy reconciliation.
-    // Re-resolve the same requested displacement instead of rejecting the
-    // already-rendered position and snapping all roots back to the origin.
-    // This keeps the release path on the same hard-boundary/collision rules as
-    // preview while making the last safe grid position authoritative.
-    const finalResult = isMoveValid(result)
-      ? result
-      : resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => isMoveValid({ moved: true, blocked: false, deltaX: stepX, deltaY: stepY, deltaZ: stepZ }), false)
+    let finalResult = result
+    if (!hasCachedValidation) {
+      sceneOccupancyRef.current?.syncOwnerTransforms(sceneEntityParts(projectRef.current))
+      // There was no matching pointermove validation, so this non-gesture
+      // caller still needs a final collision and boundary check. A normal
+      // drag release does have a matching cached result and deliberately
+      // skips this second decision path.
+      const freshBounds = scenePartsGridBounds(movableParts, null)
+      const movingIdsForCommit = movableParts.map((part) => part.id)
+      const isMoveValid = (candidate: GridMoveResult) => Boolean(freshBounds)
+        && translatedVoxelBoundsWithinScene(freshBounds!, sceneBoundsForProject(projectRef.current), candidate.deltaX, candidate.deltaY, candidate.deltaZ)
+        && !sceneOccupancyRef.current!.collidesTranslatedSceneParts(
+          movableParts,
+          { x: candidate.deltaX, y: candidate.deltaY, z: candidate.deltaZ },
+          movingIdsForCommit,
+        )
+      // Keep the same hard boundary/collision rules for callers without a
+      // cached preview, but do not reject the position already shown during a
+      // drag merely because a second snapshot disagrees at pointer-up.
+      finalResult = isMoveValid(result)
+        ? result
+        : resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => isMoveValid({ moved: true, blocked: false, deltaX: stepX, deltaY: stepY, deltaZ: stepZ }), false)
+    }
     if (!finalResult.moved) {
       sceneMoveBoundsRef.current = null
       setNotice('实体已抵达场景边界或碰撞边界 · 该方向无法继续')
@@ -9944,6 +9949,10 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     // object, not on the ground. Projecting a floating object onto z=0 makes
     // the delta depend on other geometry and can flip or snap the drag when
     // the ray crosses another object's projected bounds.
+    // A nearly parallel ray has no stable intersection with this plane. Do
+    // not fall back to the ground plane in that case: that changes coordinate
+    // frames mid-gesture and is the source of the occasional release flash.
+    if (Math.abs(raycasterRef.current.ray.direction.z) < 1e-5) return null
     return raycasterRef.current.ray.intersectPlane(
       new THREE.Plane(new THREE.Vector3(0, 0, 1), -worldZ),
       new THREE.Vector3(),
@@ -10642,7 +10651,11 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       setDragVisualOffset(gesture, moveResult.deltaX, moveResult.deltaY, moveResult.deltaZ)
       return
     }
-    const floorPoint = pointerHorizontalPoint(event, gesture.horizontalPlaneZ) ?? pointerFloorPoint(event)
+    // During a horizontal drag, keep the gesture on the plane selected at
+    // pointer-down. If the ray is temporarily parallel to that plane, retain
+    // the last validated position instead of projecting onto a different
+    // plane and producing a large, reversed delta.
+    const floorPoint = pointerHorizontalPoint(event, gesture.horizontalPlaneZ)
     if (!floorPoint) return
     const deltaX = worldToVoxel(floorPoint.x - gesture.startGroundX)
     const deltaZ = worldToVoxel(floorPoint.y - gesture.startGroundY)
@@ -11276,11 +11289,10 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     const selectGesture = selectGestureRef.current
     if (selectGesture?.pointerId === event.pointerId) {
       selectGestureRef.current = null
-      // React pointerup can arrive before the final pointermove. Recompute
-      // from the release coordinate so the committed position is exactly the
-      // position represented by the mouse-up, not the previous animation
-      // frame's position.
-      updateSelectGestureAtPointer(selectGesture, event)
+      // The last pointermove is already the authoritative, collision- and
+      // boundary-validated position. Re-projecting the release coordinate
+      // here can switch planes or observe a different occupancy snapshot and
+      // make the entity flash back before the commit is painted.
       commitDragGesture(selectGesture)
       setViewportInteraction(false)
       if (controlsRef.current) controlsRef.current.enabled = true
@@ -11346,7 +11358,8 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       if (selectGestureRef.current?.pointerId === event.pointerId) {
         const selectGesture = selectGestureRef.current
         selectGestureRef.current = null
-        updateSelectGestureAtPointer(selectGesture, event)
+        // Keep the last validated drag position. Pointer-up is only a commit
+        // signal; it must not introduce a second projection/validation path.
         commitDragGesture(selectGesture)
         setViewportInteraction(false)
         if (controlsRef.current) controlsRef.current.enabled = true
