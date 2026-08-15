@@ -3392,15 +3392,22 @@ function App() {
       sceneMoveValidationRef.current = { project: currentProject, parts, deltaX, deltaY, deltaZ, result }
       return result
     }
+    const bounds = sceneBoundsForProject(currentProject)
+    // Capture the moving selection's scene-space bounds once per pointer
+    // gesture.  Drag rendering is imperative, so the authoritative project
+    // does not move until pointer-up; using this stable box keeps every
+    // pointer sample in the same coordinate frame.
+    const cachedBounds = cachedMove?.bounds ?? scenePartsGridBounds(movableParts, sceneOccupancyRef.current)
     const movingIds = cachedMove?.movingIds ?? movableParts.map((part) => part.id)
-    // Scene dragging is constrained only by actual voxel overlap. The scene
-    // boundary and the ground are not drag collision surfaces: an entity may
-    // temporarily leave the working box while the user is positioning it.
-    // Keeping those checks here caused an AABB/ground rejection to look like
-    // an unexplained snap-back even when no other entity was intersecting.
-    sceneMoveBoundsRef.current = { project: currentProject, sourceParts: parts, parts: currentParts, movingIds, bounds: null }
+    sceneMoveBoundsRef.current = { project: currentProject, sourceParts: parts, parts: currentParts, movingIds, bounds: cachedBounds }
+    if (!cachedBounds) {
+      const result = { moved: false, blocked: true, deltaX: 0, deltaY: 0, deltaZ: 0 }
+      sceneMoveValidationRef.current = { project: currentProject, parts, deltaX, deltaY, deltaZ, result }
+      return result
+    }
     const result = resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => {
-      return !sceneOccupancyRef.current!.collidesTranslatedSceneParts(movableParts, { x: stepX, y: stepY, z: stepZ }, movingIds)
+      return translatedVoxelBoundsWithinScene(cachedBounds, bounds, stepX, stepY, stepZ)
+        && !sceneOccupancyRef.current!.collidesTranslatedSceneParts(movableParts, { x: stepX, y: stepY, z: stepZ }, movingIds)
     }, false)
     sceneMoveValidationRef.current = { project: currentProject, parts, deltaX, deltaY, deltaZ, result }
     return result
@@ -3435,15 +3442,27 @@ function App() {
     // project/index immediately before mutating either one. This closes the
     // race where a transition, undo, or another edit changes occupancy after
     // the last pointermove and before pointerup.
-    const finalMoveValid = !sceneOccupancyRef.current!.collidesTranslatedSceneParts(
+    const freshBounds = scenePartsGridBounds(movableParts, null)
+    const movingIdsForCommit = movableParts.map((part) => part.id)
+    const isMoveValid = (candidate: GridMoveResult) => Boolean(freshBounds)
+      && translatedVoxelBoundsWithinScene(freshBounds!, sceneBoundsForProject(projectRef.current), candidate.deltaX, candidate.deltaY, candidate.deltaZ)
+      && !sceneOccupancyRef.current!.collidesTranslatedSceneParts(
         movableParts,
-        { x: result.deltaX, y: result.deltaY, z: result.deltaZ },
-        movableParts.map((part) => part.id),
+        { x: candidate.deltaX, y: candidate.deltaY, z: candidate.deltaZ },
+        movingIdsForCommit,
       )
-    if (!finalMoveValid) {
+    // A pointer-up can race a scene edit/undo or an occupancy reconciliation.
+    // Re-resolve the same requested displacement instead of rejecting the
+    // already-rendered position and snapping all roots back to the origin.
+    // This keeps the release path on the same hard-boundary/collision rules as
+    // preview while making the last safe grid position authoritative.
+    const finalResult = isMoveValid(result)
+      ? result
+      : resolveGridMove(deltaX, deltaY, deltaZ, (stepX, stepY, stepZ) => isMoveValid({ moved: true, blocked: false, deltaX: stepX, deltaY: stepY, deltaZ: stepZ }), false)
+    if (!finalResult.moved) {
       sceneMoveBoundsRef.current = null
-      setNotice('实体与其他实体发生碰撞 · 已取消本次移动')
-      return { moved: false, blocked: true, deltaX: 0, deltaY: 0, deltaZ: 0 }
+      setNotice('实体已抵达场景边界或碰撞边界 · 该方向无法继续')
+      return finalResult
     }
     const currentParts = sceneEntityParts(projectRef.current)
     const movingCustomIds = new Set(movableParts.filter((part) => part.kind === 'custom').map((part) => part.partId))
@@ -3507,9 +3526,9 @@ function App() {
       movingCustomIds.forEach((entityId) => {
         const current = nextOffsets[entityId] ?? { x: 0, y: 0, z: 0 }
         nextOffsets[entityId] = {
-          x: current.x + result.deltaX,
-          y: current.y + result.deltaY,
-          z: current.z + result.deltaZ,
+          x: current.x + finalResult.deltaX,
+          y: current.y + finalResult.deltaY,
+          z: current.z + finalResult.deltaZ,
         }
       })
       nextProject.customEntityOffsets = nextOffsets
@@ -3521,29 +3540,29 @@ function App() {
       const movesWholeInstance = allParts.length > 0 && selectedParts.length === allParts.length && allParts.every((part) => movingIds?.has(part.id))
       if (movesWholeInstance) {
         const asset = nextProject.assets.find((item) => item.id === instance.assetId)
-        instance.x = translateWorldByVoxels(instance.x, result.deltaX)
-        instance.y = voxelToWorld(worldToVoxel(instance.y ?? 0) + result.deltaY)
-        instance.z = translateWorldByVoxels(instance.z, result.deltaZ)
+        instance.x = translateWorldByVoxels(instance.x, finalResult.deltaX)
+        instance.y = voxelToWorld(worldToVoxel(instance.y ?? 0) + finalResult.deltaY)
+        instance.z = translateWorldByVoxels(instance.z, finalResult.deltaZ)
         return
       }
       const offsets = { ...(instance.partOffsets ?? {}) }
       selectedParts.forEach((part) => {
         const current = offsets[part.partId] ?? { x: 0, y: 0, z: 0 }
         offsets[part.partId] = {
-          x: snapWorld(current.x + voxelToWorld(result.deltaX)),
-          y: snapWorld(current.y + voxelToWorld(result.deltaY)),
-          z: snapWorld(current.z + voxelToWorld(result.deltaZ)),
+          x: snapWorld(current.x + voxelToWorld(finalResult.deltaX)),
+          y: snapWorld(current.y + voxelToWorld(finalResult.deltaY)),
+          z: snapWorld(current.z + voxelToWorld(finalResult.deltaZ)),
         }
       })
       instance.partOffsets = offsets
     })
-    commitScenePartsMoveFast(nextProject, movableParts, result.deltaX, result.deltaY, result.deltaZ)
+    commitScenePartsMoveFast(nextProject, movableParts, finalResult.deltaX, finalResult.deltaY, finalResult.deltaZ)
     // The occupancy index now owns the lightweight lazy translation. Keeping
     // the temporary scene-coordinate voxel array would retain the whole model
     // until the next drag and increase GC pressure after repeated moves.
     sceneMoveBoundsRef.current = null
-    if (result.blocked) setNotice('已抵达碰撞边界 · 该方向无法继续')
-    return result
+    if (finalResult.blocked) setNotice('已抵达场景或碰撞边界 · 该方向无法继续')
+    return finalResult
   }
 
   const cancelScenePartsMove = () => {
@@ -7781,6 +7800,25 @@ function configureSelectionOutlineMaterial(material: THREE.LineBasicMaterial, ca
   material.customProgramCacheKey = () => cacheKey
 }
 
+function isLiveSelectionOutlineOwner(owner: THREE.Mesh, parent: THREE.Object3D) {
+  // A logical part may temporarily contain both the old cell batches and a
+  // replacement greedy mesh.  The old batch can still be attached while its
+  // instance count is already zero, so parentage alone is not enough to tell
+  // whether it can actually display the outline.
+  if (owner.parent !== parent || !owner.visible) return false
+  if (owner instanceof THREE.InstancedMesh && owner.count === 0) return false
+  const outlineParts = owner.userData.selectionGlowParts as THREE.Object3D[] | undefined
+  return Boolean(outlineParts?.some((part) => {
+    // Deselecting an object intentionally keeps its outline objects attached
+    // for reuse, but hides them.  A hidden outline must not block the next
+    // render batch from taking ownership of the logical part's highlight.
+    if (part.parent !== owner || !part.visible) return false
+    const line = part as THREE.LineSegments
+    const position = line.geometry?.getAttribute('position')
+    return Boolean(position && position.count > 0)
+  }))
+}
+
 function addVoxelHighlight(mesh: THREE.Mesh) {
   // Deferred large cell meshes start with count=0 while their matrices and
   // colors are uploaded over animation frames. Do not cache an empty outline
@@ -7790,7 +7828,26 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
   }
   const existing = mesh.userData.selectionGlowParts as THREE.Object3D[] | undefined
   if (existing) {
-    return existing
+    const hasGeometry = existing.some((part) => {
+      const line = part as THREE.LineSegments
+      const position = line.geometry?.getAttribute('position')
+      return Boolean(position && position.count > 0)
+    })
+    if (hasGeometry) return existing
+    // A worker payload can legitimately arrive with an empty outline buffer
+    // while the solid mesh is already visible. Do not cache that empty result
+    // forever: the next selection pass must be allowed to rebuild it from the
+    // source voxel data or from a later replacement mesh.
+    existing.forEach((part) => {
+      part.parent?.remove(part)
+      if (part instanceof THREE.LineSegments) {
+        part.geometry.dispose()
+        const material = part.material
+        if (Array.isArray(material)) material.forEach((item) => item.dispose())
+        else material.dispose()
+      }
+    })
+    delete mesh.userData.selectionGlowParts
   }
   // A single logical part can be split into several InstancedMesh batches by
   // material, shape, or variant. The outline belongs to the part, not to one
@@ -7799,7 +7856,16 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
   const outlineParent = mesh.parent
   if (outlineParent) {
     const owner = outlineParent.userData.selectionOutlineOwner as THREE.Mesh | undefined
-    if (owner && owner !== mesh) return []
+    if (owner && owner !== mesh) {
+      if (isLiveSelectionOutlineOwner(owner, outlineParent)) return []
+      // The previous owner is a stale/empty render batch. Hide its old lines
+      // before transferring ownership so an async replacement cannot leave
+      // two overlays behind or block the new visible mesh from being
+      // highlighted.
+      const oldParts = owner.userData.selectionGlowParts as THREE.Object3D[] | undefined
+      oldParts?.forEach((part) => { part.visible = false })
+      delete outlineParent.userData.selectionOutlineOwner
+    }
     outlineParent.userData.selectionOutlineOwner = mesh
   }
   let edgeGeometry: THREE.BufferGeometry
@@ -7833,7 +7899,7 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
     // including editable/imported voxel entities. Rebuilding a complete frame
     // for every exposed source cell is what caused hidden grid lines to leak
     // through the selected model.
-    edgeGeometry = workerOutlinePositions
+    edgeGeometry = workerOutlinePositions && workerOutlinePositions.length > 0
       ? (() => {
           const geometry = new THREE.BufferGeometry()
           geometry.setAttribute('position', new THREE.BufferAttribute(workerOutlinePositions, 3))
@@ -10545,16 +10611,19 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     // and the dragged entity flashes back (the next frame then moves it out
     // again).  The same grid delta is used by validation, rendering and the
     // persisted customEntityOffsets, so this is a safe optimistic guard.
-    const worldOffset = new THREE.Vector3(
-      voxelToWorld(gesture.lastDeltaX),
-      voxelToWorld(gesture.lastDeltaZ),
-      voxelToWorld(gesture.lastDeltaY),
-    )
-    gesture.visualRoots.forEach(({ object, startPosition }) => {
-      const destination = startPosition.clone().add(worldOffset)
-      object.position.copy(destination)
-      pendingDragVisualRootsRef.current.set(object, destination)
-    })
+    const applyPendingDestination = (deltaX: number, deltaY: number, deltaZ: number) => {
+      const worldOffset = new THREE.Vector3(
+        voxelToWorld(deltaX),
+        voxelToWorld(deltaZ),
+        voxelToWorld(deltaY),
+      )
+      gesture.visualRoots.forEach(({ object, startPosition }) => {
+        const destination = startPosition.clone().add(worldOffset)
+        object.position.copy(destination)
+        pendingDragVisualRootsRef.current.set(object, destination)
+      })
+    }
+    applyPendingDestination(gesture.lastDeltaX, gesture.lastDeltaY, gesture.lastDeltaZ)
     // Keep the imperative preview at the final position while the authoritative
     // project snapshot is committed. Resetting it first makes the released
     // entity visibly jump back to its start position; the following React
@@ -10567,14 +10636,12 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       pendingDragVisualRootsRef.current.clear()
       resetDragVisuals(gesture)
     } else {
-      // The roots are already at the exact validated grid destination. Store
-      // that destination so a stale transition render cannot move them back
-      // to the pre-drag coordinates for one frame.
-      gesture.visualRoots.forEach(({ object, startPosition }) => {
-        const destination = startPosition.clone().add(worldOffset)
-        object.position.copy(destination)
-        pendingDragVisualRootsRef.current.set(object, destination)
-      })
+      // The final commit can clamp a stale pointer-up proposal to a newer
+      // collision/boundary-safe grid position. Keep the imperative render
+      // exactly in sync with the authoritative result so a concurrent scene
+      // update cannot make the model flash to the origin or drift away from
+      // the cursor after release.
+      applyPendingDestination(result.deltaX, result.deltaY, result.deltaZ)
     }
     finishDragRenderBurstRef.current()
   }
