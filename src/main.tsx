@@ -7679,6 +7679,88 @@ function createVoxelOutlineGeometry() {
   return geometry
 }
 
+type OutlineVoxel = { x: number; y: number; z: number }
+
+/**
+ * Build only the feature edges of the union of voxel cells.
+ *
+ * A complete wireframe for every outer cell also contains edges between two
+ * coplanar cells on the same outside face. Those edges are not part of the
+ * entity's external shape and make the selection overlay look as if it is
+ * visible through the model. We first emit the four edges of every exposed
+ * face, then cancel an edge shared by two coplanar faces. Creases and the
+ * silhouette remain. The resulting lines still use the normal depth buffer,
+ * so faces on the far side are occluded by the solid mesh.
+ */
+function createExposedVoxelEdgeGeometry(
+  voxels: ReadonlyArray<OutlineVoxel>,
+  centerForVoxel: (voxel: OutlineVoxel) => [number, number, number],
+  cellSize: number,
+  renderedFaceNormals: Array<[number, number, number]> = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]],
+): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry()
+  if (!voxels.length) return geometry
+
+  const occupied = new Set(voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
+  type Edge = {
+    start: [number, number, number]
+    end: [number, number, number]
+    normal: [number, number, number]
+  }
+  const edges = new Map<string, Edge>()
+  const half = cellSize / 2
+  const neighborOffsets: Array<[number, number, number]> = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
+  const faceCorners = (normal: [number, number, number]): Array<[number, number, number]> => {
+    if (normal[0] === 1) return [[half, -half, -half], [half, half, -half], [half, half, half], [half, -half, half]]
+    if (normal[0] === -1) return [[-half, -half, half], [-half, half, half], [-half, half, -half], [-half, -half, -half]]
+    if (normal[1] === 1) return [[-half, half, -half], [-half, half, half], [half, half, half], [half, half, -half]]
+    if (normal[1] === -1) return [[-half, -half, half], [-half, -half, -half], [half, -half, -half], [half, -half, half]]
+    if (normal[2] === 1) return [[-half, -half, half], [half, -half, half], [half, half, half], [-half, half, half]]
+    return [[-half, half, -half], [half, half, -half], [half, -half, -half], [-half, -half, -half]]
+  }
+  const directions = neighborOffsets.map((offset, index) => ({
+    offset,
+    normal: renderedFaceNormals[index],
+    corners: faceCorners(renderedFaceNormals[index]),
+  }))
+  const pointKey = (point: [number, number, number]) => point.map((value) => Math.round(value * 1_000_000)).join(',')
+  const normalEquals = (a: [number, number, number], b: [number, number, number]) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2]
+  const edgeKey = (start: [number, number, number], end: [number, number, number]) => {
+    const startKey = pointKey(start)
+    const endKey = pointKey(end)
+    return startKey < endKey ? `${startKey}|${endKey}` : `${endKey}|${startKey}`
+  }
+
+  voxels.forEach((voxel) => {
+    const center = centerForVoxel(voxel)
+    directions.forEach((face, faceIndex) => {
+      const [dx, dy, dz] = face.offset
+      if (occupied.has(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`)) return
+      const facePoints = face.corners.map(([x, y, z]) => [center[0] + x, center[1] + y, center[2] + z] as [number, number, number])
+      for (let index = 0; index < facePoints.length; index += 1) {
+        const start = facePoints[index]
+        const end = facePoints[(index + 1) % facePoints.length]
+        const key = edgeKey(start, end)
+        const previous = edges.get(key)
+        if (!previous) {
+          edges.set(key, { start, end, normal: face.normal })
+        } else if (normalEquals(previous.normal, face.normal)) {
+          // Shared edge between coplanar exposed faces: it is only a voxel
+          // partition, not an external feature edge.
+          edges.delete(key)
+        }
+        // A different normal means a real crease/silhouette. Keep one line;
+        // duplicating it would create a thicker, unstable highlight.
+      }
+    })
+  })
+
+  const positions: number[] = []
+  edges.forEach((edge) => positions.push(...edge.start, ...edge.end))
+  if (positions.length) geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  return geometry
+}
+
 /**
  * Selection lines are deliberately rendered with depth testing enabled so
  * hidden edges do not show through the model.  Their vertices still sit on
@@ -7710,6 +7792,16 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
   if (existing) {
     return existing
   }
+  // A single logical part can be split into several InstancedMesh batches by
+  // material, shape, or variant. The outline belongs to the part, not to one
+  // batch: otherwise every batch would redraw the same silhouette and expose
+  // internal material boundaries as if they were external edges.
+  const outlineParent = mesh.parent
+  if (outlineParent) {
+    const owner = outlineParent.userData.selectionOutlineOwner as THREE.Mesh | undefined
+    if (owner && owner !== mesh) return []
+    outlineParent.userData.selectionOutlineOwner = mesh
+  }
   let edgeGeometry: THREE.BufferGeometry
   if (mesh instanceof THREE.InstancedMesh) {
     // Instanced meshes used to expand every cell into 24 transformed line
@@ -7736,21 +7828,12 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
     // visible surface is rendered through the greedy worker mesh. The worker
     // outline intentionally merges coplanar edges, which makes a connected
     // hand-drawn stroke appear as one large highlighted island.
-    const customGreedyVoxels = typeof mesh.userData.scenePartId === 'string' && mesh.userData.scenePartId.startsWith('custom:')
-      ? greedyVoxels
-      : undefined
-    const importedAssetRoot = mesh.parent?.parent
-    const importedGreedyVoxels = importedAssetRoot?.userData.assetRef?.kind === 'imported'
-      ? greedyVoxels
-      : undefined
-    // Imported model voxel assets are editable cell fields, not a single
-    // smooth surface. Their selection frame must preserve every exposed unit
-    // voxel just like hand-drawn entities. The visible model can stay greedy
-    // meshed; only the selection/edit overlay uses the cell-accurate path.
-    const cellAccurateVoxels = customGreedyVoxels ?? importedGreedyVoxels
-    edgeGeometry = cellAccurateVoxels
-      ? createGreedyVoxelOutlineGeometry(cellAccurateVoxels)
-      : workerOutlinePositions
+    // The worker outline is built from the merged visible surface and already
+    // removes coplanar partition edges. Use it for every greedy mesh,
+    // including editable/imported voxel entities. Rebuilding a complete frame
+    // for every exposed source cell is what caused hidden grid lines to leak
+    // through the selected model.
+    edgeGeometry = workerOutlinePositions
       ? (() => {
           const geometry = new THREE.BufferGeometry()
           geometry.setAttribute('position', new THREE.BufferAttribute(workerOutlinePositions, 3))
@@ -7785,85 +7868,49 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
 }
 
 function createSurfaceVoxelOutlineGeometry(mesh: THREE.Mesh): THREE.BufferGeometry {
-  const geometry = new THREE.BufferGeometry()
   const voxels = mesh.userData.customVoxels as Array<{ x: number; y: number; z: number }> | undefined
   const origin = mesh.userData.renderSurfaceOrigin as { x: number; y: number; z: number } | undefined
-  if (!voxels?.length || !origin) return geometry
-  const occupied = new Set(voxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
   const scale = VOXEL_WORLD_SIZE
-  const half = scale / 2
-  const edgePairs: Array<[number, number]> = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]
-  const neighbors = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
-  const positions: number[] = []
-  for (const voxel of voxels) {
-    if (!neighbors.some(([dx, dy, dz]) => !occupied.has(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`))) continue
-    const cx = (voxel.x - origin.x + 0.5) * scale
-    const cy = (voxel.z - origin.z + 0.5) * scale
-    const cz = (voxel.y - origin.y + 0.5) * scale
-    const corners: Array<[number, number, number]> = [
-      [cx - half, cy - half, cz - half], [cx + half, cy - half, cz - half], [cx + half, cy + half, cz - half], [cx - half, cy + half, cz - half],
-      [cx - half, cy - half, cz + half], [cx + half, cy - half, cz + half], [cx + half, cy + half, cz + half], [cx - half, cy + half, cz + half],
-    ]
-    edgePairs.forEach(([start, end]) => positions.push(...corners[start], ...corners[end]))
-  }
-  if (positions.length) geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-  return geometry
+  if (!voxels?.length || !origin) return new THREE.BufferGeometry()
+  return createExposedVoxelEdgeGeometry(
+    voxels,
+    (voxel) => [
+      (voxel.x - origin.x + 0.5) * scale,
+      (voxel.z - origin.z + 0.5) * scale,
+      (voxel.y - origin.y + 0.5) * scale,
+    ],
+    scale,
+    [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]],
+  )
 }
 
 function createCustomVoxelOutlineGeometry(mesh: THREE.InstancedMesh): THREE.BufferGeometry {
-  const geometry = new THREE.BufferGeometry()
   const voxels = mesh.userData.customVoxels as Array<{ x: number; y: number; z: number }> | undefined
   const partGroup = mesh.parent
   const componentVoxels = partGroup?.userData.customComponentVoxels as Array<{ x: number; y: number; z: number }> | undefined
   const origin = partGroup?.userData.renderOrigin as { x: number; y: number; z: number } | undefined
-  if (!voxels?.length || !componentVoxels?.length || !origin) return geometry
+  if (!voxels?.length || !componentVoxels?.length || !origin) return new THREE.BufferGeometry()
 
-  let occupied = partGroup?.userData.customVoxelOccupancy as Set<string> | undefined
-  if (!occupied) {
-    occupied = new Set(componentVoxels.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`))
-    if (partGroup) partGroup.userData.customVoxelOccupancy = occupied
-  }
-
-  const start = typeof mesh.userData.customVoxelStart === 'number' ? mesh.userData.customVoxelStart : 0
-  const end = typeof mesh.userData.customVoxelEnd === 'number'
-    ? Math.min(mesh.userData.customVoxelEnd, voxels.length)
-    : voxels.length
   const scale = VOXEL_WORLD_SIZE
-  const half = scale / 2
-  const edgePairs: Array<[number, number]> = [
-    [0, 1], [1, 2], [2, 3], [3, 0],
-    [4, 5], [5, 6], [6, 7], [7, 4],
-    [0, 4], [1, 5], [2, 6], [3, 7],
-  ]
-  const neighbors = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
-  const positions: number[] = []
-  for (let index = start; index < end; index += 1) {
-    const voxel = voxels[index]
-    if (!voxel) continue
-    const isOuter = neighbors.some(([dx, dy, dz]) => !occupied!.has(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`))
-    if (!isOuter) continue
-    // Custom component groups use project X/Y/Z as Three X/Z/Y, while the
-    // group itself is translated to the minimum voxel corner.
-    const x = (voxel.x - origin.x) * scale + half
-    const y = (voxel.z - origin.z) * scale + half
-    const z = (voxel.y - origin.y) * scale + half
-    const corners: Array<[number, number, number]> = [
-      [x - half, y - half, z - half], [x + half, y - half, z - half],
-      [x + half, y + half, z - half], [x - half, y + half, z - half],
-      [x - half, y - half, z + half], [x + half, y - half, z + half],
-      [x + half, y + half, z + half], [x - half, y + half, z + half],
-    ]
-    edgePairs.forEach(([edgeStart, edgeEnd]) => positions.push(...corners[edgeStart], ...corners[edgeEnd]))
-  }
-  if (positions.length) geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-  return geometry
+  // Use the complete component occupancy, not one material batch, so a
+  // color boundary inside the same solid does not create a fake outline.
+  return createExposedVoxelEdgeGeometry(
+    componentVoxels,
+    (voxel) => [
+      (voxel.x - origin.x + 0.5) * scale,
+      (voxel.z - origin.z + 0.5) * scale,
+      (voxel.y - origin.y + 0.5) * scale,
+    ],
+    scale,
+    [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]],
+  )
 }
 
 function createInstancedVoxelOutlineGeometry(mesh: THREE.InstancedMesh): THREE.BufferGeometry {
-  const geometry = new THREE.BufferGeometry()
   const voxels = mesh.userData.instanceVoxels as Array<{ x: number; y: number; z: number }> | undefined
-  if (!voxels?.length) return geometry
+  if (!voxels?.length) return new THREE.BufferGeometry()
   const partGroup = mesh.parent
+  const completeVoxels = partGroup?.userData.instanceVoxelAll as Array<{ x: number; y: number; z: number }> | undefined
   const occupied = partGroup?.userData.instanceVoxelOccupancy as Set<string> | undefined
   const dimensions = partGroup?.userData.instanceVoxelDimensions as { width: number; depth: number; height: number } | undefined
   const mirror = partGroup?.userData.instanceVoxelMirror as { x?: boolean; y?: boolean; z?: boolean } | undefined
@@ -7873,35 +7920,24 @@ function createInstancedVoxelOutlineGeometry(mesh: THREE.InstancedMesh): THREE.B
   // unrotated origin while the model rotates around its persisted center.
   const pivot = partGroup?.userData.instanceVoxelPivot as { x?: number; y?: number; z?: number } | undefined
   if (!occupied || !dimensions) return createInstancedVoxelOutlineGeometryFallback(mesh)
+  const outlineVoxels = completeVoxels?.length ? completeVoxels : voxels
 
   const scale = VOXEL_WORLD_SIZE
-  const half = scale / 2
-  const edgePairs: Array<[number, number]> = [
-    [0, 1], [1, 2], [2, 3], [3, 0],
-    [4, 5], [5, 6], [6, 7], [7, 4],
-    [0, 4], [1, 5], [2, 6], [3, 7],
-  ]
-  const neighbors = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
-  const positions: number[] = []
-  for (const voxel of voxels) {
-    const isOuter = neighbors.some(([dx, dy, dz]) => !occupied.has(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`))
-    if (!isOuter) continue
-    const localX = mirror?.x ? dimensions.width - 1 - voxel.x : voxel.x
-    const localY = mirror?.z ? dimensions.height - 1 - voxel.y : voxel.y
-    const localZ = mirror?.y ? dimensions.depth - 1 - voxel.z : voxel.z
-    const cx = (localX + 0.5 - dimensions.width / 2) * scale - (pivot?.x ?? 0)
-    const cy = (localZ + 0.5 - dimensions.depth / 2) * scale - (pivot?.y ?? 0)
-    const cz = (localY + 0.5) * scale - (pivot?.z ?? 0)
-    const corners: Array<[number, number, number]> = [
-      [cx - half, cy - half, cz - half], [cx + half, cy - half, cz - half],
-      [cx + half, cy + half, cz - half], [cx - half, cy + half, cz - half],
-      [cx - half, cy - half, cz + half], [cx + half, cy - half, cz + half],
-      [cx + half, cy + half, cz + half], [cx - half, cy + half, cz + half],
-    ]
-    edgePairs.forEach(([start, end]) => positions.push(...corners[start], ...corners[end]))
-  }
-  if (positions.length) geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-  return geometry
+  return createExposedVoxelEdgeGeometry(
+    outlineVoxels,
+    (voxel) => {
+      const localX = mirror?.x ? dimensions.width - 1 - voxel.x : voxel.x
+      const localY = mirror?.z ? dimensions.height - 1 - voxel.y : voxel.y
+      const localZ = mirror?.y ? dimensions.depth - 1 - voxel.z : voxel.z
+      return [
+        (localX + 0.5 - dimensions.width / 2) * scale - (pivot?.x ?? 0),
+        (localZ + 0.5 - dimensions.depth / 2) * scale - (pivot?.y ?? 0),
+        (localY + 0.5) * scale - (pivot?.z ?? 0),
+      ]
+    },
+    scale,
+    [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]],
+  )
 }
 
 function createInstancedVoxelOutlineGeometryFallback(mesh: THREE.InstancedMesh): THREE.BufferGeometry {
@@ -7934,37 +7970,18 @@ function createInstancedVoxelOutlineGeometryFallback(mesh: THREE.InstancedMesh):
  * outside surface need frames; depth testing still hides the back side.
  */
 function createGreedyVoxelOutlineGeometry(voxels: Array<{ gx: number; gy: number; gz: number }> | undefined) {
-  const geometry = new THREE.BufferGeometry()
-  if (!voxels?.length) return geometry
+  if (!voxels?.length) return new THREE.BufferGeometry()
   // Greedy meshes are rendered in voxel units and receive
   // `mesh.scale.setScalar(VOXEL_WORLD_SIZE)` in attachGreedyMesh().  Keep the
   // outline in that same unit space.  Multiplying these coordinates here as
   // well makes the outline inherit VOXEL_WORLD_SIZE a second time, which is
   // why a selected hand-drawn entity could show a tiny, displaced white copy
   // beside the real model.
-  const occupied = new Set(voxels.map((voxel) => `${voxel.gx},${voxel.gy},${voxel.gz}`))
-  const positions: number[] = []
-  const edgePairs: Array<[number, number]> = [
-    [0, 1], [1, 2], [2, 3], [3, 0],
-    [4, 5], [5, 6], [6, 7], [7, 4],
-    [0, 4], [1, 5], [2, 6], [3, 7],
-  ]
-  const neighbors = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
-  for (const voxel of voxels) {
-    const isOuter = neighbors.some(([dx, dy, dz]) => !occupied.has(`${voxel.gx + dx},${voxel.gy + dy},${voxel.gz + dz}`))
-    if (!isOuter) continue
-    const x = voxel.gx
-    const y = voxel.gy
-    const z = voxel.gz
-    const unit = 1
-    const corners: Array<[number, number, number]> = [
-      [x, y, z], [x + unit, y, z], [x + unit, y + unit, z], [x, y + unit, z],
-      [x, y, z + unit], [x + unit, y, z + unit], [x + unit, y + unit, z + unit], [x, y + unit, z + unit],
-    ]
-    edgePairs.forEach(([start, end]) => positions.push(...corners[start], ...corners[end]))
-  }
-  if (positions.length) geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-  return geometry
+  return createExposedVoxelEdgeGeometry(
+    voxels.map((voxel) => ({ x: voxel.gx, y: voxel.gy, z: voxel.gz })),
+    (voxel) => [voxel.x + 0.5, voxel.y + 0.5, voxel.z + 0.5],
+    1,
+  )
 }
 
 type CameraViewOption = { id: CameraViewId; label: string; direction: [number, number, number]; kind: 'face' | 'edge' | 'corner' }
@@ -8324,52 +8341,39 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   const toSceneWorld = (x: number, y: number, z: number) => new THREE.Vector3(x, z, y)
 
   // Orbiting a selection must use the effective scene-space geometry, not the
-  // asset's canonical origin.  sceneParts already expands an assembly into
-  // its member parts, so this also covers nested assemblies and multi-select.
-  // Calculate an AABB center without materializing scenePartVoxels() for large
-  // imported models; the part offsets are applied directly to the canonical
-  // voxel bounds.
+  // asset's canonical origin. sceneParts already expands an assembly into its
+  // member parts, so this also covers nested assemblies and multi-select.
+  // Reuse gridVoxelBoundsCache through scenePartsGridBounds(). Do not call
+  // voxelBounds() here: after a box selection that would rescan every voxel of
+  // every selected imported model on the main thread, which can make the
+  // release of a multi-selection look like a deadlock.
   const selectedOrbitCenter = useMemo(() => {
     if (!selectedPartIds.length) return null
     const selectedIds = new Set(selectedPartIds)
-    let minX = Number.POSITIVE_INFINITY
-    let minY = Number.POSITIVE_INFINITY
-    let minZ = Number.POSITIVE_INFINITY
-    let maxX = Number.NEGATIVE_INFINITY
-    let maxY = Number.NEGATIVE_INFINITY
-    let maxZ = Number.NEGATIVE_INFINITY
-    let hasGeometry = false
-
-    sceneParts.forEach((part) => {
-      if (!selectedIds.has(part.id)) return
-      const bounds = voxelBounds(part.voxels)
-      if (!bounds) return
-      const rootOffset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
-      const partOffset = part.partSceneOffset ?? { x: 0, y: 0, z: 0 }
-      const offsetX = rootOffset.x + partOffset.x
-      const offsetY = rootOffset.y + partOffset.y
-      const offsetZ = rootOffset.z + partOffset.z
-      minX = Math.min(minX, bounds.min.x + offsetX)
-      minY = Math.min(minY, bounds.min.y + offsetY)
-      minZ = Math.min(minZ, bounds.min.z + offsetZ)
-      maxX = Math.max(maxX, bounds.max.x + offsetX)
-      maxY = Math.max(maxY, bounds.max.y + offsetY)
-      maxZ = Math.max(maxZ, bounds.max.z + offsetZ)
-      hasGeometry = true
-    })
-
-    if (!hasGeometry) return null
+    const selectedParts = sceneParts.filter((part) => selectedIds.has(part.id))
+    // The occupancy index already owns project-space bounds for every part.
+    // Use it as the O(1) path; the helper falls back to the cached canonical
+    // bounds for a part that has not reached the index yet.
+    const bounds = scenePartsGridBounds(selectedParts, occupancyIndex)
+    if (!bounds) return null
     // Voxel bounds are inclusive. Add half a cell on each side so the pivot
     // is the geometric center of the occupied cell volume, not the center of
     // the corner coordinates.
     return toSceneWorld(
-      ((minX + maxX + 1) / 2) * VOXEL_WORLD_SIZE,
-      ((minY + maxY + 1) / 2) * VOXEL_WORLD_SIZE,
-      ((minZ + maxZ + 1) / 2) * VOXEL_WORLD_SIZE,
+      ((bounds.minX + bounds.maxX + 1) / 2) * VOXEL_WORLD_SIZE,
+      ((bounds.minY + bounds.maxY + 1) / 2) * VOXEL_WORLD_SIZE,
+      ((bounds.minZ + bounds.maxZ + 1) / 2) * VOXEL_WORLD_SIZE,
     )
-  }, [sceneParts, selectedPartIds])
+  }, [sceneParts, selectedPartIds, occupancyIndex])
   const selectedOrbitCenterRef = useRef<THREE.Vector3 | null>(null)
   selectedOrbitCenterRef.current = selectedOrbitCenter
+  // The orbit pivot belongs to the selection identity, not to the current
+  // voxel bounds. During edit mode the bounds can change on every brush
+  // transaction; following that moving AABB would translate the camera and
+  // make the edited entity drift in the viewport.
+  const orbitSelectionKey = selectedPartIds.join('|')
+  const orbitPivotRef = useRef<THREE.Vector3 | null>(null)
+  const orbitPivotSelectionKeyRef = useRef<string | null>(null)
 
   const scheduleZoomReport = () => {
     if (zoomReportTimerRef.current !== null) window.clearTimeout(zoomReportTimerRef.current)
@@ -8390,7 +8394,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   // the percentage ruler and never drives the camera during a gesture.
   const sceneViewTarget = (bounds: SceneBounds) => new THREE.Vector3(0, 0, bounds.z * VOXEL_WORLD_SIZE / 2)
 
-  const desiredOrbitTarget = () => selectedOrbitCenterRef.current?.clone()
+  const desiredOrbitTarget = () => orbitPivotRef.current?.clone()
     ?? sceneViewTarget(sceneBoundsForProject(authoritativeProjectRef.current))
 
   // OrbitControls rotates around controls.target.  When selection changes,
@@ -8398,11 +8402,11 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   // changing the pivot does not visually jump the current view.  The inactive
   // camera is translated too, otherwise switching between orthographic and
   // perspective would resurrect the old scene-centered pivot.
-  const syncOrbitTarget = () => {
+  const syncOrbitTarget = (targetOverride?: THREE.Vector3) => {
     const cameras = camerasRef.current
     const controls = controlsRef.current
     if (!cameras || !controls) return
-    const nextTarget = desiredOrbitTarget()
+    const nextTarget = targetOverride?.clone() ?? desiredOrbitTarget()
     const delta = nextTarget.clone().sub(controls.target)
     if (delta.lengthSq() < 0.00000001) return
     cameras.orthographic.position.add(delta)
@@ -9165,8 +9169,17 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   // from the file tree. This makes the first joystick movement feel anchored
   // instead of requiring a hidden preparatory drag.
   useEffect(() => {
-    syncOrbitTarget()
-  }, [selectedOrbitCenter, project.sceneBounds?.x, project.sceneBounds?.y, project.sceneBounds?.z, project.sceneSizeCm])
+    // Change the pivot only when the selected entity IDs change. A voxel edit
+    // changes selectedOrbitCenter because the AABB changes, but it must not
+    // move the camera or the entity on screen. Clearing the selection also
+    // deliberately leaves the current camera/target untouched; the fallback
+    // scene pivot is used lazily by the next explicit camera rotation.
+    if (orbitSelectionKey && !selectedOrbitCenter) return
+    if (orbitPivotSelectionKeyRef.current === orbitSelectionKey) return
+    orbitPivotSelectionKeyRef.current = orbitSelectionKey
+    orbitPivotRef.current = selectedOrbitCenter?.clone() ?? null
+    if (selectedOrbitCenter) syncOrbitTarget(selectedOrbitCenter)
+  }, [orbitSelectionKey, selectedOrbitCenter])
 
   useEffect(() => {
     onCameraApiChange({
@@ -11789,6 +11802,7 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
         partGroup.add(mesh)
       })
       partGroup.userData.instanceVoxelOccupancy = occupied
+      partGroup.userData.instanceVoxelAll = component.map((voxel) => ({ ...voxel }))
       partGroup.userData.instanceVoxelDimensions = { width: asset.width, depth: asset.depth, height: asset.height }
       partGroup.userData.instanceVoxelMirror = mirror
       group.add(partGroup)
@@ -11832,6 +11846,7 @@ function buildAssetGroup(asset: VoxelAsset, materialMap: Map<string, THREE.MeshS
     }
     const occupied = new Set(component.map((candidate) => `${candidate.x},${candidate.y},${candidate.z}`))
     partGroup.userData.instanceVoxelOccupancy = occupied
+    partGroup.userData.instanceVoxelAll = component.map((voxel) => ({ ...voxel }))
     partGroup.userData.instanceVoxelDimensions = { width: asset.width, depth: asset.depth, height: asset.height }
     partGroup.userData.instanceVoxelMirror = mirror
     const batches = new Map<string, { color: THREE.Color; voxels: Voxel[] }>()
