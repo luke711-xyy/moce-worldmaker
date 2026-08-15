@@ -71,6 +71,8 @@ type SelectGesture = {
   startY: number
   startGroundX: number
   startGroundY: number
+  /** Three.js world-space height of the horizontal drag plane. */
+  horizontalPlaneZ: number
   startVerticalZ: number
   verticalPlane: { normalX: number; normalY: number; constant: number }
   lastDeltaX: number
@@ -1337,6 +1339,10 @@ function App() {
   const historyEpochRef = useRef(0)
   const [historyRevision, setHistoryRevision] = useState(0)
   const [selectedId, setSelectedId] = useState('inst-chinese')
+  // Selection is also an imperative Three.js state.  Re-clicking the same
+  // entity must be able to re-assert its outline after an async render batch
+  // or a stale visibility toggle has replaced/hidden the previous lines.
+  const [selectionRefreshKey, setSelectionRefreshKey] = useState(0)
   // Enter the editor in entity placement/selection mode. Drawing remains an
   // explicit choice from the toolbox so a fresh visit cannot accidentally
   // modify the scene with the first viewport gesture.
@@ -5759,6 +5765,7 @@ function App() {
       return
     }
     setCopyPreview(null)
+    setSelectionRefreshKey((value) => value + 1)
     const removing = additive && checkedTreePartIds.includes(id)
     setCheckedTreePartIds((current) => {
       if (!additive) return [id]
@@ -5779,6 +5786,7 @@ function App() {
       return
     }
     setCopyPreview(null)
+    setSelectionRefreshKey((value) => value + 1)
     const removing = checkedTreePartIds.includes(id)
     setCheckedTreePartIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
     setSelectedId(removing && selectedId === id ? '' : id)
@@ -5788,6 +5796,7 @@ function App() {
 
   const selectScenePart = (id: string) => {
     setCopyPreview(null)
+    setSelectionRefreshKey((value) => value + 1)
     setSelectedId(id)
     setCheckedTreePartIds([id])
     revealScenePartPath(id)
@@ -5796,6 +5805,7 @@ function App() {
 
   const updateSceneCheckedSelection = (partIds: string[], additive = false) => {
     setCopyPreview(null)
+    setSelectionRefreshKey((value) => value + 1)
     setCheckedTreePartIds((current) => {
       if (!additive) return [...new Set(partIds)]
       const next = new Set(current)
@@ -5940,7 +5950,7 @@ function App() {
               </div>}
             </div>
           </div>
-          <MemoizedVoxelViewport project={project} authoritativeProjectRef={projectRef} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} geometryApplying={geometryApplying} historyResetKey={historyRevision} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} voxelBrushShape={voxelBrushShape} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSyncSceneOccupancyTransforms={stableViewportSyncOccupancyTransforms} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onCancelScenePartsMove={stableViewportCancelMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
+          <MemoizedVoxelViewport project={project} authoritativeProjectRef={projectRef} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectionRefreshKey={selectionRefreshKey} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} geometryApplying={geometryApplying} historyResetKey={historyRevision} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} voxelBrushShape={voxelBrushShape} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSyncSceneOccupancyTransforms={stableViewportSyncOccupancyTransforms} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onCancelScenePartsMove={stableViewportCancelMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
           <ToolboxPopover open={toolboxOpen} onClose={() => setToolboxOpen(false)} tool={tool} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} voxelBrushShape={voxelBrushShape} onToolChange={changeTool} onPlaneChange={setDrawingPlane} onOperationChange={setDrawOperation} onBrushSizeChange={setBrushSize} onBrushShapeChange={setVoxelBrushShape} />
           <ReferenceImagePopover open={referenceImageOpen} image={referenceImage} index={referenceImageIndex} count={referenceImages.length} onPrevious={() => setReferenceImageIndex((current) => (current - 1 + referenceImages.length) % referenceImages.length)} onNext={() => setReferenceImageIndex((current) => (current + 1) % referenceImages.length)} onClose={() => setReferenceImageOpen(false)} onOpen={openReferenceImagePicker} />
           <div className="viewport-footer">
@@ -7800,23 +7810,45 @@ function configureSelectionOutlineMaterial(material: THREE.LineBasicMaterial, ca
   material.customProgramCacheKey = () => cacheKey
 }
 
-function isLiveSelectionOutlineOwner(owner: THREE.Mesh, parent: THREE.Object3D) {
-  // A logical part may temporarily contain both the old cell batches and a
-  // replacement greedy mesh.  The old batch can still be attached while its
-  // instance count is already zero, so parentage alone is not enough to tell
-  // whether it can actually display the outline.
-  if (owner.parent !== parent || !owner.visible) return false
-  if (owner instanceof THREE.InstancedMesh && owner.count === 0) return false
-  const outlineParts = owner.userData.selectionGlowParts as THREE.Object3D[] | undefined
-  return Boolean(outlineParts?.some((part) => {
-    // Deselecting an object intentionally keeps its outline objects attached
-    // for reuse, but hides them.  A hidden outline must not block the next
-    // render batch from taking ownership of the logical part's highlight.
-    if (part.parent !== owner || !part.visible) return false
-    const line = part as THREE.LineSegments
-    const position = line.geometry?.getAttribute('position')
-    return Boolean(position && position.count > 0)
-  }))
+function isVisibleInObjectHierarchy(object: THREE.Object3D): boolean {
+  let current: THREE.Object3D | null = object
+  while (current) {
+    if (!current.visible) return false
+    current = current.parent
+  }
+  return true
+}
+
+/**
+ * Render batches are not required to carry the logical part id themselves.
+ * Greedy/surface replacements and some instanced asset batches keep that
+ * metadata on their component group instead. Selection must resolve the
+ * logical owner from the same object hierarchy that Three.js renders, rather
+ * than relying on whichever batch happened to be built first.
+ */
+function scenePartIdForRenderObject(object: THREE.Object3D): string | undefined {
+  let current: THREE.Object3D | null = object
+  while (current) {
+    const scenePartId = current.userData.scenePartId
+    if (typeof scenePartId === 'string' && scenePartId.length > 0) return scenePartId
+    current = current.parent
+  }
+  return undefined
+}
+
+function hasRenderableSelectionSource(mesh: THREE.Mesh): boolean {
+  if (mesh instanceof THREE.InstancedMesh && mesh.count === 0) return false
+  const position = mesh.geometry?.getAttribute('position')
+  return Boolean(position && position.count > 0)
+}
+
+function hideSelectionHighlightsForPart(root: THREE.Object3D, scenePartId: string, except?: THREE.Mesh): void {
+  root.traverse((object) => {
+    if (!(object instanceof THREE.Mesh) || object === except || object.userData.selectionGlow) return
+    if (scenePartIdForRenderObject(object) !== scenePartId) return
+    const highlights = object.userData.selectionGlowParts as THREE.Object3D[] | undefined
+    highlights?.forEach((highlight) => { highlight.visible = false })
+  })
 }
 
 function addVoxelHighlight(mesh: THREE.Mesh) {
@@ -7853,21 +7885,6 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
   // material, shape, or variant. The outline belongs to the part, not to one
   // batch: otherwise every batch would redraw the same silhouette and expose
   // internal material boundaries as if they were external edges.
-  const outlineParent = mesh.parent
-  if (outlineParent) {
-    const owner = outlineParent.userData.selectionOutlineOwner as THREE.Mesh | undefined
-    if (owner && owner !== mesh) {
-      if (isLiveSelectionOutlineOwner(owner, outlineParent)) return []
-      // The previous owner is a stale/empty render batch. Hide its old lines
-      // before transferring ownership so an async replacement cannot leave
-      // two overlays behind or block the new visible mesh from being
-      // highlighted.
-      const oldParts = owner.userData.selectionGlowParts as THREE.Object3D[] | undefined
-      oldParts?.forEach((part) => { part.visible = false })
-      delete outlineParent.userData.selectionOutlineOwner
-    }
-    outlineParent.userData.selectionOutlineOwner = mesh
-  }
   let edgeGeometry: THREE.BufferGeometry
   if (mesh instanceof THREE.InstancedMesh) {
     // Instanced meshes used to expand every cell into 24 transformed line
@@ -8195,7 +8212,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   </div>
 }
 
-function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancyIndex, assetTransformCache, selectedId, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, geometryApplying, historyResetKey, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, voxelBrushShape, activeMaterial, materials, dragAxis, placementAsset, copyPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSyncSceneOccupancyTransforms, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onCancelScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; authoritativeProjectRef: React.MutableRefObject<ProjectState>; sceneParts: SceneEntityPart[]; occupancyIndex: SceneOccupancyIndex | null; assetTransformCache: AssetTransformCache; selectedId: string; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; geometryApplying: boolean; historyResetKey: number; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; voxelBrushShape: VoxelShape; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSyncSceneOccupancyTransforms: () => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCancelScenePartsMove: () => void; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
+function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancyIndex, assetTransformCache, selectedId, selectionRefreshKey, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, geometryApplying, historyResetKey, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, voxelBrushShape, activeMaterial, materials, dragAxis, placementAsset, copyPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSyncSceneOccupancyTransforms, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onCancelScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; authoritativeProjectRef: React.MutableRefObject<ProjectState>; sceneParts: SceneEntityPart[]; occupancyIndex: SceneOccupancyIndex | null; assetTransformCache: AssetTransformCache; selectedId: string; selectionRefreshKey: number; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; geometryApplying: boolean; historyResetKey: number; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; voxelBrushShape: VoxelShape; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSyncSceneOccupancyTransforms: () => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCancelScenePartsMove: () => void; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.Camera | null>(null)
@@ -8250,6 +8267,14 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   // after an erase mutation.
   scenePartsRef.current = sceneParts
   selectedPartIdsRef.current = selectedPartIds
+  // Selection outlines are attached to the currently visible render batch,
+  // while scene parts can be replaced asynchronously after a scene open,
+  // asset download, or voxel edit. Keep a cheap logical-part signature so
+  // the outline pass runs again when that render source changes, even when
+  // the selection itself did not change.
+  const selectionScenePartKey = sceneParts.map((part) => (
+    `${part.id}:${part.memberKey}:${part.instanceId ?? ''}:${part.partId}:${part.voxels.length}:${part.assemblyIds?.join(',') ?? ''}`
+  )).join('|')
   const selectGestureRef = useRef<SelectGesture | null>(null)
   const boxSelectGestureRef = useRef<BoxSelectGesture | null>(null)
   const cameraGestureRef = useRef<{ pointerId: number; button: 'right'; lastX: number; lastY: number; moved: boolean; contextPartIds?: string[] } | null>(null)
@@ -9448,9 +9473,21 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
           const shouldHighlight = selectedPartIdsRef.current.includes(scenePartId)
             || editRenderStateRef.current.partIds.has(scenePartId)
           if (shouldHighlight) {
+            // A replacement group can finish after the selection effect has
+            // already run. Pick one current visible render batch instead of
+            // letting traversal order decide which child owns the outline.
+            let candidate: THREE.Mesh | undefined
             componentGroup.traverse((object) => {
-              if (object instanceof THREE.Mesh && !object.userData.selectionGlow) addVoxelHighlight(object)
+              if (!(object instanceof THREE.Mesh) || object.userData.selectionGlow) return
+              if (object.userData.skipVoxelHighlight) return
+              if (!isVisibleInObjectHierarchy(object) || !hasRenderableSelectionSource(object)) return
+              if (!candidate || object.userData.greedyMesh || object.userData.surfaceMesh) candidate = object
             })
+            if (candidate) {
+              hideSelectionHighlightsForPart(componentGroup, scenePartId, candidate)
+              const highlights = addVoxelHighlight(candidate)
+              highlights.forEach((highlight) => { highlight.visible = true })
+            }
           }
           invalidateRenderRef.current()
         }
@@ -9615,7 +9652,9 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       })
       object.add(greedyMesh)
       if (selectedPartIdsRef.current.includes(scenePartId) || editRenderStateRef.current.partIds.has(scenePartId)) {
-        addVoxelHighlight(greedyMesh)
+        hideSelectionHighlightsForPart(object, scenePartId, greedyMesh)
+        const highlights = addVoxelHighlight(greedyMesh)
+        highlights.forEach((highlight) => { highlight.visible = true })
       }
       if (object.userData.greedyBuildPending) {
         object.userData.greedyBuildPending = false
@@ -9654,7 +9693,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       }
       const voxels = object.userData.greedyVoxels as Array<{ gx: number; gy: number; gz: number; materialId: number }> | undefined
       const colors = object.userData.greedyColors as string[] | undefined
-      const scenePartId = object.userData.scenePartId as string | undefined
+      const scenePartId = scenePartIdForRenderObject(object)
       if (object.userData.greedyDisabled || !voxels || voxels.length < 64 || !colors || !scenePartId) return
       const renderSignature = object.userData.renderSignature as string | undefined
       if (renderSignature && object.userData.greedyMeshBuiltSignature === renderSignature) return
@@ -9698,10 +9737,12 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     const editAssemblyId = editEntityId?.startsWith('assembly:') ? editEntityId.slice('assembly:'.length) : undefined
     const editScenePartIds = new Set(currentSceneParts.filter((part) => editEntityId === part.id || (editAssemblyId && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(editAssemblyId))).map((part) => part.id))
     editRenderStateRef.current = { active: Boolean(editEntityId), partIds: editScenePartIds }
+    const activeScenePartIds = new Set([...selectedScenePartIds, ...editScenePartIds])
+    const candidatesByPart = new Map<string, THREE.Mesh[]>()
     group.traverse((object) => {
       if (!(object instanceof THREE.Mesh) || object.userData.selectionGlow) return
       const oldHighlights = object.userData.selectionGlowParts as THREE.Object3D[] | undefined
-      const scenePartId = object.userData.scenePartId as string | undefined
+      const scenePartId = scenePartIdForRenderObject(object)
       const meshMaterial = object.material as THREE.MeshStandardMaterial
       const baseColor = object.userData.baseRenderColor as number | undefined
       if (baseColor !== undefined) meshMaterial.color.setHex(baseColor)
@@ -9709,29 +9750,51 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       meshMaterial.opacity = 1
       meshMaterial.depthWrite = true
       if (!scenePartId) return
-      const shouldHighlight = !object.userData.skipVoxelHighlight && (selectedScenePartIds.has(scenePartId) || editScenePartIds.has(scenePartId))
-      if (shouldHighlight) {
-        // A transform-only project update keeps the same mesh and its outline
-        // geometry. addVoxelHighlight() is intentionally idempotent here;
-        // rebuilding per-voxel line positions on every mouse release was the
-        // main source of the size-dependent post-drag hitch.
-        const highlights = addVoxelHighlight(object)
-        // Keep the generated outline objects attached to the mesh and toggle
-        // visibility instead of disposing/rebuilding them on every selection
-        // change. This is especially important for large voxel entities,
-        // whose first outline build is expensive but whose subsequent
-        // selection changes should be a constant-time visibility update.
-        highlights.forEach((highlight) => { highlight.visible = true })
-      } else if (oldHighlights) {
-        oldHighlights.forEach((highlight) => { highlight.visible = false })
-      }
-      // The edit-mode dimming is rendered once as a stable fullscreen pass
-      // below. Do not mutate per-object colors here: doing so made every
-      // React/Worker refresh compound the mask and caused non-current
-      // entities to visibly brighten or darken during a stroke.
+      oldHighlights?.forEach((highlight) => { highlight.visible = false })
+      if (object.userData.skipVoxelHighlight) return
+      if (!isVisibleInObjectHierarchy(object) || !hasRenderableSelectionSource(object)) return
+      const candidates = candidatesByPart.get(scenePartId)
+      if (candidates) candidates.push(object)
+      else candidatesByPart.set(scenePartId, [object])
+    })
+    candidatesByPart.forEach((candidates, scenePartId) => {
+      // Prefer a merged/surface render when one exists. It gives the outline
+      // the same visible geometry as the solid object instead of a stale cell
+      // batch left over from the previous render signature.
+      const candidate = candidates.find((mesh) => mesh.userData.greedyMesh || mesh.userData.surfaceMesh) ?? candidates[0]
+      if (!activeScenePartIds.has(scenePartId)) return
+      hideSelectionHighlightsForPart(group, scenePartId, candidate)
+      const highlights = addVoxelHighlight(candidate)
+      highlights.forEach((highlight) => { highlight.visible = true })
     })
     invalidateRenderRef.current()
-  }, [sceneGeometryRenderKey, project.customVoxels, project.customVoxels.length, project.customColors, project.customVoxelRenderModes, project.assemblies, selectedPartIds, checkedPartIds, editEntityId])
+    // Geometry batches can be replaced by an async worker immediately after
+    // this pass. A second frame catches that replacement before the user sees
+    // a selected entity without its outline, while keeping the normal click
+    // path synchronous.
+    const frame = requestAnimationFrame(() => {
+      const currentGroup = groupRef.current
+      if (!currentGroup) return
+      const currentActiveIds = new Set([...selectedPartIds, ...editScenePartIds])
+      const currentCandidates = new Map<string, THREE.Mesh[]>()
+      currentGroup.traverse((object) => {
+        if (!(object instanceof THREE.Mesh) || object.userData.selectionGlow) return
+        const scenePartId = scenePartIdForRenderObject(object)
+        if (!scenePartId || object.userData.skipVoxelHighlight || !isVisibleInObjectHierarchy(object) || !hasRenderableSelectionSource(object)) return
+        const list = currentCandidates.get(scenePartId)
+        if (list) list.push(object)
+        else currentCandidates.set(scenePartId, [object])
+      })
+      currentCandidates.forEach((candidates, scenePartId) => {
+        if (!currentActiveIds.has(scenePartId)) return
+        const candidate = candidates.find((mesh) => mesh.userData.greedyMesh || mesh.userData.surfaceMesh) ?? candidates[0]
+        hideSelectionHighlightsForPart(currentGroup, scenePartId, candidate)
+        addVoxelHighlight(candidate).forEach((highlight) => { highlight.visible = true })
+      })
+      invalidateRenderRef.current()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [sceneGeometryRenderKey, selectionScenePartKey, selectionRefreshKey, project.assets, project.customVoxels, project.customVoxels.length, project.customColors, project.customVoxelRenderModes, project.assemblies, selectedPartIds, checkedPartIds, editEntityId, selectedId])
 
   // HSL dragging is a render-only transaction. Instanced batches can update
   // their material color directly; worker-generated greedy meshes use the GPU
@@ -9799,7 +9862,10 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       material.transparent = true
       material.opacity = editEntityId ? 0.86 : 0.42
       material.depthWrite = false
-      if (editEntityId && object.userData.outerVoxel) addVoxelHighlight(object)
+      if (editEntityId && object.userData.outerVoxel) {
+        const highlights = addVoxelHighlight(object)
+        highlights.forEach((highlight) => { highlight.visible = true })
+      }
     })
     placementRoot.add(preview)
     invalidateRenderRef.current()
@@ -9868,6 +9934,18 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     // thread even though the selected object was already known on pointerdown.
     return raycasterRef.current.ray.intersectPlane(
       new THREE.Plane(new THREE.Vector3(0, 0, 1), 0),
+      new THREE.Vector3(),
+    )
+  }
+
+  const pointerHorizontalPoint = (event: { clientX: number; clientY: number }, worldZ: number) => {
+    if (!setPointerRay(event)) return null
+    // Horizontal dragging must be measured on a plane through the selected
+    // object, not on the ground. Projecting a floating object onto z=0 makes
+    // the delta depend on other geometry and can flip or snap the drag when
+    // the ray crosses another object's projected bounds.
+    return raycasterRef.current.ray.intersectPlane(
+      new THREE.Plane(new THREE.Vector3(0, 0, 1), -worldZ),
       new THREE.Vector3(),
     )
   }
@@ -10564,7 +10642,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       setDragVisualOffset(gesture, moveResult.deltaX, moveResult.deltaY, moveResult.deltaZ)
       return
     }
-    const floorPoint = pointerFloorPoint(event)
+    const floorPoint = pointerHorizontalPoint(event, gesture.horizontalPlaneZ) ?? pointerFloorPoint(event)
     if (!floorPoint) return
     const deltaX = worldToVoxel(floorPoint.x - gesture.startGroundX)
     const deltaZ = worldToVoxel(floorPoint.y - gesture.startGroundY)
@@ -10871,7 +10949,6 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     if (tool === 'select') {
       const context = getPointerContext(event)
       const floorPoint = context?.floorPoint
-      const dragGroundPoint = pointerFloorPoint(event) ?? floorPoint
       const hitPartId = context?.voxelHit?.ownerIds[0]
       const currentProject = authoritativeProjectRef.current
       const currentSceneParts = sceneEntityParts(currentProject)
@@ -10932,6 +11009,8 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
         const anchor = instance
           ? toSceneWorld(instance.x, instance.y ?? 0, instance.z)
           : toSceneWorld(voxelCenterToWorld(anchorVoxel?.x ?? 0), voxelCenterToWorld(anchorVoxel?.y ?? 0), voxelCenterToWorld(anchorVoxel?.z ?? 0))
+        const horizontalPlaneZ = anchor.z
+        const dragGroundPoint = pointerHorizontalPoint(event, horizontalPlaneZ) ?? pointerFloorPoint(event) ?? floorPoint
         const selectionLabel = dragContainsAssembly ? '已选中装配体' : '已选中实体'
         onNotice(`${selectionLabel} · ${movableParts.length} 个零件`)
         selectGestureRef.current = {
@@ -10947,6 +11026,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
           // normal click can jump the entity through another object.
           startGroundX: dragGroundPoint?.x ?? 0,
           startGroundY: dragGroundPoint?.y ?? 0,
+          horizontalPlaneZ,
           startVerticalZ: getVerticalPoint(makeVerticalPlane(anchor))?.z ?? anchor.z,
           verticalPlane: makeVerticalPlane(anchor),
           lastDeltaX: 0,
