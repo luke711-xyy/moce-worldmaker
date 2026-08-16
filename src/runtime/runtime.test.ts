@@ -9,7 +9,7 @@ import {
 } from './runtime-coordinates'
 import { SceneOccupancyIndex } from './spatial-index'
 import { AssetTransformCache } from './asset-transform-cache'
-import { buildGreedyMesh } from './greedy-mesher'
+import { buildGreedyMesh, buildOutlinePositions } from './greedy-mesher'
 import { raycastVoxelDda } from './voxel-dda'
 
 const voxel = (x: number, y: number, z: number, materialId = 'stone'): Voxel => ({ x, y, z, materialId })
@@ -420,6 +420,23 @@ describe('greedy mesher', () => {
     // A cube has 12 outline segments, each with two 3D endpoints.
     expect(mesh.outlinePositions?.length).toBe(12 * 2 * 3)
     expect(buildGreedyMesh([{ gx: 0, gy: 0, gz: 0, materialId: 1 }]).outlinePositions).toBeUndefined()
+  })
+
+  it('removes coplanar T-junction edges from the selection outline', () => {
+    const positions = new Float32Array([
+      0, 0, 0, 2, 0, 0, 2, 1, 0, 0, 1, 0,
+      0, 1, 0, 1, 1, 0, 1, 2, 0, 0, 2, 0,
+      1, 1, 0, 2, 1, 0, 2, 2, 0, 1, 2, 0,
+    ])
+    const normals = new Int8Array([
+      0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1,
+      0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1,
+      0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1,
+    ])
+    const outline = buildOutlinePositions(positions, normals, 3)
+    // The three quads form a 2x2 coplanar square with a T-junction. Only its
+    // four perimeter edges should remain: 4 segments * 2 endpoints * 3 axes.
+    expect(outline.length).toBe(4 * 2 * 3)
   })
 })
 

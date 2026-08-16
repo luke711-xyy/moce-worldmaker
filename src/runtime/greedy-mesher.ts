@@ -23,43 +23,102 @@ type MaskCell = { materialId: number; sign: -1 | 1 } | null
 
 const key = (x: number, y: number, z: number) => `${x},${y},${z}`
 
-function buildOutlinePositions(positions: Float32Array, normals: Int8Array, quadCount: number): Float32Array {
-  type Edge = {
-    start: [number, number, number]
-    end: [number, number, number]
-    normal: [number, number, number]
-  }
-  // Each greedy quad is emitted as four consecutive vertices. Cancel the
-  // shared edge of coplanar quads and retain boundary/feature edges. This
-  // replaces main-thread EdgesGeometry work for large selected models.
-  const edges = new Map<string, Edge | null>()
+export function buildOutlinePositions(positions: Float32Array, normals: Int8Array, quadCount: number): Float32Array {
+  type Point = [number, number, number]
+  type Edge = { start: Point; end: Point; normal: Point }
+  type UnitEdgeState = { start: Point; end: Point; normals: Map<string, Edge> }
+
+  // Each greedy quad is emitted as four consecutive vertices. A simple
+  // whole-segment map is not sufficient here: greedy meshing can produce a
+  // long edge on one quad and two shorter edges on the adjacent quads (a
+  // T-junction). Those edges are coplanar, but their endpoint pairs differ,
+  // so the old implementation left the internal line visible. Split every
+  // axis-aligned edge into unit segments first, cancel coplanar segments, and
+  // merge the surviving segments again. This removes internal same-plane
+  // lines without losing real creases or the silhouette.
+  const unitEdges = new Map<string, UnitEdgeState>()
   const edgePairs: Array<[number, number]> = [[0, 1], [1, 2], [2, 3], [3, 0]]
-  const point = (vertex: number): [number, number, number] => [
+  const point = (vertex: number): Point => [
     positions[vertex * 3], positions[vertex * 3 + 1], positions[vertex * 3 + 2],
   ]
-  const pointKey = (value: [number, number, number]) => `${value[0]},${value[1]},${value[2]}`
-  const normal = (vertex: number): [number, number, number] => [
+  const normal = (vertex: number): Point => [
     normals[vertex * 3], normals[vertex * 3 + 1], normals[vertex * 3 + 2],
   ]
+  const normalKey = (value: Point) => `${value[0]},${value[1]},${value[2]}`
+  const unitSegmentKey = (start: Point, end: Point) => {
+    const a = `${start[0]},${start[1]},${start[2]}`
+    const b = `${end[0]},${end[1]},${end[2]}`
+    return a < b ? `${a}|${b}` : `${b}|${a}`
+  }
+
+  const addUnitEdge = (start: Point, end: Point, faceNormal: Point) => {
+    const delta = [end[0] - start[0], end[1] - start[1], end[2] - start[2]]
+    const axis = delta.findIndex((value) => value !== 0)
+    if (axis < 0) return
+    const direction = delta[axis] > 0 ? 1 : -1
+    const length = Math.abs(delta[axis])
+    const normalId = normalKey(faceNormal)
+    for (let offset = 0; offset < length; offset += 1) {
+      const unitStart: Point = [...start]
+      const unitEnd: Point = [...start]
+      unitStart[axis] += direction * offset
+      unitEnd[axis] += direction * (offset + 1)
+      const key = unitSegmentKey(unitStart, unitEnd)
+      const previous = unitEdges.get(key)
+      if (!previous) {
+        unitEdges.set(key, { start: unitStart, end: unitEnd, normals: new Map([[normalId, { start: unitStart, end: unitEnd, normal: faceNormal }]]) })
+        continue
+      }
+      // Per-normal parity cancels a coplanar edge even when a neighboring
+      // greedy quad only covers part of the original long segment.
+      if (previous.normals.has(normalId)) previous.normals.delete(normalId)
+      else previous.normals.set(normalId, { start: unitStart, end: unitEnd, normal: faceNormal })
+    }
+  }
+
   for (let quad = 0; quad < quadCount; quad += 1) {
     const base = quad * 4
     const faceNormal = normal(base)
     edgePairs.forEach(([startIndex, endIndex]) => {
       const start = point(base + startIndex)
       const end = point(base + endIndex)
-      const startKey = pointKey(start)
-      const endKey = pointKey(end)
-      const key = startKey < endKey ? `${startKey}|${endKey}` : `${endKey}|${startKey}`
-      const previous = edges.get(key)
-      if (previous === undefined) {
-        edges.set(key, { start, end, normal: faceNormal })
-      } else if (previous && previous.normal[0] === faceNormal[0] && previous.normal[1] === faceNormal[1] && previous.normal[2] === faceNormal[2]) {
-        edges.set(key, null)
-      }
+      addUnitEdge(start, end, faceNormal)
     })
   }
+
+  // A surviving geometric edge can be shared by two perpendicular faces.
+  // It still needs only one line. Group the unit segments by their supporting
+  // line and one deterministic surviving normal, then join adjacent runs.
+  const runs = new Map<string, Edge[]>()
+  unitEdges.forEach((state) => {
+    const surviving = state.normals.values().next().value as Edge | undefined
+    if (!surviving) return
+    const axis = [0, 1, 2].find((index) => state.start[index] !== state.end[index]) ?? 0
+    const fixed = [0, 1, 2].filter((index) => index !== axis).map((index) => state.start[index]).join(',')
+    const runKey = `${axis}|${fixed}|${normalKey(surviving.normal)}`
+    const run = runs.get(runKey)
+    if (run) run.push(surviving)
+    else runs.set(runKey, [surviving])
+  })
+
   const output: number[] = []
-  edges.forEach((edge) => { if (edge) output.push(...edge.start, ...edge.end) })
+  runs.forEach((segments) => {
+    const axis = [0, 1, 2].find((index) => segments[0].start[index] !== segments[0].end[index]) ?? 0
+    segments.sort((a, b) => Math.min(a.start[axis], a.end[axis]) - Math.min(b.start[axis], b.end[axis]))
+    let current = segments[0]
+    for (let index = 1; index < segments.length; index += 1) {
+      const next = segments[index]
+      const currentEnd = Math.max(current.start[axis], current.end[axis])
+      const nextStart = Math.min(next.start[axis], next.end[axis])
+      if (currentEnd === nextStart) {
+        current = { ...current, end: next.end }
+      } else {
+        output.push(...current.start, ...current.end)
+        current = next
+      }
+    }
+    output.push(...current.start, ...current.end)
+  })
   return new Float32Array(output)
 }
 

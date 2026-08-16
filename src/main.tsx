@@ -140,6 +140,8 @@ type PlacementPreview = {
 
 type CopyDirectionAxis = 'x' | 'y' | 'z'
 
+type SceneTransformAxis = 'x' | 'y' | 'z'
+
 type CopyPreviewState = {
   count: number
   gap: number
@@ -150,6 +152,17 @@ type CopyPreviewState = {
   asset: VoxelAsset
   origin: { x: number; y: number; z: number }
   offsets: Array<{ x: number; y: number; z: number }>
+  valid: boolean
+  invalidReason?: 'collision' | 'boundary'
+}
+
+type DiscreteTransformPreviewState = {
+  mode: 'mirror' | 'rotate'
+  axis: SceneTransformAxis
+  degrees: 90 | 180 | 270
+  sourcePartIds: string[]
+  asset: VoxelAsset
+  origin: { x: number; y: number; z: number }
   valid: boolean
   invalidReason?: 'collision' | 'boundary'
 }
@@ -1375,6 +1388,7 @@ function App() {
   const [zoomLevel, setZoomLevel] = useState(100)
   const [cameraControlApi, setCameraControlApi] = useState<CameraControlApi | null>(null)
   const [copyPreview, setCopyPreview] = useState<CopyPreviewState | null>(null)
+  const [transformPreview, setTransformPreview] = useState<DiscreteTransformPreviewState | null>(null)
   const [colorPreview, setColorPreview] = useState<ColorPreviewState | null>(null)
   const [geometryPreview, setGeometryPreview] = useState<GeometryPreviewState | null>(null)
   const [geometryApplying, setGeometryApplying] = useState(false)
@@ -2460,6 +2474,7 @@ function App() {
     geometryRequestRevisionRef.current += 1
     geometryApplyRevisionRef.current += 1
     setCopyPreview(null)
+    setTransformPreview(null)
     cancelColorPreview()
     if (!geometryApplyingRef.current) cancelGeometryPreview()
   }
@@ -3708,12 +3723,17 @@ function App() {
 
   const exitEditMode = () => {
     voxelStrokeEntityRef.current = null
+    setCopyPreview(null)
+    setTransformPreview(null)
+    cancelGeometryPreview()
     setEditEntityId(null)
     setNotice('已退出编辑修改模式')
   }
 
   const changeTool = (nextTool: Tool) => {
     cancelGeometryPreview()
+    setCopyPreview(null)
+    setTransformPreview(null)
     setTool(nextTool)
     if (!editEntityId) {
       setSelectedId('')
@@ -4920,6 +4940,8 @@ function App() {
       return
     }
     const count = Math.max(1, Math.min(99, Math.round(requestedCount) || 1))
+    setTransformPreview(null)
+    cancelGeometryPreview()
     // Preview is read-only. Cloning every selected voxel part here made the
     // first click scale with the entire selected model before any copy existed.
     const preview = createCopyPreview(sourceProject, selectedEntityParts, count, 1, 'x', 1)
@@ -5108,6 +5130,8 @@ function App() {
   const requestGeometryPreview = (operation: GeometryOperation, shellThickness: number, scaleMode: GeometryScaleMode, scaleFactor: number) => {
     if (!selectedEntityParts.length) { setNotice('请先选择要处理的实体'); return }
     if (selectedContainsLockedEntity()) { setNotice('选中的实体中包含已固定实体 · 请先取消固定'); return }
+    setCopyPreview(null)
+    setTransformPreview(null)
     const sourceVoxels = currentGeometrySourceVoxels()
     const requestRevision = ++geometryRequestRevisionRef.current
     setGeometryPreview({ operation, shellThickness, scaleMode, scaleFactor, result: null, valid: false, invalidReason: '正在生成预览…' })
@@ -5317,63 +5341,6 @@ function App() {
       setGeometryApplying(false)
       setNotice(error instanceof Error ? `几何处理应用失败：${error.message}` : '几何处理应用失败')
     })
-  }
-
-  const selectedTransformEditable = selectedEntityParts.length === 1
-  // The inspector only needs an anchor for the position fields. Mapping the
-  // entire selected entity here made every render after a large-entity move
-  // allocate a second full voxel array before the viewport could continue.
-  const selectedScenePartVoxel = selectedScenePart ? scenePartVoxelAt(selectedScenePart, 0) : undefined
-  const selectedPosition = selectedTransformEditable && selectedScenePart
-    ? selectedScenePart.kind === 'asset' && selectedInstance
-      ? [selectedInstance.x, selectedInstance.z, selectedInstance.y ?? 0]
-      : selectedScenePartVoxel
-        ? [voxelCenterToWorld(selectedScenePartVoxel.x), voxelCenterToWorld(selectedScenePartVoxel.z), voxelCenterToWorld(selectedScenePartVoxel.y)]
-        : [0, 0, 0]
-    : [0, 0, 0]
-
-  const changeSelectedTransform = (axis: number, requestedValue: number) => {
-    if (!selectedTransformEditable || !selectedScenePart || !Number.isFinite(requestedValue)) return
-    const bounds = sceneBoundsForProject(projectRef.current)
-    const limits = axis === 0
-      ? { min: -bounds.x * VOXEL_WORLD_SIZE / 2, max: bounds.x * VOXEL_WORLD_SIZE / 2 }
-      : axis === 1
-        ? { min: -bounds.y * VOXEL_WORLD_SIZE / 2, max: bounds.y * VOXEL_WORLD_SIZE / 2 }
-        : { min: 0, max: bounds.z * VOXEL_WORLD_SIZE }
-    const value = Math.max(limits.min, Math.min(limits.max, requestedValue))
-    if (selectedScenePart.kind === 'asset' && selectedInstance) {
-      const property = axis === 0 ? 'x' : axis === 1 ? 'z' : 'y'
-      updateProject((draft) => {
-        const instance = draft.instances.find((item) => item.id === selectedInstance.id)
-        if (!instance) return
-        const asset = draft.assets.find((item) => item.id === instance.assetId)
-        instance[property] = property === 'x'
-          ? snapAssetOrigin(value, asset?.width ?? 1)
-          : property === 'z'
-            ? snapAssetOrigin(value, asset?.depth ?? 1)
-            : snapWorld(value)
-      })
-      setNotice(`已更新位置 ${['X', 'Y', 'Z'][axis]} · 已限制在场景边界内`)
-      return
-    }
-    const entityId = selectedScenePart.partId
-    const firstVoxel = scenePartVoxelAt(selectedScenePart, 0)
-    if (!firstVoxel) return
-    const targetVoxel = axis === 2 ? Math.round(value / VOXEL_WORLD_SIZE - 0.5) : worldToVoxelCenter(value)
-    const currentVoxel = axis === 0 ? firstVoxel.x : axis === 1 ? firstVoxel.z : firstVoxel.y
-    const delta = targetVoxel - currentVoxel
-    if (!delta) return
-    updateProject((draft) => {
-      const offsets = { ...(draft.customEntityOffsets ?? {}) }
-      const current = offsets[entityId] ?? { x: 0, y: 0, z: 0 }
-      offsets[entityId] = axis === 0
-        ? { ...current, x: current.x + delta }
-        : axis === 1
-          ? { ...current, z: current.z + delta }
-          : { ...current, y: current.y + delta }
-      draft.customEntityOffsets = offsets
-    })
-    setNotice(`已更新手动实体位置 ${['X', 'Y', 'Z'][axis]} · 已限制在场景边界内`)
   }
 
   const selectedColor = scenePartsDisplayColor(project, selectedEntityParts, selectedAsset)
@@ -5595,68 +5562,19 @@ function App() {
     })
   }
 
-  type SceneTransformAxis = 'x' | 'y' | 'z'
   const sceneAxisToVoxelAxis = (axis: SceneTransformAxis): 'x' | 'y' | 'z' => axis === 'x' ? 'x' : axis === 'y' ? 'z' : 'y'
 
-  const transformedEntitiesWithinSceneBoundary = (mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90) => {
-    const bounds = sceneBoundsForProject(projectRef.current)
-    const withinBoundary = (voxels: Voxel[]) => sceneVoxelsWithinBounds(voxels, bounds)
-    const voxelAxis = sceneAxisToVoxelAxis(axis)
-    const customIds = new Set<string>()
-    for (const part of selectedEntityParts) {
-      if (part.kind !== 'custom' || customIds.has(part.partId)) continue
-      customIds.add(part.partId)
-      const source = scenePartVoxels(part)
-      const transformed = mode === 'mirror' ? mirrorVoxels(source, voxelAxis) : rotateVoxels(source, voxelAxis, degrees)
-      if (!withinBoundary(transformed)) return false
-    }
-    const assetMap = new Map(projectRef.current.assets.map((asset) => [asset.id, asset]))
-    const instanceIds = new Set<string>()
-    for (const part of selectedEntityParts) {
-      if (!part.instanceId || instanceIds.has(part.instanceId)) continue
-      instanceIds.add(part.instanceId)
-      const instance = projectRef.current.instances.find((candidate) => candidate.id === part.instanceId)
-      const asset = instance ? assetMap.get(instance.assetId) : undefined
-      if (!instance || !asset) continue
-      // Boundary validation only reads the instance. A shallow copy is enough
-      // and avoids cloning a large override list just to test one transform.
-      const simulated = {
-        ...instance,
-        overrides: instance.overrides,
-        partOffsets: instance.partOffsets,
-        mirror: instance.mirror ? { ...instance.mirror } : undefined,
-        rotationPivot: mode === 'rotate' && asset
-          ? instanceRotationPivot(instance, asset)
-          : instance.rotationPivot,
-      }
-      if (mode === 'mirror') {
-        simulated.mirror = { x: simulated.mirror?.x ?? false, y: simulated.mirror?.y ?? false, z: simulated.mirror?.z ?? false, [axis]: !(simulated.mirror?.[axis] ?? false) }
-        simulated.rotationPivot = instanceRotationPivot(simulated, asset)
-      }
-      else {
-        // Project coordinates are X/Y ground and Z height, while Three.js
-        // receives them as X/Z/Y. Therefore project-Z rotation is Three-Y
-        // rotation, project-Y rotation is Three-Z rotation.
-        const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationZ' : 'rotationY'
-        simulated[key] = ((simulated[key] ?? 0) + degrees) % 360
-      }
-      if (!withinBoundary(resolveInstanceSceneVoxels(simulated, asset))) return false
-    }
-    return true
-  }
-
-  const commitSceneDiscreteTransform = (parts: SceneEntityPart[], mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90) => {
-    if (geometryApplyingRef.current) return false
-    const sourceProject = projectRef.current
-    const selectedCustomIds = new Set(parts.filter((part) => part.kind === 'custom').map((part) => part.partId))
-    const selectedInstanceIds = new Set(parts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
-    if (!selectedCustomIds.size && !selectedInstanceIds.size) return false
+  const buildSceneDiscreteTransformProject = (sourceProject: ProjectState, parts: SceneEntityPart[], mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90): ProjectState | null => {
+    const selectedPartIds = new Set(parts.map((part) => part.id))
+    const currentParts = sceneEntityParts(sourceProject).filter((part) => selectedPartIds.has(part.id))
+    const selectedCustomIds = new Set(currentParts.filter((part) => part.kind === 'custom').map((part) => part.partId))
+    const selectedInstanceIds = new Set(currentParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
+    if (!selectedCustomIds.size && !selectedInstanceIds.size) return null
     const assetMap = new Map(sourceProject.assets.map((asset) => [asset.id, asset]))
     const voxelAxis = sceneAxisToVoxelAxis(axis)
     const transformedByKey = new Map<string, Voxel>()
-    const changedOwnerIds = new Set<string>()
     for (const entityId of selectedCustomIds) {
-      const part = parts.find((candidate) => candidate.kind === 'custom' && candidate.partId === entityId)
+      const part = currentParts.find((candidate) => candidate.kind === 'custom' && candidate.partId === entityId)
       const source = part ? scenePartVoxels(part) : []
       if (!source.length) continue
       const transformed = mode === 'mirror' ? mirrorVoxels(source, voxelAxis) : rotateVoxels(source, voxelAxis, degrees)
@@ -5665,7 +5583,6 @@ function App() {
         const storedResult = sceneToStoredCustomVoxel(sourceProject, { ...transformed[index], entityId }, entityId)
         transformedByKey.set(`${entityId}:${sceneVoxelKey(storedSource)}`, storedResult)
       })
-      changedOwnerIds.add(`custom:${entityId}`)
     }
     const nextCustomVoxels = transformedByKey.size
       ? sourceProject.customVoxels.map((voxel) => transformedByKey.get(`${voxelEntityId(voxel)}:${sceneVoxelKey(voxel)}`) ?? voxel)
@@ -5688,13 +5605,40 @@ function App() {
         }
       })
       : sourceProject.instances
-    selectedInstanceIds.forEach((instanceId) => {
-      sceneParts.filter((part) => part.instanceId === instanceId).forEach((part) => changedOwnerIds.add(part.id))
-    })
-    const nextProject: ProjectState = { ...sourceProject, customVoxels: nextCustomVoxels, instances: nextInstances }
+    return { ...sourceProject, customVoxels: nextCustomVoxels, instances: nextInstances }
+  }
+
+  const createDiscreteTransformPreview = (sourceProject: ProjectState, parts: SceneEntityPart[], mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90): DiscreteTransformPreviewState | null => {
+    const candidateProject = buildSceneDiscreteTransformProject(sourceProject, parts, mode, axis, degrees)
+    if (!candidateProject) return null
+    const sourcePartIds = new Set(parts.map((part) => part.id))
+    const candidateParts = sceneEntityParts(candidateProject).filter((part) => sourcePartIds.has(part.id))
+    const candidateVoxels = candidateParts.flatMap((part) => scenePartVoxels(part))
+    if (!candidateVoxels.length) return null
+    const bounds = sceneBoundsForProject(sourceProject)
+    let invalidReason: DiscreteTransformPreviewState['invalidReason']
+    if (!sceneVoxelsWithinBounds(candidateVoxels, bounds)) invalidReason = 'boundary'
+    else if (sceneOccupancyRef.current?.collidesProjectVoxels(candidateVoxels, sourcePartIds) || shapeBatchCollidesWithScene(candidateVoxels, sceneEntityParts(sourceProject), sourcePartIds)) invalidReason = 'collision'
+    const previewAsset = makeAssetFromSceneParts('transform-preview', mode === 'mirror' ? '镜像预览' : '旋转预览', candidateParts, '#6c827d', '#d2a354', (voxel, part) => scenePartVoxelDisplayColor(candidateProject, part, voxel))
+    const previewBounds = voxelBounds(previewAsset.voxels)!
+    const origin = {
+      x: (Math.min(...candidateVoxels.map((voxel) => voxel.x)) - previewBounds.min.x + previewAsset.width / 2) * VOXEL_WORLD_SIZE,
+      y: (Math.min(...candidateVoxels.map((voxel) => voxel.y)) - previewBounds.min.y) * VOXEL_WORLD_SIZE,
+      z: (Math.min(...candidateVoxels.map((voxel) => voxel.z)) - previewBounds.min.z + previewAsset.depth / 2) * VOXEL_WORLD_SIZE,
+    }
+    return { mode, axis, degrees, sourcePartIds: [...sourcePartIds], asset: previewAsset, origin, valid: !invalidReason, invalidReason }
+  }
+
+  const commitSceneDiscreteTransform = (parts: SceneEntityPart[], mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90) => {
+    if (geometryApplyingRef.current) return false
+    const sourceProject = projectRef.current
+    const nextProject = buildSceneDiscreteTransformProject(sourceProject, parts, mode, axis, degrees)
+    if (!nextProject) return false
+    const selectedPartIds = new Set(parts.map((part) => part.id))
+    const changedOwnerIds = new Set<string>()
+    sceneEntityParts(nextProject).filter((part) => selectedPartIds.has(part.id)).forEach((part) => changedOwnerIds.add(part.id))
     recordHistoryBeforeChange(sourceProject, nextProject)
-    const nextParts = sceneEntityParts(nextProject)
-    sceneOccupancyRef.current?.syncOwnerParts(nextParts, changedOwnerIds)
+    sceneOccupancyRef.current?.syncOwnerParts(sceneEntityParts(nextProject), changedOwnerIds)
     skipSceneOccupancySyncRef.current = true
     const publishEpoch = ++historyEpochRef.current
     projectRef.current = nextProject
@@ -5706,39 +5650,42 @@ function App() {
 
   const selectedContainsLockedEntity = () => selectedEntityParts.some((part) => scenePartIsLocked(projectRef.current, part))
 
-  const mirrorSelectedEntities = (axis: SceneTransformAxis) => {
+  const startDiscreteTransformPreview = (mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90) => {
     if (!selectedEntityParts.length) {
-      setNotice('请先选择要镜像的实体')
+      setNotice(`请先选择要${mode === 'mirror' ? '镜像' : '旋转'}的实体`)
       return
     }
     if (selectedContainsLockedEntity()) {
-      setNotice('选中的实体中包含已固定实体 · 请先取消固定后再镜像')
+      setNotice(`选中的实体中包含已固定实体 · 请先取消固定后再${mode === 'mirror' ? '镜像' : '旋转'}`)
       return
     }
-    if (!transformedEntitiesWithinSceneBoundary('mirror', axis)) {
-      setNotice('当前操作会使实体超出场景范围，请先移动后再操作。')
-      return
-    }
-    const customChanged = commitSceneDiscreteTransform(selectedEntityParts, 'mirror', axis)
-    const instanceIds = new Set(selectedEntityParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
-    setNotice(`已镜像选中实体 · ${axis.toUpperCase()} 轴${customChanged && instanceIds.size ? ' · 资产实例同步镜像' : ''}`)
+    setCopyPreview(null)
+    cancelGeometryPreview()
+    const preview = createDiscreteTransformPreview(projectRef.current, selectedEntityParts, mode, axis, degrees)
+    setTransformPreview(preview)
+    setNotice(!preview ? '无法生成变换预览' : preview.valid ? '预览有效 · 请确认应用' : preview.invalidReason === 'collision' ? '预览与已有实体重叠，无法应用' : '预览超出场景边界，无法应用')
   }
 
-  const rotateSelectedEntities = (axis: SceneTransformAxis, degrees: 90 | 180 | 270) => {
-    if (!selectedEntityParts.length) {
-      setNotice('请先选择要旋转的实体')
+  const mirrorSelectedEntities = (axis: SceneTransformAxis) => startDiscreteTransformPreview('mirror', axis)
+  const rotateSelectedEntities = (axis: SceneTransformAxis, degrees: 90 | 180 | 270) => startDiscreteTransformPreview('rotate', axis, degrees)
+
+  const confirmDiscreteTransform = () => {
+    if (!transformPreview) return
+    const selectedIds = new Set(transformPreview.sourcePartIds)
+    const currentParts = sceneEntityParts(projectRef.current).filter((part) => selectedIds.has(part.id))
+    const currentPreview = createDiscreteTransformPreview(projectRef.current, currentParts, transformPreview.mode, transformPreview.axis, transformPreview.degrees)
+    if (!currentPreview?.valid) {
+      setTransformPreview(currentPreview)
+      setNotice(currentPreview?.invalidReason === 'collision' ? '变换被拒绝：会与已有实体重叠' : '变换被拒绝：会超出场景边界')
       return
     }
-    if (selectedContainsLockedEntity()) {
-      setNotice('选中的实体中包含已固定实体 · 请先取消固定后再旋转')
+    if (!commitSceneDiscreteTransform(currentParts, transformPreview.mode, transformPreview.axis, transformPreview.degrees)) {
+      setNotice('变换失败：场景状态已变化，请重新预览')
+      setTransformPreview(null)
       return
     }
-    if (!transformedEntitiesWithinSceneBoundary('rotate', axis, degrees)) {
-      setNotice('当前操作会使实体超出场景范围，请先移动后再操作。')
-      return
-    }
-    commitSceneDiscreteTransform(selectedEntityParts, 'rotate', axis, degrees)
-    setNotice(`已旋转选中实体 · ${axis.toUpperCase()} 轴 ${degrees}°`)
+    setTransformPreview(null)
+    setNotice(transformPreview.mode === 'mirror' ? `已镜像选中实体 · ${transformPreview.axis.toUpperCase()} 轴` : `已旋转选中实体 · ${transformPreview.axis.toUpperCase()} 轴 ${transformPreview.degrees}°`)
   }
 
   const operateOnSceneSelection = (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => {
@@ -5770,6 +5717,7 @@ function App() {
       return
     }
     setCopyPreview(null)
+    setTransformPreview(null)
     setSelectionRefreshKey((value) => value + 1)
     const removing = additive && checkedTreePartIds.includes(id)
     setCheckedTreePartIds((current) => {
@@ -5791,6 +5739,7 @@ function App() {
       return
     }
     setCopyPreview(null)
+    setTransformPreview(null)
     setSelectionRefreshKey((value) => value + 1)
     const removing = checkedTreePartIds.includes(id)
     setCheckedTreePartIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
@@ -5801,6 +5750,7 @@ function App() {
 
   const selectScenePart = (id: string) => {
     setCopyPreview(null)
+    setTransformPreview(null)
     setSelectionRefreshKey((value) => value + 1)
     setSelectedId(id)
     setCheckedTreePartIds([id])
@@ -5810,6 +5760,7 @@ function App() {
 
   const updateSceneCheckedSelection = (partIds: string[], additive = false) => {
     setCopyPreview(null)
+    setTransformPreview(null)
     setSelectionRefreshKey((value) => value + 1)
     setCheckedTreePartIds((current) => {
       if (!additive) return [...new Set(partIds)]
@@ -5871,6 +5822,7 @@ function App() {
   const stableViewportSelectMultiple = useStableEvent(updateSceneCheckedSelection)
   const stableViewportCancelPending = useStableEvent(() => {
     setCopyPreview(null)
+    setTransformPreview(null)
     cancelGeometryPreview()
   })
   const stableViewportSelectMaterial = useStableEvent(useMaterial)
@@ -5955,7 +5907,7 @@ function App() {
               </div>}
             </div>
           </div>
-          <MemoizedVoxelViewport project={project} authoritativeProjectRef={projectRef} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectionRefreshKey={selectionRefreshKey} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} geometryApplying={geometryApplying} historyResetKey={historyRevision} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} voxelBrushShape={voxelBrushShape} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSyncSceneOccupancyTransforms={stableViewportSyncOccupancyTransforms} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onCancelScenePartsMove={stableViewportCancelMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
+          <MemoizedVoxelViewport project={project} authoritativeProjectRef={projectRef} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectionRefreshKey={selectionRefreshKey} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} geometryApplying={geometryApplying} historyResetKey={historyRevision} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} voxelBrushShape={voxelBrushShape} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} transformPreview={transformPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSyncSceneOccupancyTransforms={stableViewportSyncOccupancyTransforms} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onCancelScenePartsMove={stableViewportCancelMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
           <ToolboxPopover open={toolboxOpen} onClose={() => setToolboxOpen(false)} tool={tool} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} voxelBrushShape={voxelBrushShape} onToolChange={changeTool} onPlaneChange={setDrawingPlane} onOperationChange={setDrawOperation} onBrushSizeChange={setBrushSize} onBrushShapeChange={setVoxelBrushShape} />
           <ReferenceImagePopover open={referenceImageOpen} image={referenceImage} index={referenceImageIndex} count={referenceImages.length} onPrevious={() => setReferenceImageIndex((current) => (current - 1 + referenceImages.length) % referenceImages.length)} onNext={() => setReferenceImageIndex((current) => (current + 1) % referenceImages.length)} onClose={() => setReferenceImageOpen(false)} onOpen={openReferenceImagePicker} />
           <div className="viewport-footer">
@@ -5977,7 +5929,7 @@ function App() {
             <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { if (cameraControlApi) cameraControlApi.zoomOut(); else setZoomLevel((value) => stepZoomLevel(value, -1)); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${zoomTrackProgress(zoomLevel)}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { if (cameraControlApi) cameraControlApi.zoomIn(); else setZoomLevel((value) => stepZoomLevel(value, 1)); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{Math.round(zoomLevel)}%</span></div>
           </div>
         </section>
-        <MemoizedInspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} position={selectedPosition} transformEditable={selectedTransformEditable} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} geometryPreview={geometryPreview} shellThicknessOptions={geometryShellThicknessOptions} scaleOptions={geometryScaleOptions} onChangeTransform={changeSelectedTransform} onChangeColor={changeSelectedColor} onPreviewHsl={previewSelectedHsl} onCommitHsl={commitSelectedHsl} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onExport={exportSelectedPart} onExportGlb={exportSelectedPartGlb} onExportVox={exportSelectedPartVox} onExportEntityFile={exportSelectedEntityFile} onOpenSlicer={() => setSliceDialogOpen(true)} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => setCopyPreview(null)} onStartShell={startShellPreview} onStartScale={startScalePreview} onChangeShellThickness={changeGeometryShellThickness} onChangeScale={changeGeometryScale} onConfirmGeometry={confirmGeometryPreview} onCancelGeometry={cancelGeometryPreview} onDelete={deleteSelected} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
+        <MemoizedInspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} transformPreview={transformPreview} geometryPreview={geometryPreview} shellThicknessOptions={geometryShellThicknessOptions} scaleOptions={geometryScaleOptions} onChangeColor={changeSelectedColor} onPreviewHsl={previewSelectedHsl} onCommitHsl={commitSelectedHsl} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onConfirmTransform={confirmDiscreteTransform} onCancelTransform={() => setTransformPreview(null)} onExport={exportSelectedPart} onExportGlb={exportSelectedPartGlb} onExportVox={exportSelectedPartVox} onExportEntityFile={exportSelectedEntityFile} onOpenSlicer={() => setSliceDialogOpen(true)} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => { setCopyPreview(null); setTransformPreview(null) }} onStartShell={startShellPreview} onStartScale={startScalePreview} onChangeShellThickness={changeGeometryShellThickness} onChangeScale={changeGeometryScale} onConfirmGeometry={confirmGeometryPreview} onCancelGeometry={cancelGeometryPreview} onDelete={deleteSelected} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
       </main>
       {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} selectedSceneLoading={selectedLibrarySceneLoading} selectionRevision={selectedLibrarySceneRevision} error={libraryError} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} cloudAssets={cloudAssets} cloudScenes={cloudScenes} cloudUsage={cloudUsage} cloudError={cloudError} cloudTransfers={cloudTransfers} cloudTransferErrors={cloudTransferErrors} onBackupCurrentScene={() => backupCurrentSceneToCloud()} onDownloadCloudScene={downloadCloudSceneToLocal} onDeleteCloudScene={removeCloudScene} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null); setSelectedLibrarySceneLoading(false) }} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} onBackupScene={backupStoredSceneToCloud} />}
       {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
@@ -6792,7 +6744,7 @@ function ToolButton({ icon, label, description, active, onClick }: { icon: React
   return <button className={`tool-button ${active ? 'active' : ''}`} data-tooltip={description} aria-label={label} onClick={onClick} title={description}>{icon}</button>
 }
 
-function Inspector({ entityName, source, selectedAsset, selectedPart, selectedParts, editEntityId, canEnterEditMode, editTargetId, position, transformEditable, selectedColor, previewColor, previewVoxelColors, previewMaterialColors, copyPreview, geometryPreview, shellThicknessOptions, scaleOptions, onChangeTransform, onChangeColor, onPreviewHsl, onCommitHsl, onMirror, onRotate, onExport, onExportGlb, onExportVox, onExportEntityFile, onOpenSlicer, onDuplicate, onChangeCopyDirection, onChangeCopyGap, onConfirmDuplicate, onCancelDuplicate, onStartShell, onStartScale, onChangeShellThickness, onChangeScale, onConfirmGeometry, onCancelGeometry, onDelete, onSaveAsAsset, onEnterEditMode }: { entityName: string; source: string; selectedAsset?: VoxelAsset; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; editEntityId: string | null; canEnterEditMode: boolean; editTargetId: string; position: number[]; transformEditable: boolean; selectedColor: string; previewColor?: string; previewVoxelColors: Record<string, string>; previewMaterialColors: Record<string, string>; copyPreview: CopyPreviewState | null; geometryPreview: GeometryPreviewState | null; shellThicknessOptions: number[]; scaleOptions: { up: number[]; down: number[] }; onChangeTransform: (axis: number, value: number) => void; onChangeColor: (color: string) => void; onPreviewHsl: (hueDelta: number, saturationTarget: number) => void; onCommitHsl: (hueDelta: number, saturationTarget: number) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onExport: () => void; onExportGlb: () => void | Promise<void>; onExportVox: () => void; onExportEntityFile: () => void; onOpenSlicer: () => void; onDuplicate: (count: number) => void; onChangeCopyDirection: (axis: CopyDirectionAxis, sign: 1 | -1) => void; onChangeCopyGap: (gap: number) => void; onConfirmDuplicate: () => void; onCancelDuplicate: () => void; onStartShell: () => void; onStartScale: (mode: GeometryScaleMode) => void; onChangeShellThickness: (value: number) => void; onChangeScale: (mode: GeometryScaleMode, value: number) => void; onConfirmGeometry: () => void; onCancelGeometry: () => void; onDelete: () => void; onSaveAsAsset: () => void; onEnterEditMode: (entityId: string) => void }) {
+function Inspector({ entityName, source, selectedAsset, selectedPart, selectedParts, editEntityId, canEnterEditMode, editTargetId, selectedColor, previewColor, previewVoxelColors, previewMaterialColors, copyPreview, transformPreview, geometryPreview, shellThicknessOptions, scaleOptions, onChangeColor, onPreviewHsl, onCommitHsl, onMirror, onRotate, onConfirmTransform, onCancelTransform, onExport, onExportGlb, onExportVox, onExportEntityFile, onOpenSlicer, onDuplicate, onChangeCopyDirection, onChangeCopyGap, onConfirmDuplicate, onCancelDuplicate, onStartShell, onStartScale, onChangeShellThickness, onChangeScale, onConfirmGeometry, onCancelGeometry, onDelete, onSaveAsAsset, onEnterEditMode }: { entityName: string; source: string; selectedAsset?: VoxelAsset; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; editEntityId: string | null; canEnterEditMode: boolean; editTargetId: string; selectedColor: string; previewColor?: string; previewVoxelColors: Record<string, string>; previewMaterialColors: Record<string, string>; copyPreview: CopyPreviewState | null; transformPreview: DiscreteTransformPreviewState | null; geometryPreview: GeometryPreviewState | null; shellThicknessOptions: number[]; scaleOptions: { up: number[]; down: number[] }; onChangeColor: (color: string) => void; onPreviewHsl: (hueDelta: number, saturationTarget: number) => void; onCommitHsl: (hueDelta: number, saturationTarget: number) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onConfirmTransform: () => void; onCancelTransform: () => void; onExport: () => void; onExportGlb: () => void | Promise<void>; onExportVox: () => void; onExportEntityFile: () => void; onOpenSlicer: () => void; onDuplicate: (count: number) => void; onChangeCopyDirection: (axis: CopyDirectionAxis, sign: 1 | -1) => void; onChangeCopyGap: (gap: number) => void; onConfirmDuplicate: () => void; onCancelDuplicate: () => void; onStartShell: () => void; onStartScale: (mode: GeometryScaleMode) => void; onChangeShellThickness: (value: number) => void; onChangeScale: (mode: GeometryScaleMode, value: number) => void; onConfirmGeometry: () => void; onCancelGeometry: () => void; onDelete: () => void; onSaveAsAsset: () => void; onEnterEditMode: (entityId: string) => void }) {
   const [copyCount, setCopyCount] = useState(1)
   const [mirrorAxis, setMirrorAxis] = useState<'x' | 'y' | 'z'>('x')
   const [rotateAxis, setRotateAxis] = useState<'x' | 'y' | 'z'>('z')
@@ -6826,10 +6778,6 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
       {canEnterEditMode && <button className="enter-edit-button" onClick={() => onEnterEditMode(editTargetId)}>进入编辑模式</button>}
     </div>
     {selectedParts.length > 0 && <>
-      <div className="inspector-section">
-        <TransformRow icon={<Move3d size={14} />} label="位置" values={position} editable={transformEditable} onChange={onChangeTransform} />
-        {selectedParts.length > 1 && !transformEditable && <div className="transform-hint">多选实体时不可直接编辑单一位置</div>}
-      </div>
       <div className="inspector-section color-section">
         <div className="section-heading"><span>颜色</span><span className="instance-label">实体覆盖色</span></div>
         <ColorEditor color={selectedColor} disabled={false} onChange={onChangeColor} onPreviewHsl={onPreviewHsl} onCommitHsl={onCommitHsl} />
@@ -6839,9 +6787,10 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
       <div className="entity-actions">
         <div className="entity-transform-operation copy-entity-row"><span className="copy-entity-label">复制实体</span><div className="copy-count-choice"><button disabled={Boolean(copyPreview)} onClick={() => setCopyCount((value) => Math.max(1, value - 1))} title="减少复制数量">−</button><span className="copy-entity-count">{copyPreview?.count ?? copyCount}</span><button disabled={Boolean(copyPreview)} onClick={() => setCopyCount((value) => Math.min(99, value + 1))} title="增加复制数量">＋</button></div>{copyPreview ? <button className="operation-confirm copy-confirm" onClick={onCancelDuplicate}>取消</button> : <button className="operation-confirm copy-confirm" onClick={() => onDuplicate(copyCount)}>预览</button>}</div>
         {copyPreview && <div className="copy-preview-panel"><div className="copy-preview-title">复制方向</div><div className="copy-preview-axis">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={copyPreview.axis === axis ? 'active' : ''} onClick={() => onChangeCopyDirection(axis, copyPreview.sign)}>{axis.toUpperCase()}</button>)}<button className={copyPreview.sign === 1 ? 'active' : ''} onClick={() => onChangeCopyDirection(copyPreview.axis, 1)}>正向 +</button><button className={copyPreview.sign === -1 ? 'active' : ''} onClick={() => onChangeCopyDirection(copyPreview.axis, -1)}>负向 −</button></div><div className="copy-preview-gap"><span>实体间隔</span><button disabled={copyPreview.gap <= 0} onClick={() => onChangeCopyGap(copyPreview.gap - 1)}>−</button><strong>{copyPreview.gap}</strong><button disabled={copyPreview.gap >= 99} onClick={() => onChangeCopyGap(copyPreview.gap + 1)}>＋</button><em>体素</em></div><div className={`copy-preview-status ${copyPreview.valid ? 'valid' : 'invalid'}`}>{copyPreview.valid ? `预览有效 · 将生成 ${copyPreview.count} 个复制实体` : copyPreview.invalidReason === 'collision' ? '预览与已有实体重叠，无法生成' : '预览超出场景边界，无法生成'}</div><button className="operation-confirm copy-preview-generate" onClick={onConfirmDuplicate}>生成复制实体</button></div>}
-        <div className="entity-transform-operation"><span>镜像实体</span><div className="axis-choice">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={mirrorAxis === axis ? 'active' : ''} onClick={() => setMirrorAxis(axis)}>{axis.toUpperCase()}</button>)}</div><button className="operation-confirm" onClick={() => onMirror(mirrorAxis)}>执行</button></div>
-        <div className="entity-transform-operation"><span>旋转实体</span><div className="axis-choice">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={rotateAxis === axis ? 'active' : ''} onClick={() => setRotateAxis(axis)}>{axis.toUpperCase()}</button>)}</div><div className="degree-choice">{([90, 180, 270] as const).map((degrees) => <button key={degrees} className={rotateDegrees === degrees ? 'active' : ''} onClick={() => setRotateDegrees(degrees)}>{degrees}°</button>)}</div><button className="operation-confirm" onClick={() => onRotate(rotateAxis, rotateDegrees)}>执行</button></div>
-        {!geometryPreview && <>
+        <div className="entity-transform-operation"><span>镜像实体</span><div className="axis-choice">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} disabled={Boolean(transformPreview)} className={mirrorAxis === axis ? 'active' : ''} onClick={() => setMirrorAxis(axis)}>{axis.toUpperCase()}</button>)}</div><button className="operation-confirm" disabled={Boolean(transformPreview)} onClick={() => onMirror(mirrorAxis)}>{transformPreview?.mode === 'mirror' ? '预览中' : '预览'}</button></div>
+        <div className="entity-transform-operation"><span>旋转实体</span><div className="axis-choice">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} disabled={Boolean(transformPreview)} className={rotateAxis === axis ? 'active' : ''} onClick={() => setRotateAxis(axis)}>{axis.toUpperCase()}</button>)}</div><div className="degree-choice">{([90, 180, 270] as const).map((degrees) => <button key={degrees} disabled={Boolean(transformPreview)} className={rotateDegrees === degrees ? 'active' : ''} onClick={() => setRotateDegrees(degrees)}>{degrees}°</button>)}</div><button className="operation-confirm" disabled={Boolean(transformPreview)} onClick={() => onRotate(rotateAxis, rotateDegrees)}>{transformPreview?.mode === 'rotate' ? '预览中' : '预览'}</button></div>
+        {transformPreview && <div className="copy-preview-panel transform-preview-panel"><div className="copy-preview-title">{transformPreview.mode === 'mirror' ? '镜像预览' : '旋转预览'}</div><div className={`copy-preview-status ${transformPreview.valid ? 'valid' : 'invalid'}`}>{transformPreview.valid ? '预览有效 · 可以应用' : transformPreview.invalidReason === 'collision' ? '预览与已有实体重叠，无法应用' : '预览超出场景边界，无法应用'}</div><div className="geometry-preview-actions"><button onClick={onCancelTransform}>取消</button><button className="operation-confirm" disabled={!transformPreview.valid} onClick={onConfirmTransform}>确认应用</button></div></div>}
+        {!geometryPreview && !transformPreview && <>
           <div className="entity-transform-operation"><span>去除内部</span><button className="operation-confirm" disabled={!selectedParts.length} onClick={onStartShell}>预览</button></div>
           <div className="entity-transform-operation"><span>整体放大</span><button className="operation-confirm" disabled={!selectedParts.length || !scaleOptions.up.length} onClick={() => onStartScale('up')}>预览</button></div>
           <div className="entity-transform-operation"><span>整体缩小</span><button className="operation-confirm" disabled={!selectedParts.length || !scaleOptions.down.length} onClick={() => onStartScale('down')}>预览</button></div>
@@ -6911,13 +6860,12 @@ function inspectorPropsEqual(previous: InspectorProps, next: InspectorProps): bo
     && previous.editEntityId === next.editEntityId
     && previous.canEnterEditMode === next.canEnterEditMode
     && previous.editTargetId === next.editTargetId
-    && previous.transformEditable === next.transformEditable
-    && sameNumberArray(previous.position, next.position)
     && previous.selectedColor === next.selectedColor
     && previous.previewColor === next.previewColor
     && previous.previewVoxelColors === next.previewVoxelColors
     && previous.previewMaterialColors === next.previewMaterialColors
     && previous.copyPreview === next.copyPreview
+    && previous.transformPreview === next.transformPreview
     && previous.geometryPreview === next.geometryPreview
     && sameNumberArray(previous.shellThicknessOptions, next.shellThicknessOptions)
     && sameScaleOptions(previous.scaleOptions, next.scaleOptions)
@@ -7490,10 +7438,6 @@ const VoxelMiniPreview = React.memo(function VoxelMiniPreview(props: { voxels: V
     ? <WorkerVoxelMiniPreview {...props} />
     : <SynchronousVoxelMiniPreview {...props} />
 })
-
-function TransformRow({ icon, label, values, editable, onChange }: { icon: React.ReactNode; label: string; values: number[]; editable: boolean; onChange: (axis: number, value: number) => void }) {
-  return <div className="transform-row"><div className="transform-label">{icon}{label}</div><div className="transform-values">{values.map((value, index) => <label key={index}><span>{['X', 'Y', 'Z'][index]}</span><NumericInput aria-label={`位置 ${['X', 'Y', 'Z'][index]}`} step="0.1" value={Number(value.toFixed(3))} disabled={!editable} onCommit={(next) => onChange(index, next)} /></label>)}</div></div>
-}
 
 function ColorEditor({ color, disabled, onChange, onPreviewHsl, onCommitHsl }: { color: string; disabled: boolean; onChange: (color: string) => void; onPreviewHsl: (hueDelta: number, saturationTarget: number) => void; onCommitHsl: (hueDelta: number, saturationTarget: number) => void }) {
   const colorInputRef = useRef<HTMLInputElement>(null)
@@ -8217,7 +8161,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   </div>
 }
 
-function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancyIndex, assetTransformCache, selectedId, selectionRefreshKey, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, geometryApplying, historyResetKey, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, voxelBrushShape, activeMaterial, materials, dragAxis, placementAsset, copyPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSyncSceneOccupancyTransforms, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onCancelScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; authoritativeProjectRef: React.MutableRefObject<ProjectState>; sceneParts: SceneEntityPart[]; occupancyIndex: SceneOccupancyIndex | null; assetTransformCache: AssetTransformCache; selectedId: string; selectionRefreshKey: number; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; geometryApplying: boolean; historyResetKey: number; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; voxelBrushShape: VoxelShape; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSyncSceneOccupancyTransforms: () => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCancelScenePartsMove: () => void; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
+function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancyIndex, assetTransformCache, selectedId, selectionRefreshKey, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, geometryApplying, historyResetKey, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, voxelBrushShape, activeMaterial, materials, dragAxis, placementAsset, copyPreview, transformPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSyncSceneOccupancyTransforms, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onCancelScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; authoritativeProjectRef: React.MutableRefObject<ProjectState>; sceneParts: SceneEntityPart[]; occupancyIndex: SceneOccupancyIndex | null; assetTransformCache: AssetTransformCache; selectedId: string; selectionRefreshKey: number; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; geometryApplying: boolean; historyResetKey: number; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; voxelBrushShape: VoxelShape; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; transformPreview: DiscreteTransformPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSyncSceneOccupancyTransforms: () => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCancelScenePartsMove: () => void; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.Camera | null>(null)
@@ -8226,6 +8170,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   const groupRef = useRef<THREE.Group | null>(null)
   const placementGroupRef = useRef<THREE.Group | null>(null)
   const copyPreviewGroupRef = useRef<THREE.Group | null>(null)
+  const transformPreviewGroupRef = useRef<THREE.Group | null>(null)
   const toolPreviewGroupRef = useRef<THREE.Group | null>(null)
   const geometryPreviewGroupRef = useRef<THREE.Group | null>(null)
   const placementPreviewRef = useRef<PlacementPreview | null>(null)
@@ -8901,15 +8846,18 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     const group = new THREE.Group()
     const placementGroup = new THREE.Group()
     const copyPreviewGroup = new THREE.Group()
+    const transformPreviewGroup = new THREE.Group()
     const toolPreviewGroup = new THREE.Group()
     const geometryPreviewGroup = new THREE.Group()
     placementGroup.name = 'placement-preview-root'
     copyPreviewGroup.name = 'copy-preview-root'
+    transformPreviewGroup.name = 'transform-preview-root'
     toolPreviewGroup.name = 'tool-preview-root'
     geometryPreviewGroup.name = 'geometry-preview-root'
     scene.add(group)
     scene.add(placementGroup)
     scene.add(copyPreviewGroup)
+    scene.add(transformPreviewGroup)
     scene.add(toolPreviewGroup)
     scene.add(geometryPreviewGroup)
     sceneRef.current = scene
@@ -8919,6 +8867,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     groupRef.current = group
     placementGroupRef.current = placementGroup
     copyPreviewGroupRef.current = copyPreviewGroup
+    transformPreviewGroupRef.current = transformPreviewGroup
     toolPreviewGroupRef.current = toolPreviewGroup
     geometryPreviewGroupRef.current = geometryPreviewGroup
     controlsRef.current = controls
@@ -9900,6 +9849,29 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     })
     invalidateRenderRef.current(160)
   }, [copyPreview, materialMap])
+
+  useEffect(() => {
+    const root = transformPreviewGroupRef.current
+    if (!root) return
+    disposeThreeObject(root)
+    root.clear()
+    if (!transformPreview) {
+      invalidateRenderRef.current()
+      return
+    }
+    const preview = buildAssetGroup(transformPreview.asset, materialMap)
+    preview.position.copy(toSceneWorld(transformPreview.origin.x, transformPreview.origin.y, transformPreview.origin.z))
+    preview.userData.transformPreview = true
+    preview.traverse((object) => {
+      if (!(object instanceof THREE.Mesh) || !(object.material instanceof THREE.MeshStandardMaterial)) return
+      object.material.transparent = true
+      object.material.opacity = transformPreview.valid ? 0.42 : 0.22
+      object.material.depthWrite = false
+      if (!transformPreview.valid) object.material.color.set('#e06b5b')
+    })
+    root.add(preview)
+    invalidateRenderRef.current(160)
+  }, [transformPreview, materialMap])
 
   const showPlacementPreview = (previewState: PlacementPreview | null) => {
     const preview = placementGroupRef.current?.children[0]
