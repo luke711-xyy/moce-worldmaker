@@ -161,10 +161,18 @@ type DiscreteTransformPreviewState = {
   axis: SceneTransformAxis
   degrees: 90 | 180 | 270
   sourcePartIds: string[]
+  sourceInstanceIds: string[]
+  sourceCustomIds: string[]
   asset: VoxelAsset
   origin: { x: number; y: number; z: number }
   valid: boolean
   invalidReason?: 'collision' | 'boundary'
+}
+
+type DiscreteTransformSelection = {
+  sourcePartIds: Set<string>
+  instanceIds: Set<string>
+  customIds: Set<string>
 }
 
 type SceneVoxelRayHit = {
@@ -5571,23 +5579,39 @@ function App() {
 
   const sceneAxisToVoxelAxis = (axis: SceneTransformAxis): 'x' | 'y' | 'z' => axis === 'x' ? 'x' : axis === 'y' ? 'z' : 'y'
 
-  const transformSourcePartIds = (sourceProject: ProjectState, parts: SceneEntityPart[]): Set<string> => {
+  const resolveDiscreteTransformSelection = (sourceProject: ProjectState, parts: SceneEntityPart[]): DiscreteTransformSelection => {
     const requestedPartIds = new Set(parts.map((part) => part.id))
     const requestedInstanceIds = new Set(parts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
-    return new Set(sceneEntityParts(sourceProject)
-      .filter((part) => requestedPartIds.has(part.id) || Boolean(part.instanceId && requestedInstanceIds.has(part.instanceId)))
-      .map((part) => part.id))
+    const resolvedParts = sceneEntityParts(sourceProject).filter((part) =>
+      requestedPartIds.has(part.id) || Boolean(part.instanceId && requestedInstanceIds.has(part.instanceId)),
+    )
+    return {
+      sourcePartIds: new Set(resolvedParts.map((part) => part.id)),
+      instanceIds: new Set(resolvedParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id))),
+      customIds: new Set(resolvedParts.filter((part) => part.kind === 'custom').map((part) => part.partId)),
+    }
   }
+
+  const transformPartsForSelection = (sourceProject: ProjectState, selection: DiscreteTransformSelection): SceneEntityPart[] => {
+    return sceneEntityParts(sourceProject).filter((part) =>
+      selection.sourcePartIds.has(part.id)
+      || Boolean(part.instanceId && selection.instanceIds.has(part.instanceId))
+      || (part.kind === 'custom' && selection.customIds.has(part.partId)),
+    )
+  }
+
+  const transformSourcePartIds = (sourceProject: ProjectState, parts: SceneEntityPart[]): Set<string> =>
+    resolveDiscreteTransformSelection(sourceProject, parts).sourcePartIds
 
   const buildSceneDiscreteTransformProject = (sourceProject: ProjectState, parts: SceneEntityPart[], mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90): ProjectState | null => {
     // A scene instance is the editable unit even when the tree selection only
     // contains one of its child parts. Transforming the instance while
     // leaving sibling parts out of the source set desynchronizes the cache and
     // occupancy index, which makes the next transform appear to do nothing.
-    const selectedPartIds = transformSourcePartIds(sourceProject, parts)
-    const currentParts = sceneEntityParts(sourceProject).filter((part) => selectedPartIds.has(part.id))
-    const selectedCustomIds = new Set(currentParts.filter((part) => part.kind === 'custom').map((part) => part.partId))
-    const selectedInstanceIds = new Set(currentParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
+    const selection = resolveDiscreteTransformSelection(sourceProject, parts)
+    const currentParts = transformPartsForSelection(sourceProject, selection)
+    const selectedCustomIds = selection.customIds
+    const selectedInstanceIds = selection.instanceIds
     if (!selectedCustomIds.size && !selectedInstanceIds.size) return null
     const assetMap = new Map(sourceProject.assets.map((asset) => [asset.id, asset]))
     const voxelAxis = sceneAxisToVoxelAxis(axis)
@@ -5607,7 +5631,12 @@ function App() {
       voxel,
       canonical: part.voxels[index],
     })))
-    const transformedBySource = new Map<Voxel, Voxel>()
+    // Index by the owning entity and canonical coordinate instead of the
+    // voxel object reference. A transform replaces voxel objects in the
+    // project array; using object identity here lets the first operation
+    // appear to work while a later operation can silently miss cells after a
+    // cached scene-part array has been rebuilt.
+    const transformedBySource = new Map<string, Voxel>()
     if (sourceEntries.length) {
       const transformed = mode === 'mirror'
         ? mirrorVoxels(sourceEntries.map(({ voxel }) => voxel), voxelAxis)
@@ -5615,25 +5644,37 @@ function App() {
       sourceEntries.forEach(({ part, canonical }, index) => {
         if (!canonical) return
         const storedResult = sceneToStoredCustomVoxel(sourceProject, transformed[index], part.partId)
-        transformedBySource.set(canonical, storedResult)
+        transformedBySource.set(`${part.partId}:${sceneVoxelKey(canonical)}`, storedResult)
       })
     }
     const nextCustomVoxels = transformedBySource.size
-      ? sourceProject.customVoxels.map((voxel) => transformedBySource.get(voxel) ?? voxel)
+      ? sourceProject.customVoxels.map((voxel) => {
+        const entityId = voxelEntityId(voxel)
+        return transformedBySource.get(`${entityId}:${sceneVoxelKey(voxel)}`) ?? voxel
+      })
       : sourceProject.customVoxels
     const nextInstances = selectedInstanceIds.size
       ? sourceProject.instances.map((instance) => {
         if (!selectedInstanceIds.has(instance.id)) return instance
         if (mode === 'mirror') {
           const mirror = { x: instance.mirror?.x ?? false, y: instance.mirror?.y ?? false, z: instance.mirror?.z ?? false, [axis]: !(instance.mirror?.[axis] ?? false) }
-          const asset = assetMap.get(instance.assetId)
           const mirrored = { ...instance, mirror }
-          return asset ? { ...mirrored, rotationPivot: instanceRotationPivot(mirrored, asset) } : mirrored
+          const asset = assetMap.get(instance.assetId)
+          // The pivot is a persistent world-space anchor. Recomputing it from
+          // the already transformed instance changes the coordinate frame on
+          // every operation, which is why a second mirror/rotation could
+          // produce an invalid preview or appear to do nothing. Initialize it
+          // only for legacy instances that do not have one yet.
+          return asset
+            ? { ...mirrored, rotationPivot: instance.rotationPivot ?? instanceRotationPivot(instance, asset) }
+            : mirrored
         }
         const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationZ' : 'rotationY'
         const asset = assetMap.get(instance.assetId)
         const rotated = { ...instance, [key]: ((instance[key] ?? 0) + degrees) % 360 }
-        return asset ? { ...rotated, rotationPivot: instanceRotationPivot(rotated, asset) } : rotated
+        return asset
+          ? { ...rotated, rotationPivot: instance.rotationPivot ?? instanceRotationPivot(instance, asset) }
+          : rotated
       })
       : sourceProject.instances
     return { ...sourceProject, customVoxels: nextCustomVoxels, instances: nextInstances }
@@ -5642,14 +5683,22 @@ function App() {
   const createDiscreteTransformPreview = (sourceProject: ProjectState, parts: SceneEntityPart[], mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90): DiscreteTransformPreviewState | null => {
     const candidateProject = buildSceneDiscreteTransformProject(sourceProject, parts, mode, axis, degrees)
     if (!candidateProject) return null
-    const sourcePartIds = transformSourcePartIds(sourceProject, parts)
-    const candidateParts = sceneEntityParts(candidateProject).filter((part) => sourcePartIds.has(part.id))
+    const selection = resolveDiscreteTransformSelection(sourceProject, parts)
+    const sourcePartIds = selection.sourcePartIds
+    const candidateParts = transformPartsForSelection(candidateProject, selection)
     const candidateVoxels = candidateParts.flatMap((part) => scenePartVoxels(part))
     if (!candidateVoxels.length) return null
     const bounds = sceneBoundsForProject(sourceProject)
     let invalidReason: DiscreteTransformPreviewState['invalidReason']
     if (!sceneVoxelsWithinBounds(candidateVoxels, bounds)) invalidReason = 'boundary'
-    else if (sceneOccupancyRef.current?.collidesProjectVoxels(candidateVoxels, sourcePartIds) || shapeBatchCollidesWithScene(candidateVoxels, sceneEntityParts(sourceProject), sourcePartIds)) invalidReason = 'collision'
+    // This is an explicit, post-transform operation rather than a pointer
+    // move. The occupancy index is deliberately not authoritative here: it
+    // can still contain the previous lazy transform while React is publishing
+    // the first result. Using it in addition to the exact scene snapshot made
+    // a valid second mirror/rotation look like a collision with the object
+    // itself. The exact snapshot check is cheap enough at button/preview
+    // cadence and is the single source of truth for this operation.
+    else if (shapeBatchCollidesWithScene(candidateVoxels, sceneEntityParts(sourceProject), sourcePartIds)) invalidReason = 'collision'
     const previewAsset = makeAssetFromSceneParts('transform-preview', mode === 'mirror' ? '镜像预览' : '旋转预览', candidateParts, '#6c827d', '#d2a354', (voxel, part) => scenePartVoxelDisplayColor(candidateProject, part, voxel))
     const previewBounds = voxelBounds(previewAsset.voxels)!
     const origin = {
@@ -5657,7 +5706,18 @@ function App() {
       y: (Math.min(...candidateVoxels.map((voxel) => voxel.y)) - previewBounds.min.y) * VOXEL_WORLD_SIZE,
       z: (Math.min(...candidateVoxels.map((voxel) => voxel.z)) - previewBounds.min.z + previewAsset.depth / 2) * VOXEL_WORLD_SIZE,
     }
-    return { mode, axis, degrees, sourcePartIds: [...sourcePartIds], asset: previewAsset, origin, valid: !invalidReason, invalidReason }
+    return {
+      mode,
+      axis,
+      degrees,
+      sourcePartIds: [...sourcePartIds],
+      sourceInstanceIds: [...selection.instanceIds],
+      sourceCustomIds: [...selection.customIds],
+      asset: previewAsset,
+      origin,
+      valid: !invalidReason,
+      invalidReason,
+    }
   }
 
   const commitSceneDiscreteTransform = (parts: SceneEntityPart[], mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90) => {
@@ -5665,11 +5725,14 @@ function App() {
     const sourceProject = projectRef.current
     const nextProject = buildSceneDiscreteTransformProject(sourceProject, parts, mode, axis, degrees)
     if (!nextProject) return false
-    const selectedPartIds = transformSourcePartIds(sourceProject, parts)
-    const changedOwnerIds = new Set<string>()
-    sceneEntityParts(nextProject).filter((part) => selectedPartIds.has(part.id)).forEach((part) => changedOwnerIds.add(part.id))
+    const selection = resolveDiscreteTransformSelection(sourceProject, parts)
     recordHistoryBeforeChange(sourceProject, nextProject)
-    sceneOccupancyRef.current?.syncOwnerParts(sceneEntityParts(nextProject), changedOwnerIds)
+    // A discrete transform changes the absolute coordinates of every voxel in
+    // the selected object. Reconcile the complete index atomically instead of
+    // trying to maintain a partial owner list while component IDs and lazy
+    // offsets are changing. This prevents stale pre-transform occupancy from
+    // rejecting the next operation.
+    sceneOccupancyRef.current?.syncParts(sceneEntityParts(nextProject))
     skipSceneOccupancySyncRef.current = true
     const publishEpoch = ++historyEpochRef.current
     projectRef.current = nextProject
@@ -5702,19 +5765,65 @@ function App() {
 
   const confirmDiscreteTransform = () => {
     if (!transformPreview) return
-    const selectedIds = new Set(transformPreview.sourcePartIds)
-    const currentParts = sceneEntityParts(projectRef.current).filter((part) => selectedIds.has(part.id))
+    const selection: DiscreteTransformSelection = {
+      sourcePartIds: new Set(transformPreview.sourcePartIds),
+      instanceIds: new Set(transformPreview.sourceInstanceIds),
+      customIds: new Set(transformPreview.sourceCustomIds),
+    }
+    const currentParts = transformPartsForSelection(projectRef.current, selection)
     const currentPreview = createDiscreteTransformPreview(projectRef.current, currentParts, transformPreview.mode, transformPreview.axis, transformPreview.degrees)
     if (!currentPreview?.valid) {
       setTransformPreview(currentPreview)
       setNotice(currentPreview?.invalidReason === 'collision' ? '变换被拒绝：会与已有实体重叠' : '变换被拒绝：会超出场景边界')
       return
     }
+    const selectedIdBefore = selectedId
+    const selectedPartBefore = selectedScenePart
+    const checkedIdsBefore = checkedTreePartIds
+    const selectedAssemblyIdBefore = selectedIdBefore.startsWith('assembly:')
+      ? selectedIdBefore.slice('assembly:'.length)
+      : selectedScenePart?.assemblyId
     if (!commitSceneDiscreteTransform(currentParts, transformPreview.mode, transformPreview.axis, transformPreview.degrees)) {
       setNotice('变换失败：场景状态已变化，请重新预览')
       setTransformPreview(null)
       return
     }
+    // Transforming an asset can rebuild its component IDs. Rebind the tree
+    // selection to the semantic owner/part instead of retaining a stale
+    // generated ID, otherwise the next click looks like a no-op because the
+    // inspector has no selected parts.
+    const nextParts = transformPartsForSelection(projectRef.current, selection)
+    const nextPartFor = (before: SceneEntityPart) => nextParts.find((part) =>
+      part.kind === before.kind
+      && part.instanceId === before.instanceId
+      && part.partId === before.partId,
+    ) ?? nextParts.find((part) => part.instanceId && part.instanceId === before.instanceId)
+    const nextCheckedIds = checkedIdsBefore.map((id) => {
+      if (id.startsWith('assembly:')) return id
+      const before = sceneParts.find((part) => part.id === id)
+      return before ? nextPartFor(before)?.id : id
+    }).filter((id): id is string => Boolean(id))
+    const nextSelectedPart = selectedPartBefore ? nextPartFor(selectedPartBefore) : undefined
+    let clearCheckedSelection = false
+    if (selectedAssemblyIdBefore) {
+      setSelectedId(`assembly:${selectedAssemblyIdBefore}`)
+    } else if (selection.instanceIds.size === 1 && selection.customIds.size === 0) {
+      // The instance id is stable across component regeneration. Keeping a
+      // generated child id here is what made the next operation lose its
+      // effective selection after the first transform.
+      setSelectedId([...selection.instanceIds][0])
+      clearCheckedSelection = true
+    } else if (selection.customIds.size === 1 && selection.instanceIds.size === 0) {
+      const entityId = [...selection.customIds][0]
+      setSelectedId(`custom:${entityId}`)
+      clearCheckedSelection = true
+    } else if (nextSelectedPart) {
+      setSelectedId(nextSelectedPart.id)
+    } else if (nextParts[0]) {
+      setSelectedId(nextParts[0].id)
+    }
+    if (clearCheckedSelection) setCheckedTreePartIds([])
+    else if (checkedIdsBefore.length) setCheckedTreePartIds(nextCheckedIds.length ? nextCheckedIds : nextParts.map((part) => part.id))
     setTransformPreview(null)
     setNotice(transformPreview.mode === 'mirror' ? `已镜像选中实体 · ${transformPreview.axis.toUpperCase()} 轴` : `已旋转选中实体 · ${transformPreview.axis.toUpperCase()} 轴 ${transformPreview.degrees}°`)
   }
