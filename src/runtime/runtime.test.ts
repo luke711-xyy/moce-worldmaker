@@ -438,6 +438,23 @@ describe('greedy mesher', () => {
     // four perimeter edges should remain: 4 segments * 2 endpoints * 3 axes.
     expect(outline.length).toBe(4 * 2 * 3)
   })
+
+  it('normalizes reversed perimeter segments without zero-length spikes', () => {
+    const mesh = buildGreedyMesh([
+      { gx: 0, gy: 0, gz: 0, materialId: 1 },
+      { gx: 1, gy: 0, gz: 0, materialId: 1 },
+      { gx: 1, gy: 1, gz: 0, materialId: 1 },
+    ], { includeOutline: true })
+    const outline = mesh.outlinePositions
+    expect(outline).toBeDefined()
+    for (let index = 0; index < (outline?.length ?? 0); index += 6) {
+      const dx = Math.abs((outline?.[index + 3] ?? 0) - (outline?.[index] ?? 0))
+      const dy = Math.abs((outline?.[index + 4] ?? 0) - (outline?.[index + 1] ?? 0))
+      const dz = Math.abs((outline?.[index + 5] ?? 0) - (outline?.[index + 2] ?? 0))
+      expect(dx + dy + dz).toBeGreaterThan(0)
+      expect([dx, dy, dz].filter((value) => value > 0).length).toBe(1)
+    }
+  })
 })
 
 describe('voxel DDA', () => {

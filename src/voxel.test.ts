@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { VOXEL_WORLD_SIZE, Voxel, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceLocalVoxelToSceneVoxelFast, instanceRotationPivot, instanceVoxelPairs, makeAssemblyAssetFromSceneParts, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, sceneNameForAsset, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueSceneName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { MAX_SCENE_BOUND_VOXELS, MIN_SCENE_BOUND_VOXELS, VOXEL_WORLD_SIZE, Voxel, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceLocalVoxelToSceneVoxelFast, instanceRotationPivot, instanceVoxelPairs, makeAssemblyAssetFromSceneParts, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, sceneNameForAsset, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueSceneName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
@@ -18,6 +18,14 @@ describe('莫测造境体素核心数据', () => {
     expect(project.customVoxels).toEqual([])
     expect(project.materials.length).toBeGreaterThan(0)
     expect(sceneBoundsForProject(project)).toEqual({ x: 200, y: 200, z: 200 })
+  })
+
+  it('clamps every scene boundary axis to the supported 10–1000 voxel range', () => {
+    expect(sceneBoundsForProject({ sceneSizeCm: 0.1, sceneBounds: { x: 1, y: 9, z: 1001 } })).toEqual({
+      x: MIN_SCENE_BOUND_VOXELS,
+      y: MIN_SCENE_BOUND_VOXELS,
+      z: MAX_SCENE_BOUND_VOXELS,
+    })
   })
 
   it('keeps sample instances as snapshots and counts their editable parts', () => {
@@ -514,6 +522,44 @@ describe('莫测造境体素核心数据', () => {
     const before = center(resolveInstanceSceneVoxels(instance, asset))
     const after = center(resolveInstanceSceneVoxels({ ...instance, rotation: 90, rotationPivot: pivot }, asset))
     expect(after).toEqual(before)
+  })
+
+  it('rebuilds an asset scene part after each consecutive rotation', () => {
+    const baseProject = makeDefaultProject()
+    const sourceAsset = baseProject.assets[0]
+    const asset = {
+      ...sourceAsset,
+      id: 'sequential-transform-test',
+      width: 5,
+      depth: 4,
+      height: 3,
+      partVoxels: undefined,
+      assembly: undefined,
+      voxels: [
+        { x: 0, y: 0, z: 0, materialId: 'primary' },
+        { x: 3, y: 0, z: 0, materialId: 'primary' },
+        { x: 3, y: 1, z: 2, materialId: 'primary' },
+      ],
+    }
+    const instance = {
+      ...baseProject.instances[0],
+      assetId: asset.id,
+      rotationX: 0,
+      rotationY: 0,
+      rotationZ: 0,
+      rotationPivot: instanceRotationPivot(baseProject.instances[0], asset),
+    }
+    const project0 = { ...baseProject, assets: [...baseProject.assets, asset], instances: [instance] }
+    const project1 = { ...project0, instances: [{ ...instance, rotationX: 90 }] }
+    const project2 = { ...project1, instances: [{ ...project1.instances[0], rotationX: 180 }] }
+    const partKeys = (project: typeof project0) => scenePartVoxels(sceneEntityParts(project)[0])
+      .map(({ x, y, z }) => `${x},${y},${z}`)
+      .sort()
+
+    expect(partKeys(project1)).not.toEqual(partKeys(project0))
+    expect(partKeys(project2)).not.toEqual(partKeys(project1))
+    expect(sceneInstanceGeometrySignature(project1.instances[0])).not.toBe(sceneInstanceGeometrySignature(project0.instances[0]))
+    expect(sceneInstanceGeometrySignature(project2.instances[0])).not.toBe(sceneInstanceGeometrySignature(project1.instances[0]))
   })
 
   it('groups only face-connected voxels into one draggable component', () => {

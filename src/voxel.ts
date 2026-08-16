@@ -538,6 +538,8 @@ export const VOXEL_WORLD_SIZE = WORLD_UNITS_PER_MM
 export const DEFAULT_VOXEL_SIZE_MM = 1
 export const MIN_VOXEL_SIZE_MM = 0.1
 export const MAX_VOXEL_SIZE_MM = 100
+export const MIN_SCENE_BOUND_VOXELS = 10
+export const MAX_SCENE_BOUND_VOXELS = 1000
 
 export function normalizeVoxelSizeMm(value: unknown): number {
   const numeric = typeof value === 'number' && Number.isFinite(value) ? value : DEFAULT_VOXEL_SIZE_MM
@@ -546,11 +548,11 @@ export function normalizeVoxelSizeMm(value: unknown): number {
 }
 
 export function sceneBoundsForProject(project: Pick<ProjectState, 'sceneSizeCm' | 'sceneBounds'>): SceneBounds {
-  const fallback = Math.max(1, Math.round((project.sceneSizeCm ?? 20) / VOXEL_WORLD_SIZE))
+  const fallback = Math.max(MIN_SCENE_BOUND_VOXELS, Math.round((project.sceneSizeCm ?? 20) / VOXEL_WORLD_SIZE))
   return {
-    x: Math.max(1, Math.round(project.sceneBounds?.x ?? fallback)),
-    y: Math.max(1, Math.round(project.sceneBounds?.y ?? fallback)),
-    z: Math.max(1, Math.round(project.sceneBounds?.z ?? fallback)),
+    x: Math.max(MIN_SCENE_BOUND_VOXELS, Math.min(MAX_SCENE_BOUND_VOXELS, Math.round(project.sceneBounds?.x ?? fallback))),
+    y: Math.max(MIN_SCENE_BOUND_VOXELS, Math.min(MAX_SCENE_BOUND_VOXELS, Math.round(project.sceneBounds?.y ?? fallback))),
+    z: Math.max(MIN_SCENE_BOUND_VOXELS, Math.min(MAX_SCENE_BOUND_VOXELS, Math.round(project.sceneBounds?.z ?? fallback))),
   }
 }
 

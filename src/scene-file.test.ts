@@ -40,6 +40,12 @@ describe('莫测造境场景文件', () => {
     expect(() => parseSceneFile(file)).toThrow('未包含的资产')
   })
 
+  it('rejects scene files whose boundary is smaller than 10 voxels', () => {
+    const file = createSceneFile(makeDefaultProject())
+    file.scene.sceneBounds!.x = 9
+    expect(() => parseSceneFile(file)).toThrow('scene.sceneBounds.x必须是10到1000之间的整数')
+  })
+
   it('migrates the old full ProjectState export and gives stable signatures', () => {
     const project = makeDefaultProject()
     const legacy = JSON.stringify(project)

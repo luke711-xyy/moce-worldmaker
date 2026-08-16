@@ -1,4 +1,4 @@
-import { DEFAULT_VOXEL_SIZE_MM, MAX_VOXEL_SIZE_MM, MIN_VOXEL_SIZE_MM, ProjectState, SceneAssembly, SceneBounds, SceneInstance, Voxel, VoxelAsset, VoxelOverride, normalizeVoxelSizeMm, sceneBoundsForProject } from './voxel'
+import { DEFAULT_VOXEL_SIZE_MM, MAX_SCENE_BOUND_VOXELS, MAX_VOXEL_SIZE_MM, MIN_SCENE_BOUND_VOXELS, MIN_VOXEL_SIZE_MM, ProjectState, SceneAssembly, SceneBounds, SceneInstance, Voxel, VoxelAsset, VoxelOverride, normalizeVoxelSizeMm, sceneBoundsForProject } from './voxel'
 
 export const MOCE_SCENE_FORMAT = 'moce-scene' as const
 export const MOCE_SCENE_FORMAT_VERSION = 1 as const
@@ -89,7 +89,7 @@ function validateSceneState(value: unknown): asserts value is PortableSceneState
   const bounds = requirePlainObject(scene.sceneBounds, 'scene.sceneBounds') as unknown as SceneBounds
   for (const axis of ['x', 'y', 'z'] as const) {
     const size = requireNumber(bounds[axis], `scene.sceneBounds.${axis}`)
-    if (!Number.isInteger(size) || size < 1) throw new SceneFileError(`scene.sceneBounds.${axis}必须是正整数`)
+    if (!Number.isInteger(size) || size < MIN_SCENE_BOUND_VOXELS || size > MAX_SCENE_BOUND_VOXELS) throw new SceneFileError(`scene.sceneBounds.${axis}必须是${MIN_SCENE_BOUND_VOXELS}到${MAX_SCENE_BOUND_VOXELS}之间的整数`)
   }
   requireArray(scene.materials, 'scene.materials').forEach((material, index) => {
     const item = requirePlainObject(material, `scene.materials[${index}]`)
@@ -173,7 +173,9 @@ export function createSceneFile(project: ProjectState): MoceSceneFile {
     .filter((asset) => usedAssetIds.has(asset.id))
     .map((asset) => ({ ...structuredClone(asset), isTemplate: false }))
   scene.voxelSizeMm = normalizeVoxelSizeMm(scene.voxelSizeMm ?? DEFAULT_VOXEL_SIZE_MM)
-  scene.sceneBounds = scene.sceneBounds ?? sceneBoundsForProject(project)
+  // Normalize bounds at serialization time too, so recovered and uploaded
+  // scene files always stay inside the editor's supported 10–1000 voxel range.
+  scene.sceneBounds = sceneBoundsForProject(scene)
   scene.materials = scene.materials ?? []
   scene.customVoxels = scene.customVoxels ?? []
   scene.instances = scene.instances.map((instance) => ({ ...instance, y: instance.y ?? 0, overrides: instance.overrides ?? [], partOffsets: instance.partOffsets ?? {} }))

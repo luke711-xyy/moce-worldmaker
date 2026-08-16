@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronLeft, ChevronRight, Cloud, Database, Download, Eraser, Eye, FilePlus2, Grid3X3, Image as ImageIcon, Layers3, Lock, LogIn, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, Repeat2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, UserRound, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceRotationPivot, instanceVoxelPairs, isBundledDefaultSampleProject, isLegacyDefaultSampleProject, makeAssemblyAssetFromSceneParts, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblyNodeNameForAsset, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, sceneNameForAsset, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueSceneName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, MAX_SCENE_BOUND_VOXELS, MIN_SCENE_BOUND_VOXELS, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceRotationPivot, instanceVoxelPairs, isBundledDefaultSampleProject, isLegacyDefaultSampleProject, makeAssemblyAssetFromSceneParts, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblyNodeNameForAsset, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, sceneNameForAsset, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueSceneName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, validateEntityFile } from './persistence'
 import { deleteLocalAsset, deleteLocalScene, duplicateLocalScene, initializeLocalLibrary, loadLocalLibrary, loadLocalScene, saveLocalAsset, saveLocalAssetCategories, saveLocalScene } from './local-library'
@@ -1550,9 +1550,9 @@ function App() {
 
   const applySceneBounds = () => {
     const next: SceneBounds = {
-      x: Math.max(1, Math.min(1000, Math.round(boundaryDraft.x))),
-      y: Math.max(1, Math.min(1000, Math.round(boundaryDraft.y))),
-      z: Math.max(1, Math.min(1000, Math.round(boundaryDraft.z))),
+      x: Math.max(MIN_SCENE_BOUND_VOXELS, Math.min(MAX_SCENE_BOUND_VOXELS, Math.round(boundaryDraft.x))),
+      y: Math.max(MIN_SCENE_BOUND_VOXELS, Math.min(MAX_SCENE_BOUND_VOXELS, Math.round(boundaryDraft.y))),
+      z: Math.max(MIN_SCENE_BOUND_VOXELS, Math.min(MAX_SCENE_BOUND_VOXELS, Math.round(boundaryDraft.z))),
     }
     if (!sceneFitsBounds(next)) {
       setNotice('场地尺寸不能缩小：已有实体超出新的场景边界，请先移动实体后再应用。')
@@ -1663,6 +1663,13 @@ function App() {
   // is especially visible with large models.
   const selectedEntityPartsKey = selectedEntityParts.map((part) => part.id).join('|')
   const selectedEntityPartIds = useMemo(() => selectedEntityPartsKey ? selectedEntityPartsKey.split('|') : [], [selectedEntityPartsKey])
+  const selectedEntityTransformSignature = useMemo(() => {
+    const instancesById = new Map(project.instances.map((instance) => [instance.id, instance]))
+    return selectedEntityParts.map((part) => {
+      const instance = part.instanceId ? instancesById.get(part.instanceId) : undefined
+      return `${part.id}:${instance ? sceneInstanceGeometrySignature(instance) : ''}`
+    }).join('|')
+  }, [project.instances, selectedEntityParts])
   useEffect(() => {
     // A color preview belongs to the selection it was started on. Changing
     // selection must restore the source materials before showing the next
@@ -5564,8 +5571,20 @@ function App() {
 
   const sceneAxisToVoxelAxis = (axis: SceneTransformAxis): 'x' | 'y' | 'z' => axis === 'x' ? 'x' : axis === 'y' ? 'z' : 'y'
 
+  const transformSourcePartIds = (sourceProject: ProjectState, parts: SceneEntityPart[]): Set<string> => {
+    const requestedPartIds = new Set(parts.map((part) => part.id))
+    const requestedInstanceIds = new Set(parts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
+    return new Set(sceneEntityParts(sourceProject)
+      .filter((part) => requestedPartIds.has(part.id) || Boolean(part.instanceId && requestedInstanceIds.has(part.instanceId)))
+      .map((part) => part.id))
+  }
+
   const buildSceneDiscreteTransformProject = (sourceProject: ProjectState, parts: SceneEntityPart[], mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90): ProjectState | null => {
-    const selectedPartIds = new Set(parts.map((part) => part.id))
+    // A scene instance is the editable unit even when the tree selection only
+    // contains one of its child parts. Transforming the instance while
+    // leaving sibling parts out of the source set desynchronizes the cache and
+    // occupancy index, which makes the next transform appear to do nothing.
+    const selectedPartIds = transformSourcePartIds(sourceProject, parts)
     const currentParts = sceneEntityParts(sourceProject).filter((part) => selectedPartIds.has(part.id))
     const selectedCustomIds = new Set(currentParts.filter((part) => part.kind === 'custom').map((part) => part.partId))
     const selectedInstanceIds = new Set(currentParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
@@ -5598,11 +5617,8 @@ function App() {
         }
         const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationZ' : 'rotationY'
         const asset = assetMap.get(instance.assetId)
-        return {
-          ...instance,
-          rotationPivot: asset ? instanceRotationPivot(instance, asset) : instance.rotationPivot,
-          [key]: ((instance[key] ?? 0) + degrees) % 360,
-        }
+        const rotated = { ...instance, [key]: ((instance[key] ?? 0) + degrees) % 360 }
+        return asset ? { ...rotated, rotationPivot: instanceRotationPivot(rotated, asset) } : rotated
       })
       : sourceProject.instances
     return { ...sourceProject, customVoxels: nextCustomVoxels, instances: nextInstances }
@@ -5611,7 +5627,7 @@ function App() {
   const createDiscreteTransformPreview = (sourceProject: ProjectState, parts: SceneEntityPart[], mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90): DiscreteTransformPreviewState | null => {
     const candidateProject = buildSceneDiscreteTransformProject(sourceProject, parts, mode, axis, degrees)
     if (!candidateProject) return null
-    const sourcePartIds = new Set(parts.map((part) => part.id))
+    const sourcePartIds = transformSourcePartIds(sourceProject, parts)
     const candidateParts = sceneEntityParts(candidateProject).filter((part) => sourcePartIds.has(part.id))
     const candidateVoxels = candidateParts.flatMap((part) => scenePartVoxels(part))
     if (!candidateVoxels.length) return null
@@ -5634,7 +5650,7 @@ function App() {
     const sourceProject = projectRef.current
     const nextProject = buildSceneDiscreteTransformProject(sourceProject, parts, mode, axis, degrees)
     if (!nextProject) return false
-    const selectedPartIds = new Set(parts.map((part) => part.id))
+    const selectedPartIds = transformSourcePartIds(sourceProject, parts)
     const changedOwnerIds = new Set<string>()
     sceneEntityParts(nextProject).filter((part) => selectedPartIds.has(part.id)).forEach((part) => changedOwnerIds.add(part.id))
     recordHistoryBeforeChange(sourceProject, nextProject)
@@ -5900,9 +5916,9 @@ function App() {
                 <div className="boundary-popover-title">场景边界</div>
                 <div className="boundary-popover-subtitle">按体素设置地面尺寸与 Z 轴限高</div>
                 <div className="boundary-fields">
-                  {([['x', 'X 宽度'], ['y', 'Y 深度'], ['z', 'Z 高度']] as const).map(([axis, label]) => <label key={axis} className="boundary-field"><span>{label}</span><NumericInput min={1} max={1000} integer value={boundaryDraft[axis]} onCommit={(value) => setBoundaryDraft((current) => ({ ...current, [axis]: value }))} /><em>体素</em></label>)}
+                  {([['x', 'X 宽度'], ['y', 'Y 深度'], ['z', 'Z 高度']] as const).map(([axis, label]) => <label key={axis} className="boundary-field"><span>{label}</span><NumericInput min={MIN_SCENE_BOUND_VOXELS} max={MAX_SCENE_BOUND_VOXELS} integer value={boundaryDraft[axis]} onCommit={(value) => setBoundaryDraft((current) => ({ ...current, [axis]: value }))} /><em>体素</em></label>)}
                 </div>
-                <div className="boundary-limit">最大尺寸：1000 × 1000 × 1000 体素</div>
+                <div className="boundary-limit">最小尺寸：{MIN_SCENE_BOUND_VOXELS} × {MIN_SCENE_BOUND_VOXELS} × {MIN_SCENE_BOUND_VOXELS} 体素 · 最大尺寸：{MAX_SCENE_BOUND_VOXELS} × {MAX_SCENE_BOUND_VOXELS} × {MAX_SCENE_BOUND_VOXELS} 体素</div>
                 <div className="boundary-actions"><button onClick={() => { setBoundaryDraft(currentSceneBounds); setBoundaryOpen(false) }}>取消</button><button className="primary" onClick={applySceneBounds}>应用</button></div>
               </div>}
             </div>
@@ -5929,7 +5945,7 @@ function App() {
             <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { if (cameraControlApi) cameraControlApi.zoomOut(); else setZoomLevel((value) => stepZoomLevel(value, -1)); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${zoomTrackProgress(zoomLevel)}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { if (cameraControlApi) cameraControlApi.zoomIn(); else setZoomLevel((value) => stepZoomLevel(value, 1)); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{Math.round(zoomLevel)}%</span></div>
           </div>
         </section>
-        <MemoizedInspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} transformPreview={transformPreview} geometryPreview={geometryPreview} shellThicknessOptions={geometryShellThicknessOptions} scaleOptions={geometryScaleOptions} onChangeColor={changeSelectedColor} onPreviewHsl={previewSelectedHsl} onCommitHsl={commitSelectedHsl} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onConfirmTransform={confirmDiscreteTransform} onCancelTransform={() => setTransformPreview(null)} onExport={exportSelectedPart} onExportGlb={exportSelectedPartGlb} onExportVox={exportSelectedPartVox} onExportEntityFile={exportSelectedEntityFile} onOpenSlicer={() => setSliceDialogOpen(true)} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => { setCopyPreview(null); setTransformPreview(null) }} onStartShell={startShellPreview} onStartScale={startScalePreview} onChangeShellThickness={changeGeometryShellThickness} onChangeScale={changeGeometryScale} onConfirmGeometry={confirmGeometryPreview} onCancelGeometry={cancelGeometryPreview} onDelete={deleteSelected} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
+        <MemoizedInspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} selectedTransformSignature={selectedEntityTransformSignature} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} transformPreview={transformPreview} geometryPreview={geometryPreview} shellThicknessOptions={geometryShellThicknessOptions} scaleOptions={geometryScaleOptions} onChangeColor={changeSelectedColor} onPreviewHsl={previewSelectedHsl} onCommitHsl={commitSelectedHsl} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onConfirmTransform={confirmDiscreteTransform} onCancelTransform={() => setTransformPreview(null)} onExport={exportSelectedPart} onExportGlb={exportSelectedPartGlb} onExportVox={exportSelectedPartVox} onExportEntityFile={exportSelectedEntityFile} onOpenSlicer={() => setSliceDialogOpen(true)} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => { setCopyPreview(null); setTransformPreview(null) }} onStartShell={startShellPreview} onStartScale={startScalePreview} onChangeShellThickness={changeGeometryShellThickness} onChangeScale={changeGeometryScale} onConfirmGeometry={confirmGeometryPreview} onCancelGeometry={cancelGeometryPreview} onDelete={deleteSelected} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
       </main>
       {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} selectedSceneLoading={selectedLibrarySceneLoading} selectionRevision={selectedLibrarySceneRevision} error={libraryError} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} cloudAssets={cloudAssets} cloudScenes={cloudScenes} cloudUsage={cloudUsage} cloudError={cloudError} cloudTransfers={cloudTransfers} cloudTransferErrors={cloudTransferErrors} onBackupCurrentScene={() => backupCurrentSceneToCloud()} onDownloadCloudScene={downloadCloudSceneToLocal} onDeleteCloudScene={removeCloudScene} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null); setSelectedLibrarySceneLoading(false) }} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} onBackupScene={backupStoredSceneToCloud} />}
       {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
@@ -6744,7 +6760,7 @@ function ToolButton({ icon, label, description, active, onClick }: { icon: React
   return <button className={`tool-button ${active ? 'active' : ''}`} data-tooltip={description} aria-label={label} onClick={onClick} title={description}>{icon}</button>
 }
 
-function Inspector({ entityName, source, selectedAsset, selectedPart, selectedParts, editEntityId, canEnterEditMode, editTargetId, selectedColor, previewColor, previewVoxelColors, previewMaterialColors, copyPreview, transformPreview, geometryPreview, shellThicknessOptions, scaleOptions, onChangeColor, onPreviewHsl, onCommitHsl, onMirror, onRotate, onConfirmTransform, onCancelTransform, onExport, onExportGlb, onExportVox, onExportEntityFile, onOpenSlicer, onDuplicate, onChangeCopyDirection, onChangeCopyGap, onConfirmDuplicate, onCancelDuplicate, onStartShell, onStartScale, onChangeShellThickness, onChangeScale, onConfirmGeometry, onCancelGeometry, onDelete, onSaveAsAsset, onEnterEditMode }: { entityName: string; source: string; selectedAsset?: VoxelAsset; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; editEntityId: string | null; canEnterEditMode: boolean; editTargetId: string; selectedColor: string; previewColor?: string; previewVoxelColors: Record<string, string>; previewMaterialColors: Record<string, string>; copyPreview: CopyPreviewState | null; transformPreview: DiscreteTransformPreviewState | null; geometryPreview: GeometryPreviewState | null; shellThicknessOptions: number[]; scaleOptions: { up: number[]; down: number[] }; onChangeColor: (color: string) => void; onPreviewHsl: (hueDelta: number, saturationTarget: number) => void; onCommitHsl: (hueDelta: number, saturationTarget: number) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onConfirmTransform: () => void; onCancelTransform: () => void; onExport: () => void; onExportGlb: () => void | Promise<void>; onExportVox: () => void; onExportEntityFile: () => void; onOpenSlicer: () => void; onDuplicate: (count: number) => void; onChangeCopyDirection: (axis: CopyDirectionAxis, sign: 1 | -1) => void; onChangeCopyGap: (gap: number) => void; onConfirmDuplicate: () => void; onCancelDuplicate: () => void; onStartShell: () => void; onStartScale: (mode: GeometryScaleMode) => void; onChangeShellThickness: (value: number) => void; onChangeScale: (mode: GeometryScaleMode, value: number) => void; onConfirmGeometry: () => void; onCancelGeometry: () => void; onDelete: () => void; onSaveAsAsset: () => void; onEnterEditMode: (entityId: string) => void }) {
+function Inspector({ entityName, source, selectedAsset, selectedPart, selectedParts, selectedTransformSignature, editEntityId, canEnterEditMode, editTargetId, selectedColor, previewColor, previewVoxelColors, previewMaterialColors, copyPreview, transformPreview, geometryPreview, shellThicknessOptions, scaleOptions, onChangeColor, onPreviewHsl, onCommitHsl, onMirror, onRotate, onConfirmTransform, onCancelTransform, onExport, onExportGlb, onExportVox, onExportEntityFile, onOpenSlicer, onDuplicate, onChangeCopyDirection, onChangeCopyGap, onConfirmDuplicate, onCancelDuplicate, onStartShell, onStartScale, onChangeShellThickness, onChangeScale, onConfirmGeometry, onCancelGeometry, onDelete, onSaveAsAsset, onEnterEditMode }: { entityName: string; source: string; selectedAsset?: VoxelAsset; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; selectedTransformSignature: string; editEntityId: string | null; canEnterEditMode: boolean; editTargetId: string; selectedColor: string; previewColor?: string; previewVoxelColors: Record<string, string>; previewMaterialColors: Record<string, string>; copyPreview: CopyPreviewState | null; transformPreview: DiscreteTransformPreviewState | null; geometryPreview: GeometryPreviewState | null; shellThicknessOptions: number[]; scaleOptions: { up: number[]; down: number[] }; onChangeColor: (color: string) => void; onPreviewHsl: (hueDelta: number, saturationTarget: number) => void; onCommitHsl: (hueDelta: number, saturationTarget: number) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onConfirmTransform: () => void; onCancelTransform: () => void; onExport: () => void; onExportGlb: () => void | Promise<void>; onExportVox: () => void; onExportEntityFile: () => void; onOpenSlicer: () => void; onDuplicate: (count: number) => void; onChangeCopyDirection: (axis: CopyDirectionAxis, sign: 1 | -1) => void; onChangeCopyGap: (gap: number) => void; onConfirmDuplicate: () => void; onCancelDuplicate: () => void; onStartShell: () => void; onStartScale: (mode: GeometryScaleMode) => void; onChangeShellThickness: (value: number) => void; onChangeScale: (mode: GeometryScaleMode, value: number) => void; onConfirmGeometry: () => void; onCancelGeometry: () => void; onDelete: () => void; onSaveAsAsset: () => void; onEnterEditMode: (entityId: string) => void }) {
   const [copyCount, setCopyCount] = useState(1)
   const [mirrorAxis, setMirrorAxis] = useState<'x' | 'y' | 'z'>('x')
   const [rotateAxis, setRotateAxis] = useState<'x' | 'y' | 'z'>('z')
@@ -6757,7 +6773,7 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
     setMirrorAxis('x')
     setRotateAxis('z')
     setRotateDegrees(90)
-  }, [selectedPartsKey])
+  }, [selectedPartsKey, selectedTransformSignature])
   const previewKey = previewPartsSignature(selectedParts)
   const geometryResultVoxels = geometryPreview?.result?.voxels
   const previewVoxels = useMemo(
@@ -6857,6 +6873,7 @@ function inspectorPropsEqual(previous: InspectorProps, next: InspectorProps): bo
     && previous.source === next.source
     && inspectorAssetSignature(previous.selectedAsset) === inspectorAssetSignature(next.selectedAsset)
     && inspectorPartsSignature(previous.selectedParts) === inspectorPartsSignature(next.selectedParts)
+    && previous.selectedTransformSignature === next.selectedTransformSignature
     && previous.editEntityId === next.editEntityId
     && previous.canEnterEditMode === next.canEnterEditMode
     && previous.editTargetId === next.editTargetId
@@ -7685,7 +7702,12 @@ function createExposedVoxelEdgeGeometry(
     end: [number, number, number]
     normal: [number, number, number]
   }
-  const edges = new Map<string, Edge>()
+  type EdgeState = {
+    start: [number, number, number]
+    end: [number, number, number]
+    normals: Map<string, { count: number; edge: Edge }>
+  }
+  const edges = new Map<string, EdgeState>()
   const half = cellSize / 2
   const neighborOffsets: Array<[number, number, number]> = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
   const faceCorners = (normal: [number, number, number]): Array<[number, number, number]> => {
@@ -7702,7 +7724,6 @@ function createExposedVoxelEdgeGeometry(
     corners: faceCorners(renderedFaceNormals[index]),
   }))
   const pointKey = (point: [number, number, number]) => point.map((value) => Math.round(value * 1_000_000)).join(',')
-  const normalEquals = (a: [number, number, number], b: [number, number, number]) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2]
   const edgeKey = (start: [number, number, number], end: [number, number, number]) => {
     const startKey = pointKey(start)
     const endKey = pointKey(end)
@@ -7721,20 +7742,32 @@ function createExposedVoxelEdgeGeometry(
         const key = edgeKey(start, end)
         const previous = edges.get(key)
         if (!previous) {
-          edges.set(key, { start, end, normal: face.normal })
-        } else if (normalEquals(previous.normal, face.normal)) {
-          // Shared edge between coplanar exposed faces: it is only a voxel
-          // partition, not an external feature edge.
-          edges.delete(key)
+          edges.set(key, {
+            start,
+            end,
+            normals: new Map([[face.normal.join(','), {
+              count: 1,
+              edge: { start, end, normal: face.normal },
+            }]]),
+          })
+        } else {
+          const normalId = face.normal.join(',')
+          const sameNormal = previous.normals.get(normalId)
+          if (sameNormal) {
+            sameNormal.count += 1
+          } else {
+            previous.normals.set(normalId, { count: 1, edge: { start, end, normal: face.normal } })
+          }
         }
-        // A different normal means a real crease/silhouette. Keep one line;
-        // duplicating it would create a thicker, unstable highlight.
       }
     })
   })
 
   const positions: number[] = []
-  edges.forEach((edge) => positions.push(...edge.start, ...edge.end))
+  edges.forEach((state) => {
+    const edge = [...state.normals.values()].find((entry) => entry.count === 1)?.edge
+    if (edge) positions.push(...edge.start, ...edge.end)
+  })
   if (positions.length) geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
   return geometry
 }

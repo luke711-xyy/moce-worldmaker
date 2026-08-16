@@ -26,7 +26,11 @@ const key = (x: number, y: number, z: number) => `${x},${y},${z}`
 export function buildOutlinePositions(positions: Float32Array, normals: Int8Array, quadCount: number): Float32Array {
   type Point = [number, number, number]
   type Edge = { start: Point; end: Point; normal: Point }
-  type UnitEdgeState = { start: Point; end: Point; normals: Map<string, Edge> }
+  type UnitEdgeState = {
+    start: Point
+    end: Point
+    normals: Map<string, { count: number; edge: Edge }>
+  }
 
   // Each greedy quad is emitted as four consecutive vertices. A simple
   // whole-segment map is not sufficient here: greedy meshing can produce a
@@ -63,16 +67,38 @@ export function buildOutlinePositions(positions: Float32Array, normals: Int8Arra
       const unitEnd: Point = [...start]
       unitStart[axis] += direction * offset
       unitEnd[axis] += direction * (offset + 1)
-      const key = unitSegmentKey(unitStart, unitEnd)
+      // Greedy quads can wind their edges in opposite directions. Normalize
+      // every unit segment before storing it; otherwise run joining can
+      // backtrack and leave short spikes or drop a perimeter segment.
+      const normalizedStart: Point = [...unitStart]
+      const normalizedEnd: Point = [...unitEnd]
+      if (normalizedStart[axis] > normalizedEnd[axis]) {
+        const swap = normalizedStart[axis]
+        normalizedStart[axis] = normalizedEnd[axis]
+        normalizedEnd[axis] = swap
+      }
+      const key = unitSegmentKey(normalizedStart, normalizedEnd)
       const previous = unitEdges.get(key)
       if (!previous) {
-        unitEdges.set(key, { start: unitStart, end: unitEnd, normals: new Map([[normalId, { start: unitStart, end: unitEnd, normal: faceNormal }]]) })
+        unitEdges.set(key, {
+          start: normalizedStart,
+          end: normalizedEnd,
+          normals: new Map([[normalId, {
+            count: 1,
+            edge: { start: normalizedStart, end: normalizedEnd, normal: faceNormal },
+          }]]),
+        })
         continue
       }
-      // Per-normal parity cancels a coplanar edge even when a neighboring
-      // greedy quad only covers part of the original long segment.
-      if (previous.normals.has(normalId)) previous.normals.delete(normalId)
-      else previous.normals.set(normalId, { start: unitStart, end: unitEnd, normal: faceNormal })
+      const sameNormal = previous.normals.get(normalId)
+      if (sameNormal) {
+        sameNormal.count += 1
+      } else {
+        previous.normals.set(normalId, {
+          count: 1,
+          edge: { start: normalizedStart, end: normalizedEnd, normal: faceNormal },
+        })
+      }
     }
   }
 
@@ -91,7 +117,10 @@ export function buildOutlinePositions(positions: Float32Array, normals: Int8Arra
   // line and one deterministic surviving normal, then join adjacent runs.
   const runs = new Map<string, Edge[]>()
   unitEdges.forEach((state) => {
-    const surviving = state.normals.values().next().value as Edge | undefined
+    // A coplanar partition edge is emitted twice with the same face normal;
+    // a perimeter edge is emitted once. Different normals on one geometric
+    // edge represent a real crease/silhouette and keep one line.
+    const surviving = [...state.normals.values()].find((entry) => entry.count === 1)?.edge
     if (!surviving) return
     const axis = [0, 1, 2].find((index) => state.start[index] !== state.end[index]) ?? 0
     const fixed = [0, 1, 2].filter((index) => index !== axis).map((index) => state.start[index]).join(',')
