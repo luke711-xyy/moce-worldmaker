@@ -449,6 +449,30 @@ describe('莫测造境体素核心数据', () => {
     ])
   })
 
+  it('keeps every voxel and metadata through repeated quarter-turn rotations', () => {
+    const source: Voxel[] = [
+      { x: -2, y: 1, z: 4, materialId: 'stone', entityId: 'part-a', paintMaterialId: 'jade' },
+      { x: 0, y: 1, z: 4, materialId: 'gold', entityId: 'part-a' },
+      { x: -1, y: 3, z: 5, materialId: 'teal', entityId: 'part-a' },
+      { x: 2, y: 2, z: 6, materialId: 'white', entityId: 'part-a' },
+    ]
+    const signature = (voxels: Voxel[]) => voxels
+      .map(({ x, y, z, materialId, entityId, paintMaterialId }) => `${x},${y},${z},${materialId},${entityId ?? ''},${paintMaterialId ?? ''}`)
+      .sort()
+
+    for (const axis of ['x', 'y', 'z'] as const) {
+      const rotated = rotateVoxels(source, axis, 90)
+      expect(rotated).toHaveLength(source.length)
+      expect(new Set(rotated.map(({ x, y, z }) => `${x},${y},${z}`)).size).toBe(source.length)
+      expect(rotated.map((voxel) => voxel.materialId).sort()).toEqual(source.map((voxel) => voxel.materialId).sort())
+      expect(rotated.find((voxel) => voxel.paintMaterialId)?.paintMaterialId).toBe('jade')
+
+      let result = source
+      for (let turn = 0; turn < 4; turn += 1) result = rotateVoxels(result, axis, 90)
+      expect(signature(result)).toEqual(signature(source))
+    }
+  })
+
   it('maps scene grid cells to centered asset voxels, including rotated instances', () => {
     const project = makeDefaultProject()
     const asset = project.assets.find((item) => item.id === 'house-chinese')!

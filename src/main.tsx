@@ -5591,20 +5591,35 @@ function App() {
     if (!selectedCustomIds.size && !selectedInstanceIds.size) return null
     const assetMap = new Map(sourceProject.assets.map((asset) => [asset.id, asset]))
     const voxelAxis = sceneAxisToVoxelAxis(axis)
-    const transformedByKey = new Map<string, Voxel>()
-    for (const entityId of selectedCustomIds) {
-      const part = currentParts.find((candidate) => candidate.kind === 'custom' && candidate.partId === entityId)
-      const source = part ? scenePartVoxels(part) : []
-      if (!source.length) continue
-      const transformed = mode === 'mirror' ? mirrorVoxels(source, voxelAxis) : rotateVoxels(source, voxelAxis, degrees)
-      source.forEach((voxel, index) => {
-        const storedSource = sceneToStoredCustomVoxel(sourceProject, voxel, entityId)
-        const storedResult = sceneToStoredCustomVoxel(sourceProject, { ...transformed[index], entityId }, entityId)
-        transformedByKey.set(`${entityId}:${sceneVoxelKey(storedSource)}`, storedResult)
+    // Keep a direct identity mapping from each canonical voxel to its result.
+    // Reconstructing the source key from scene coordinates is fragile for
+    // moved entities: a lazy customEntityOffset, legacy entity id, or a
+    // fractional scene translation can make a valid source voxel miss the
+    // lookup. A missed lookup leaves that voxel at its old position, which is
+    // exactly the "half stayed behind" rotation failure.
+    //
+    // Transform all selected custom parts as one voxel set. This preserves
+    // the relative placement of assembly members and multi-selection parts;
+    // each result is still written back to its original canonical owner.
+    const selectedCustomParts = currentParts.filter((part): part is SceneEntityPart & { kind: 'custom' } => part.kind === 'custom' && selectedCustomIds.has(part.partId))
+    const sourceEntries = selectedCustomParts.flatMap((part) => scenePartVoxels(part).map((voxel, index) => ({
+      part,
+      voxel,
+      canonical: part.voxels[index],
+    })))
+    const transformedBySource = new Map<Voxel, Voxel>()
+    if (sourceEntries.length) {
+      const transformed = mode === 'mirror'
+        ? mirrorVoxels(sourceEntries.map(({ voxel }) => voxel), voxelAxis)
+        : rotateVoxels(sourceEntries.map(({ voxel }) => voxel), voxelAxis, degrees)
+      sourceEntries.forEach(({ part, canonical }, index) => {
+        if (!canonical) return
+        const storedResult = sceneToStoredCustomVoxel(sourceProject, transformed[index], part.partId)
+        transformedBySource.set(canonical, storedResult)
       })
     }
-    const nextCustomVoxels = transformedByKey.size
-      ? sourceProject.customVoxels.map((voxel) => transformedByKey.get(`${voxelEntityId(voxel)}:${sceneVoxelKey(voxel)}`) ?? voxel)
+    const nextCustomVoxels = transformedBySource.size
+      ? sourceProject.customVoxels.map((voxel) => transformedBySource.get(voxel) ?? voxel)
       : sourceProject.customVoxels
     const nextInstances = selectedInstanceIds.size
       ? sourceProject.instances.map((instance) => {
