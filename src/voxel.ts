@@ -808,7 +808,22 @@ export function instanceRotationPivot(instance: SceneInstance, asset: VoxelAsset
     })
   })
   if (!Number.isFinite(minX)) return { x: 0, y: asset.height * VOXEL_WORLD_SIZE / 2, z: 0 }
-  return { x: (minX + maxX) / 2, y: (minY + maxY) / 2, z: (minZ + maxZ) / 2 }
+  const center = { x: (minX + maxX) / 2, y: (minY + maxY) / 2, z: (minZ + maxZ) / 2 }
+  // A geometric center can sit on different lattice parities on the three
+  // axes (for example a 5-high x 4-deep model). Rotating that point by 90°
+  // then puts voxel centers on half-cell boundaries and Math.round collapses
+  // distinct cells. Pick the nearest common voxel-lattice parity for all
+  // pivot components: either integer-cell or half-cell coordinates. The
+  // adjustment is at most half a voxel, but every supported quarter turn now
+  // maps cell centers bijectively to cell centers.
+  const pivotCandidates = [0, 0.5].map((parity) => ({
+    x: (Math.round(center.x / VOXEL_WORLD_SIZE - parity) + parity) * VOXEL_WORLD_SIZE,
+    y: (Math.round(center.y / VOXEL_WORLD_SIZE - parity) + parity) * VOXEL_WORLD_SIZE,
+    z: (Math.round(center.z / VOXEL_WORLD_SIZE - parity) + parity) * VOXEL_WORLD_SIZE,
+  }))
+  const score = (candidate: { x: number; y: number; z: number }) =>
+    (candidate.x - center.x) ** 2 + (candidate.y - center.y) ** 2 + (candidate.z - center.z) ** 2
+  return score(pivotCandidates[0]) <= score(pivotCandidates[1]) ? pivotCandidates[0] : pivotCandidates[1]
 }
 
 export type VoxelTransformAxis = 'x' | 'y' | 'z'
@@ -878,13 +893,28 @@ export function instanceVoxelPairs(instance: SceneInstance, asset: VoxelAsset): 
   })
 }
 
+function sinCosForAngle(angle: number): { sin: number; cos: number } {
+  const quarterTurns = Math.round(angle / (Math.PI / 2))
+  const snapped = quarterTurns * Math.PI / 2
+  // All editor rotations are quarter turns. Avoid Math.sin/cos residuals such
+  // as cos(270°) = -1.8e-16: after converting back to voxel indices those
+  // residuals can round two distinct cells onto one coordinate.
+  if (Math.abs(angle - snapped) < 1e-10) {
+    const phase = ((quarterTurns % 4) + 4) % 4
+    return [
+      { sin: 0, cos: 1 },
+      { sin: 1, cos: 0 },
+      { sin: 0, cos: -1 },
+      { sin: -1, cos: 0 },
+    ][phase]
+  }
+  return { sin: Math.sin(angle), cos: Math.cos(angle) }
+}
+
 function rotateSceneVector(vector: { x: number; y: number; z: number }, rotationX: number, rotationY: number, rotationZ: number): { x: number; y: number; z: number } {
-  const cx = Math.cos(rotationX)
-  const sx = Math.sin(rotationX)
-  const cy = Math.cos(rotationY)
-  const sy = Math.sin(rotationY)
-  const cz = Math.cos(rotationZ)
-  const sz = Math.sin(rotationZ)
+  const { cos: cx, sin: sx } = sinCosForAngle(rotationX)
+  const { cos: cy, sin: sy } = sinCosForAngle(rotationY)
+  const { cos: cz, sin: sz } = sinCosForAngle(rotationZ)
   const afterX = { x: vector.x, y: cx * vector.y - sx * vector.z, z: sx * vector.y + cx * vector.z }
   const afterY = { x: cy * afterX.x + sy * afterX.z, y: afterX.y, z: -sy * afterX.x + cy * afterX.z }
   return { x: cz * afterY.x - sz * afterY.y, y: sz * afterY.x + cz * afterY.y, z: afterY.z }

@@ -22,6 +22,21 @@ export type CachedAssetTransform = {
 
 const voxelKey = (x: number, y: number, z: number) => `${x},${y},${z}`
 
+function sinCosForAngle(angle: number): { sin: number; cos: number } {
+  const quarterTurns = Math.round(angle / (Math.PI / 2))
+  const snapped = quarterTurns * Math.PI / 2
+  if (Math.abs(angle - snapped) < 1e-10) {
+    const phase = ((quarterTurns % 4) + 4) % 4
+    return [
+      { sin: 0, cos: 1 },
+      { sin: 1, cos: 0 },
+      { sin: 0, cos: -1 },
+      { sin: -1, cos: 0 },
+    ][phase]
+  }
+  return { sin: Math.sin(angle), cos: Math.cos(angle) }
+}
+
 function transformKey(instance: SceneInstance): string {
   return JSON.stringify({
     overrides: instance.overrides ?? [],
@@ -139,18 +154,20 @@ export class AssetTransformCache {
     }
     // The forward transform applies X, then Y, then Z rotation. Undo it in
     // reverse order before converting the local physical position to indices.
-    const cz = Math.cos(-rotationZ)
-    const sz = Math.sin(-rotationZ)
+    const { cos: cz, sin: sz } = sinCosForAngle(-rotationZ)
     const afterZ = { x: cz * scene.x - sz * scene.y, y: sz * scene.x + cz * scene.y, z: scene.z }
-    const cy = Math.cos(-rotationY)
-    const sy = Math.sin(-rotationY)
+    const { cos: cy, sin: sy } = sinCosForAngle(-rotationY)
     const afterY = { x: cy * afterZ.x + sy * afterZ.z, y: afterZ.y, z: -sy * afterZ.x + cy * afterZ.z }
-    const cx = Math.cos(-rotationX)
-    const sx = Math.sin(-rotationX)
+    const { cos: cx, sin: sx } = sinCosForAngle(-rotationX)
+    const localScene = {
+      x: afterY.x,
+      y: cx * afterY.y - sx * afterY.z,
+      z: sx * afterY.y + cx * afterY.z,
+    }
     const local = {
-      x: afterY.x + pivot.x,
-      y: afterY.y + pivot.z,
-      z: afterY.z + pivot.y,
+      x: localScene.x + pivot.x,
+      y: localScene.y + pivot.z,
+      z: localScene.z + pivot.y,
     }
     const rawXIndex = (local.x - (mirror.x ? -offset.x : offset.x)) / VOXEL_WORLD_SIZE - 0.5 + asset.width / 2
     const rawZIndex = (local.y - (mirror.y ? -offset.z : offset.z)) / VOXEL_WORLD_SIZE - 0.5 + asset.depth / 2

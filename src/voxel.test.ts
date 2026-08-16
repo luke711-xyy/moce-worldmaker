@@ -586,6 +586,90 @@ describe('莫测造境体素核心数据', () => {
     expect(sceneInstanceGeometrySignature(project2.instances[0])).not.toBe(sceneInstanceGeometrySignature(project1.instances[0]))
   })
 
+  it('preserves every voxel through repeated asset rotations on all scene axes', () => {
+    const baseProject = makeDefaultProject()
+    const asset = {
+      ...baseProject.assets[0],
+      id: 'rotation-conservation-test',
+      width: 7,
+      depth: 6,
+      height: 5,
+      partVoxels: undefined,
+      assembly: undefined,
+      voxels: [
+        { x: 0, y: 0, z: 0, materialId: 'primary' },
+        { x: 5, y: 0, z: 0, materialId: 'jade' },
+        { x: 5, y: 3, z: 1, materialId: 'gold' },
+        { x: 1, y: 4, z: 4, materialId: 'teal' },
+        { x: 6, y: 2, z: 5, materialId: 'white' },
+      ],
+    }
+    const baseInstance = {
+      ...baseProject.instances[0],
+      assetId: asset.id,
+      x: snapAssetOrigin(2, asset.width),
+      y: 0,
+      z: snapAssetOrigin(-3, asset.depth),
+      rotation: 0,
+      rotationX: 0,
+      rotationY: 0,
+      rotationZ: 0,
+      rotationPivot: instanceRotationPivot(baseProject.instances[0], asset),
+    }
+    const key = (voxel: Voxel) => `${voxel.x},${voxel.y},${voxel.z}`
+    const sceneKeys = (instance: typeof baseInstance) => {
+      const voxels = resolveInstanceSceneVoxels(instance, asset)
+      return { voxels, keys: new Set(voxels.map(key)) }
+    }
+    const axes = [
+      { field: 'rotationX' as const },
+      { field: 'rotationY' as const },
+      { field: 'rotationZ' as const },
+    ]
+    const original = sceneKeys(baseInstance)
+    for (const { field } of axes) {
+      let instance = baseInstance
+      for (let turn = 1; turn <= 4; turn += 1) {
+        instance = { ...instance, [field]: turn * 90 }
+        const current = sceneKeys(instance)
+        expect(current.voxels).toHaveLength(asset.voxels.length)
+        expect(current.keys.size).toBe(asset.voxels.length)
+      }
+      expect(sceneKeys(instance).keys).toEqual(original.keys)
+    }
+
+    // Imported assets are not guaranteed to be symmetric or densely filled.
+    // Exercise several sparse, asymmetric layouts so a right-angle transform
+    // cannot silently collapse distinct cells through floating-point rounding.
+    for (let sample = 0; sample < 24; sample += 1) {
+      const width = 3 + (sample % 7)
+      const depth = 4 + ((sample * 3) % 8)
+      const height = 3 + ((sample * 5) % 6)
+      const voxels: Voxel[] = []
+      const occupied = new Set<string>()
+      for (let index = 0; index < width * depth * height && voxels.length < Math.min(18, width * depth * height); index += 1) {
+        const voxel = {
+          x: (index * 11 + sample * 2) % width,
+          y: (index * 7 + sample) % height,
+          z: (index * 13 + sample * 3) % depth,
+          materialId: `m${index}`,
+        }
+        const key = `${voxel.x},${voxel.y},${voxel.z}`
+        if (occupied.has(key)) continue
+        occupied.add(key)
+        voxels.push(voxel)
+      }
+      const sampledAsset = { ...asset, id: `rotation-conservation-${sample}`, width, depth, height, voxels }
+      const sampledInstance = { ...baseInstance, assetId: sampledAsset.id, rotationPivot: instanceRotationPivot(baseProject.instances[0], sampledAsset) }
+      for (const { field } of axes) {
+        for (let turn = 0; turn <= 4; turn += 1) {
+          const current = resolveInstanceSceneVoxels({ ...sampledInstance, [field]: turn * 90 }, sampledAsset)
+          expect(new Set(current.map(key)).size, `${sample}/${field}/${turn}`).toBe(voxels.length)
+        }
+      }
+    }
+  })
+
   it('groups only face-connected voxels into one draggable component', () => {
     const voxels = [
       { x: 0, y: 0, z: 0, materialId: 'stone' },
