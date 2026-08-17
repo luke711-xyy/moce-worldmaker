@@ -5626,12 +5626,15 @@ function App() {
       voxel,
       canonical: part.voxels[index],
     })))
-    // Index by the owning entity and canonical coordinate instead of the
-    // voxel object reference. A transform replaces voxel objects in the
-    // project array; using object identity here lets the first operation
-    // appear to work while a later operation can silently miss cells after a
-    // cached scene-part array has been rebuilt.
-    const transformedBySource = new Map<string, Voxel>()
+    // Keep the canonical voxel object as the write-back key. Scene parts are
+    // grouped directly from `sourceProject.customVoxels`, so this identity is
+    // stable for the complete transform transaction. Reconstructing a key
+    // from the canonical entity id and coordinates is unsafe here: legacy
+    // voxels can have synthesized ids, and a moved entity can carry a lazy
+    // scene offset. In those cases a valid transformed cell misses the map
+    // and silently remains at its old position, which looks like lost voxels
+    // and makes the next rotation use a stale shape.
+    const transformedBySource = new Map<Voxel, Voxel>()
     if (sourceEntries.length) {
       const transformed = mode === 'mirror'
         ? mirrorVoxels(sourceEntries.map(({ voxel }) => voxel), voxelAxis)
@@ -5639,13 +5642,12 @@ function App() {
       sourceEntries.forEach(({ part, canonical }, index) => {
         if (!canonical) return
         const storedResult = sceneToStoredCustomVoxel(sourceProject, transformed[index], part.partId)
-        transformedBySource.set(`${part.partId}:${sceneVoxelKey(canonical)}`, storedResult)
+        transformedBySource.set(canonical, storedResult)
       })
     }
     const nextCustomVoxels = transformedBySource.size
       ? sourceProject.customVoxels.map((voxel) => {
-        const entityId = voxelEntityId(voxel)
-        return transformedBySource.get(`${entityId}:${sceneVoxelKey(voxel)}`) ?? voxel
+        return transformedBySource.get(voxel) ?? voxel
       })
       : sourceProject.customVoxels
     const nextInstances = selectedInstanceIds.size
@@ -5655,21 +5657,20 @@ function App() {
           const mirror = { x: instance.mirror?.x ?? false, y: instance.mirror?.y ?? false, z: instance.mirror?.z ?? false, [axis]: !(instance.mirror?.[axis] ?? false) }
           const mirrored = { ...instance, mirror }
           const asset = assetMap.get(instance.assetId)
-          // Rebuild the pivot from the effective asset every time. Persisted
-          // pivots can predate the discrete lattice rules (or belong to a
-          // geometry version that was later edited). Reusing one of those
-          // values makes a quarter turn round different source cells onto the
-          // same destination cell. The helper is deterministic and uses the
-          // mirrored geometry, so repeated transforms remain stable.
+          // The pivot is the selected instance's own geometric center. Keep
+          // that pivot stable after the first initialization: recomputing it
+          // from the already transformed/mirrored geometry changes the
+          // rotation frame on every operation and causes center drift and
+          // quarter-turns that appear to lose cells.
           return asset
-            ? { ...mirrored, rotationPivot: instanceRotationPivot(mirrored, asset) }
+            ? { ...mirrored, rotationPivot: instance.rotationPivot ?? instanceRotationPivot(instance, asset) }
             : mirrored
         }
         const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationZ' : 'rotationY'
         const asset = assetMap.get(instance.assetId)
         const rotated = { ...instance, [key]: ((instance[key] ?? 0) + degrees) % 360 }
         return asset
-          ? { ...rotated, rotationPivot: instanceRotationPivot(rotated, asset) }
+          ? { ...rotated, rotationPivot: instance.rotationPivot ?? instanceRotationPivot(instance, asset) }
           : rotated
       })
       : sourceProject.instances
