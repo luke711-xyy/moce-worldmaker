@@ -1653,6 +1653,17 @@ function App() {
     if (!checkedPartIds.size && !checkedAssemblyIds.size) return []
     return sceneParts.filter((part) => checkedPartIds.has(part.id) || (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).some((assemblyId) => checkedAssemblyIds.has(assemblyId)))
   }, [sceneParts, selectedScenePart, selectedAssemblyId, selectedId, checkedTreePartIds])
+  // The inspector is memoized and intentionally ignores callback identity to
+  // avoid rerendering during viewport interaction. Keep the semantic
+  // transform selection in a ref so a callback retained by the inspector
+  // cannot operate on the selection from the render that created it.
+  const transformSelectionRef = useRef<{
+    parts: SceneEntityPart[]
+    selectedId: string
+    selectedScenePart?: SceneEntityPart
+    checkedTreePartIds: string[]
+  }>({ parts: [], selectedId: '', checkedTreePartIds: [] })
+  transformSelectionRef.current = { parts: selectedEntityParts, selectedId, selectedScenePart, checkedTreePartIds }
   // Keep selection identity stable across camera/zoom-only App renders. The
   // viewport uses this array as an effect dependency; rebuilding it inline in
   // JSX made every zoom ruler update rerun the scene-wide highlight pass.
@@ -5739,10 +5750,11 @@ function App() {
     return true
   }
 
-  const selectedContainsLockedEntity = () => selectedEntityParts.some((part) => scenePartIsLocked(projectRef.current, part))
+  const selectedContainsLockedEntity = () => transformSelectionRef.current.parts.some((part) => scenePartIsLocked(projectRef.current, part))
 
   const startDiscreteTransformPreview = (mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90) => {
-    if (!selectedEntityParts.length) {
+    const currentSelection = transformSelectionRef.current.parts
+    if (!currentSelection.length) {
       setNotice(`请先选择要${mode === 'mirror' ? '镜像' : '旋转'}的实体`)
       return
     }
@@ -5752,7 +5764,7 @@ function App() {
     }
     setCopyPreview(null)
     cancelGeometryPreview()
-    const preview = createDiscreteTransformPreview(projectRef.current, selectedEntityParts, mode, axis, degrees)
+    const preview = createDiscreteTransformPreview(projectRef.current, currentSelection, mode, axis, degrees)
     setTransformPreview(preview)
     setNotice(!preview ? '无法生成变换预览' : preview.valid ? '预览有效 · 请确认应用' : preview.invalidReason === 'collision' ? '预览与已有实体重叠，无法应用' : '预览超出场景边界，无法应用')
   }
@@ -5774,12 +5786,10 @@ function App() {
       setNotice(currentPreview?.invalidReason === 'collision' ? '变换被拒绝：会与已有实体重叠' : '变换被拒绝：会超出场景边界')
       return
     }
-    const selectedIdBefore = selectedId
-    const selectedPartBefore = selectedScenePart
-    const checkedIdsBefore = checkedTreePartIds
+    const { selectedId: selectedIdBefore, selectedScenePart: selectedPartBefore, checkedTreePartIds: checkedIdsBefore } = transformSelectionRef.current
     const selectedAssemblyIdBefore = selectedIdBefore.startsWith('assembly:')
       ? selectedIdBefore.slice('assembly:'.length)
-      : selectedScenePart?.assemblyId
+      : selectedPartBefore?.assemblyId
     if (!commitSceneDiscreteTransform(currentParts, transformPreview.mode, transformPreview.axis, transformPreview.degrees)) {
       setNotice('变换失败：场景状态已变化，请重新预览')
       setTransformPreview(null)
