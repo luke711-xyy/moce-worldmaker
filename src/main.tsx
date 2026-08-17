@@ -1389,6 +1389,16 @@ function App() {
   const [cameraControlApi, setCameraControlApi] = useState<CameraControlApi | null>(null)
   const [copyPreview, setCopyPreview] = useState<CopyPreviewState | null>(null)
   const [transformPreview, setTransformPreview] = useState<DiscreteTransformPreviewState | null>(null)
+  // Transform previews are short-lived edit transactions. Keep the active
+  // snapshot in a ref as well as React state so confirmation/cancellation can
+  // never read a callback's render-time copy after a memoized panel or a
+  // queued viewport update has become stale.
+  const transformPreviewRef = useRef<DiscreteTransformPreviewState | null>(null)
+  const publishTransformPreview = (preview: DiscreteTransformPreviewState | null) => {
+    transformPreviewRef.current = preview
+    setTransformPreview(preview)
+  }
+  const cancelTransformPreview = () => publishTransformPreview(null)
   const [colorPreview, setColorPreview] = useState<ColorPreviewState | null>(null)
   const [geometryPreview, setGeometryPreview] = useState<GeometryPreviewState | null>(null)
   const [geometryApplying, setGeometryApplying] = useState(false)
@@ -2495,7 +2505,7 @@ function App() {
     geometryRequestRevisionRef.current += 1
     geometryApplyRevisionRef.current += 1
     setCopyPreview(null)
-    setTransformPreview(null)
+    cancelTransformPreview()
     cancelColorPreview()
     if (!geometryApplyingRef.current) cancelGeometryPreview()
   }
@@ -3745,7 +3755,7 @@ function App() {
   const exitEditMode = () => {
     voxelStrokeEntityRef.current = null
     setCopyPreview(null)
-    setTransformPreview(null)
+    cancelTransformPreview()
     cancelGeometryPreview()
     setEditEntityId(null)
     setNotice('已退出编辑修改模式')
@@ -3754,7 +3764,7 @@ function App() {
   const changeTool = (nextTool: Tool) => {
     cancelGeometryPreview()
     setCopyPreview(null)
-    setTransformPreview(null)
+    cancelTransformPreview()
     setTool(nextTool)
     if (!editEntityId) {
       setSelectedId('')
@@ -4961,7 +4971,7 @@ function App() {
       return
     }
     const count = Math.max(1, Math.min(99, Math.round(requestedCount) || 1))
-    setTransformPreview(null)
+    cancelTransformPreview()
     cancelGeometryPreview()
     // Preview is read-only. Cloning every selected voxel part here made the
     // first click scale with the entire selected model before any copy existed.
@@ -5152,7 +5162,7 @@ function App() {
     if (!selectedEntityParts.length) { setNotice('请先选择要处理的实体'); return }
     if (selectedContainsLockedEntity()) { setNotice('选中的实体中包含已固定实体 · 请先取消固定'); return }
     setCopyPreview(null)
-    setTransformPreview(null)
+    cancelTransformPreview()
     const sourceVoxels = currentGeometrySourceVoxels()
     const requestRevision = ++geometryRequestRevisionRef.current
     setGeometryPreview({ operation, shellThickness, scaleMode, scaleFactor, result: null, valid: false, invalidReason: '正在生成预览…' })
@@ -5753,7 +5763,7 @@ function App() {
   const selectedContainsLockedEntity = () => transformSelectionRef.current.parts.some((part) => scenePartIsLocked(projectRef.current, part))
 
   const startDiscreteTransformPreview = (mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90) => {
-    const currentSelection = transformSelectionRef.current.parts
+    const currentSelection = [...transformSelectionRef.current.parts]
     if (!currentSelection.length) {
       setNotice(`请先选择要${mode === 'mirror' ? '镜像' : '旋转'}的实体`)
       return
@@ -5765,7 +5775,7 @@ function App() {
     setCopyPreview(null)
     cancelGeometryPreview()
     const preview = createDiscreteTransformPreview(projectRef.current, currentSelection, mode, axis, degrees)
-    setTransformPreview(preview)
+    publishTransformPreview(preview)
     setNotice(!preview ? '无法生成变换预览' : preview.valid ? '预览有效 · 请确认应用' : preview.invalidReason === 'collision' ? '预览与已有实体重叠，无法应用' : '预览超出场景边界，无法应用')
   }
 
@@ -5773,16 +5783,17 @@ function App() {
   const rotateSelectedEntities = (axis: SceneTransformAxis, degrees: 90 | 180 | 270) => startDiscreteTransformPreview('rotate', axis, degrees)
 
   const confirmDiscreteTransform = () => {
-    if (!transformPreview) return
+    const activePreview = transformPreviewRef.current
+    if (!activePreview) return
     const selection: DiscreteTransformSelection = {
-      sourcePartIds: new Set(transformPreview.sourcePartIds),
-      instanceIds: new Set(transformPreview.sourceInstanceIds),
-      customIds: new Set(transformPreview.sourceCustomIds),
+      sourcePartIds: new Set(activePreview.sourcePartIds),
+      instanceIds: new Set(activePreview.sourceInstanceIds),
+      customIds: new Set(activePreview.sourceCustomIds),
     }
     const currentParts = transformPartsForSelection(projectRef.current, selection)
-    const currentPreview = createDiscreteTransformPreview(projectRef.current, currentParts, transformPreview.mode, transformPreview.axis, transformPreview.degrees)
+    const currentPreview = createDiscreteTransformPreview(projectRef.current, currentParts, activePreview.mode, activePreview.axis, activePreview.degrees)
     if (!currentPreview?.valid) {
-      setTransformPreview(currentPreview)
+      publishTransformPreview(currentPreview)
       setNotice(currentPreview?.invalidReason === 'collision' ? '变换被拒绝：会与已有实体重叠' : '变换被拒绝：会超出场景边界')
       return
     }
@@ -5790,9 +5801,9 @@ function App() {
     const selectedAssemblyIdBefore = selectedIdBefore.startsWith('assembly:')
       ? selectedIdBefore.slice('assembly:'.length)
       : selectedPartBefore?.assemblyId
-    if (!commitSceneDiscreteTransform(currentParts, transformPreview.mode, transformPreview.axis, transformPreview.degrees)) {
+    if (!commitSceneDiscreteTransform(currentParts, activePreview.mode, activePreview.axis, activePreview.degrees)) {
       setNotice('变换失败：场景状态已变化，请重新预览')
-      setTransformPreview(null)
+      cancelTransformPreview()
       return
     }
     // Transforming an asset can rebuild its component IDs. Rebind the tree
@@ -5831,8 +5842,8 @@ function App() {
     }
     if (clearCheckedSelection) setCheckedTreePartIds([])
     else if (checkedIdsBefore.length) setCheckedTreePartIds(nextCheckedIds.length ? nextCheckedIds : nextParts.map((part) => part.id))
-    setTransformPreview(null)
-    setNotice(transformPreview.mode === 'mirror' ? `已镜像选中实体 · ${transformPreview.axis.toUpperCase()} 轴` : `已旋转选中实体 · ${transformPreview.axis.toUpperCase()} 轴 ${transformPreview.degrees}°`)
+    cancelTransformPreview()
+    setNotice(activePreview.mode === 'mirror' ? `已镜像选中实体 · ${activePreview.axis.toUpperCase()} 轴` : `已旋转选中实体 · ${activePreview.axis.toUpperCase()} 轴 ${activePreview.degrees}°`)
   }
 
   const operateOnSceneSelection = (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => {
@@ -5864,7 +5875,7 @@ function App() {
       return
     }
     setCopyPreview(null)
-    setTransformPreview(null)
+    cancelTransformPreview()
     setSelectionRefreshKey((value) => value + 1)
     const removing = additive && checkedTreePartIds.includes(id)
     setCheckedTreePartIds((current) => {
@@ -5886,7 +5897,7 @@ function App() {
       return
     }
     setCopyPreview(null)
-    setTransformPreview(null)
+    cancelTransformPreview()
     setSelectionRefreshKey((value) => value + 1)
     const removing = checkedTreePartIds.includes(id)
     setCheckedTreePartIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])
@@ -5897,7 +5908,7 @@ function App() {
 
   const selectScenePart = (id: string) => {
     setCopyPreview(null)
-    setTransformPreview(null)
+    cancelTransformPreview()
     setSelectionRefreshKey((value) => value + 1)
     setSelectedId(id)
     setCheckedTreePartIds([id])
@@ -5907,7 +5918,7 @@ function App() {
 
   const updateSceneCheckedSelection = (partIds: string[], additive = false) => {
     setCopyPreview(null)
-    setTransformPreview(null)
+    cancelTransformPreview()
     setSelectionRefreshKey((value) => value + 1)
     setCheckedTreePartIds((current) => {
       if (!additive) return [...new Set(partIds)]
@@ -5969,7 +5980,7 @@ function App() {
   const stableViewportSelectMultiple = useStableEvent(updateSceneCheckedSelection)
   const stableViewportCancelPending = useStableEvent(() => {
     setCopyPreview(null)
-    setTransformPreview(null)
+    cancelTransformPreview()
     cancelGeometryPreview()
   })
   const stableViewportSelectMaterial = useStableEvent(useMaterial)
@@ -6076,7 +6087,7 @@ function App() {
             <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { if (cameraControlApi) cameraControlApi.zoomOut(); else setZoomLevel((value) => stepZoomLevel(value, -1)); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${zoomTrackProgress(zoomLevel)}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { if (cameraControlApi) cameraControlApi.zoomIn(); else setZoomLevel((value) => stepZoomLevel(value, 1)); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{Math.round(zoomLevel)}%</span></div>
           </div>
         </section>
-        <MemoizedInspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} selectedTransformSignature={selectedEntityTransformSignature} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} transformPreview={transformPreview} geometryPreview={geometryPreview} shellThicknessOptions={geometryShellThicknessOptions} scaleOptions={geometryScaleOptions} onChangeColor={changeSelectedColor} onPreviewHsl={previewSelectedHsl} onCommitHsl={commitSelectedHsl} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onConfirmTransform={confirmDiscreteTransform} onCancelTransform={() => setTransformPreview(null)} onExport={exportSelectedPart} onExportGlb={exportSelectedPartGlb} onExportVox={exportSelectedPartVox} onExportEntityFile={exportSelectedEntityFile} onOpenSlicer={() => setSliceDialogOpen(true)} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => { setCopyPreview(null); setTransformPreview(null) }} onStartShell={startShellPreview} onStartScale={startScalePreview} onChangeShellThickness={changeGeometryShellThickness} onChangeScale={changeGeometryScale} onConfirmGeometry={confirmGeometryPreview} onCancelGeometry={cancelGeometryPreview} onDelete={deleteSelected} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
+        <MemoizedInspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} selectedTransformSignature={selectedEntityTransformSignature} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} transformPreview={transformPreview} geometryPreview={geometryPreview} shellThicknessOptions={geometryShellThicknessOptions} scaleOptions={geometryScaleOptions} onChangeColor={changeSelectedColor} onPreviewHsl={previewSelectedHsl} onCommitHsl={commitSelectedHsl} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onConfirmTransform={confirmDiscreteTransform} onCancelTransform={cancelTransformPreview} onExport={exportSelectedPart} onExportGlb={exportSelectedPartGlb} onExportVox={exportSelectedPartVox} onExportEntityFile={exportSelectedEntityFile} onOpenSlicer={() => setSliceDialogOpen(true)} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => { setCopyPreview(null); cancelTransformPreview() }} onStartShell={startShellPreview} onStartScale={startScalePreview} onChangeShellThickness={changeGeometryShellThickness} onChangeScale={changeGeometryScale} onConfirmGeometry={confirmGeometryPreview} onCancelGeometry={cancelGeometryPreview} onDelete={deleteSelected} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
       </main>
       {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} selectedSceneLoading={selectedLibrarySceneLoading} selectionRevision={selectedLibrarySceneRevision} error={libraryError} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} cloudAssets={cloudAssets} cloudScenes={cloudScenes} cloudUsage={cloudUsage} cloudError={cloudError} cloudTransfers={cloudTransfers} cloudTransferErrors={cloudTransferErrors} onBackupCurrentScene={() => backupCurrentSceneToCloud()} onDownloadCloudScene={downloadCloudSceneToLocal} onDeleteCloudScene={removeCloudScene} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null); setSelectedLibrarySceneLoading(false) }} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} onBackupScene={backupStoredSceneToCloud} />}
       {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
@@ -7008,32 +7019,14 @@ function sameScaleOptions(left: InspectorProps['scaleOptions'], right: Inspector
   return sameNumberArray(left.up, right.up) && sameNumberArray(left.down, right.down)
 }
 
-function inspectorPropsEqual(previous: InspectorProps, next: InspectorProps): boolean {
-  // Pointer movement updates the viewport imperatively. The inspector only
-  // needs to publish the committed position once the gesture is released.
-  // Ignore callback identity: these callbacks are event handlers owned by App
-  // and the rendered inspector state below is compared explicitly, avoiding
-  // stale visual state without forcing a panel render on every parent update.
-  return previous.entityName === next.entityName
-    && previous.source === next.source
-    && inspectorAssetSignature(previous.selectedAsset) === inspectorAssetSignature(next.selectedAsset)
-    && inspectorPartsSignature(previous.selectedParts) === inspectorPartsSignature(next.selectedParts)
-    && previous.selectedTransformSignature === next.selectedTransformSignature
-    && previous.editEntityId === next.editEntityId
-    && previous.canEnterEditMode === next.canEnterEditMode
-    && previous.editTargetId === next.editTargetId
-    && previous.selectedColor === next.selectedColor
-    && previous.previewColor === next.previewColor
-    && previous.previewVoxelColors === next.previewVoxelColors
-    && previous.previewMaterialColors === next.previewMaterialColors
-    && previous.copyPreview === next.copyPreview
-    && previous.transformPreview === next.transformPreview
-    && previous.geometryPreview === next.geometryPreview
-    && sameNumberArray(previous.shellThicknessOptions, next.shellThicknessOptions)
-    && sameScaleOptions(previous.scaleOptions, next.scaleOptions)
-}
-
-const MemoizedInspector = React.memo(Inspector, inspectorPropsEqual)
+// Do not custom-memoize the Inspector. Transform previews are transactions:
+// their callbacks close over the current selection/project snapshot, and the
+// operation controls can change while the selected entity itself does not.
+// A comparator that ignores callback identity can retain the first preview's
+// onMirror/onRotate/onConfirmTransform handlers and make every later preview
+// reuse the first axis/angle. The panel is small compared with the viewport;
+// correctness is more important than saving this render.
+const MemoizedInspector = React.memo(Inspector)
 
 function sliceCoordinates(plane: SlicePlane, voxel: SliceVoxel): { u: number; v: number } {
   if (plane === 'xy') return { u: voxel.x, v: voxel.y }
