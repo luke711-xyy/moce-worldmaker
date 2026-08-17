@@ -137,10 +137,13 @@ function sceneSummary(record: LocalSceneRecord): LocalLibrarySceneSummary {
     id: record.id,
     name: scene.name || '未命名场景',
     assetCount: record.sceneFile.sceneAssets.length,
-    instanceCount: scene.instances.length,
+    // Runtime scenes no longer contain SceneInstance records. Keep this
+    // legacy field for the library API, but derive all visible counts from
+    // scene-owned voxel entities and assemblies below.
+    instanceCount: 0,
     customVoxelCount: scene.customVoxels.length,
     assemblyCount: scene.assemblies?.length ?? 0,
-    entityCount: scene.instances.length + entityIds.size,
+    entityCount: entityIds.size,
     updatedAt: record.updatedAt,
   }
 }

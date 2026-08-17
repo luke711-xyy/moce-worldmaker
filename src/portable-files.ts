@@ -207,8 +207,11 @@ export function createEntityFile(project: ProjectState, parts: SceneEntityPart[]
     const entityId = `entity-${entities.length + 1}`
     const first = groupParts[0]
     const entityName = first ? (first.displayLabel ?? first.label ?? (first.kind === 'custom' ? '手动体素实体' : '场景实体')) : '场景实体'
-    const sourceAsset = first?.instanceId
-      ? project.assets.find((asset) => asset.id === project.instances.find((instance) => instance.id === first.instanceId)?.assetId)
+    const sourceAssetId = first?.instanceId
+      ? project.instances.find((instance) => instance.id === first.instanceId)?.assetId
+      : first?.partId ? project.customEntitySources?.[first.partId]?.assetId : undefined
+    const sourceAsset = sourceAssetId
+      ? project.assets.find((asset) => asset.id === sourceAssetId)
       : undefined
     const entityColor = first?.colorOverride ?? project.customColors?.[first?.partId ?? ''] ?? sourceAsset?.templateColor ?? sourceAsset?.color ?? '#6c827d'
     const asset = makeAssetFromSceneParts(entityId, entityName, exportParts, entityColor, sourceAsset?.accent ?? '#d2a354')

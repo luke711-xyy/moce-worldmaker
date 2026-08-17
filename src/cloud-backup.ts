@@ -313,7 +313,8 @@ export async function uploadCloudScene(scene: MoceSceneFile, conflictMode?: 'rep
     onProgress?.({ transfer: { ...preparing, status: 'transferring' }, transferredBytes: 0, status: 'transferring', error: '正在序列化场景并校验…' })
     const bytes = encodeJson(scene)
     const blobHash = await hashBytes(bytes)
-    const summary = { instanceCount: scene.scene.instances.length, entityCount: scene.scene.instances.length + new Set(scene.scene.customVoxels.map((voxel) => voxel.entityId).filter(Boolean)).size, assemblyCount: scene.scene.assemblies?.length ?? 0 }
+    const entityIds = new Set(scene.scene.customVoxels.map((voxel, index) => voxel.entityId ?? `legacy-${voxel.x},${voxel.y},${voxel.z}-${index}`))
+    const summary = { instanceCount: 0, entityCount: entityIds.size, assemblyCount: scene.scene.assemblies?.length ?? 0 }
     started = await startTransfer({ direction: 'upload', objectKind: 'scene', objectId: scene.scene.name, name: scene.scene.name, blobHash, totalBytes: bytes.byteLength, totalParts: Math.ceil(bytes.byteLength / CLOUD_TRANSFER_PART_BYTES), conflictMode, conflictId, metadata: { summary } })
     const transfer = await uploadBytes(bytes, started.transfer, onProgress)
     return { transfer, effectiveId: started.effectiveId ?? scene.scene.name, effectiveName: started.effectiveName ?? scene.scene.name }

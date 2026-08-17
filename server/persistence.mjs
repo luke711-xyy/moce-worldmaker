@@ -77,9 +77,15 @@ function requestBody(request) {
 }
 
 function sceneFileFromProject(project) {
-  const usedAssetIds = new Set((project.instances ?? []).map((instance) => instance.assetId))
+  const usedAssetIds = new Set([
+    ...(project.instances ?? []).map((instance) => instance.assetId),
+    ...Object.values(project.customEntitySources ?? {}).map((source) => source?.assetId).filter(Boolean),
+  ])
   const assets = project.assets ?? []
-  const missingAssetId = [...usedAssetIds].find((assetId) => !assets.some((asset) => asset.id === assetId))
+  // customVoxels are self-contained. A stale source metadata entry must not
+  // make an otherwise valid scene upload fail; only legacy instances still
+  // require their source asset to be present for one-time materialization.
+  const missingAssetId = (project.instances ?? []).find((instance) => !assets.some((asset) => asset.id === instance.assetId))?.assetId
   if (missingAssetId) throw new Error(`场景引用了不存在的资产：${missingAssetId}`)
   const { assets: _assets, ...scene } = project
   return {
@@ -299,16 +305,23 @@ function sceneSummary(scene) {
     return count || (resolved.size ? 1 : 0)
   }
   const logicalEntityCount = instances.reduce((total, instance) => total + partCountForInstance(instance), 0)
+  // Current scene files are self-contained: every scene entity is represented
+  // by customVoxels and instances is empty. Keep the legacy calculation only
+  // for old records that have not crossed the one-time migration boundary.
+  const isCanonicalScene = Array.isArray(state.customVoxels) && instances.length === 0
   const customEntityIds = new Set(customVoxels.map((voxel, index) => typeof voxel?.entityId === 'string' ? voxel.entityId : `legacy-${voxel?.x},${voxel?.y},${voxel?.z}-${index}`))
+  const entityCount = isCanonicalScene
+    ? customEntityIds.size
+    : logicalEntityCount + customEntityIds.size
   return {
     id: scene.id,
     name: state.name ?? scene.name,
     assetCount: Array.isArray(scene.sceneAssets) ? sceneAssets.length : typeof scene.assetCount === 'number' ? scene.assetCount : scene.assetIds?.length ?? 0,
-    instanceCount: Array.isArray(state.instances) ? instances.length : typeof scene.instanceCount === 'number' ? scene.instanceCount : 0,
+    instanceCount: isCanonicalScene ? 0 : Array.isArray(state.instances) ? instances.length : typeof scene.instanceCount === 'number' ? scene.instanceCount : 0,
     customVoxelCount: Array.isArray(state.customVoxels) ? customVoxels.length : typeof scene.customVoxelCount === 'number' ? scene.customVoxelCount : 0,
     assemblyCount: Array.isArray(state.assemblies) ? assemblies.length : typeof scene.assemblyCount === 'number' ? scene.assemblyCount : 0,
-    entityCount: Array.isArray(state.instances) || Array.isArray(state.customVoxels)
-      ? logicalEntityCount + customEntityIds.size
+    entityCount: isCanonicalScene || Array.isArray(state.instances)
+      ? entityCount
       : typeof scene.entityCount === 'number' ? scene.entityCount : (typeof scene.instanceCount === 'number' ? scene.instanceCount : 0) + (typeof scene.customVoxelCount === 'number' && scene.customVoxelCount > 0 ? 1 : 0),
     updatedAt: scene.updatedAt,
   }

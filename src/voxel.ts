@@ -809,21 +809,76 @@ export function instanceRotationPivot(instance: SceneInstance, asset: VoxelAsset
   })
   if (!Number.isFinite(minX)) return { x: 0, y: asset.height * VOXEL_WORLD_SIZE / 2, z: 0 }
   const center = { x: (minX + maxX) / 2, y: (minY + maxY) / 2, z: (minZ + maxZ) / 2 }
-  // A geometric center can sit on different lattice parities on the three
-  // axes (for example a 5-high x 4-deep model). Rotating that point by 90°
-  // then puts voxel centers on half-cell boundaries and Math.round collapses
-  // distinct cells. Pick the nearest common voxel-lattice parity for all
-  // pivot components: either integer-cell or half-cell coordinates. The
-  // adjustment is at most half a voxel, but every supported quarter turn now
-  // maps cell centers bijectively to cell centers.
-  const pivotCandidates = [0, 0.5].map((parity) => ({
-    x: (Math.round(center.x / VOXEL_WORLD_SIZE - parity) + parity) * VOXEL_WORLD_SIZE,
-    y: (Math.round(center.y / VOXEL_WORLD_SIZE - parity) + parity) * VOXEL_WORLD_SIZE,
-    z: (Math.round(center.z / VOXEL_WORLD_SIZE - parity) + parity) * VOXEL_WORLD_SIZE,
+  // The pivot is stored in the asset's local frame, while the voxel centres
+  // live on the scene grid. Therefore the local components cannot simply be
+  // forced to one common parity: an odd-sized asset has a half-cell origin
+  // on one axis and an even-sized asset has an integer origin on another.
+  // What must be common is the parity of the *world-space* pivot. Otherwise a
+  // quarter turn maps one centre lattice onto a half-cell lattice and the
+  // resolver's final Math.round merges distinct source voxels.
+  const origins = { x: instance.x, y: instance.y ?? 0, z: instance.z }
+  const centerWorld = {
+    x: center.x + origins.x,
+    y: center.y + origins.y,
+    z: center.z + origins.z,
+  }
+  const normalizeParity = (value: number) => ((value % 1) + 1) % 1
+  const snapToParity = (value: number, parity: number) => (Math.round(value / VOXEL_WORLD_SIZE - parity) + parity) * VOXEL_WORLD_SIZE
+  const candidates = [0, 0.5].map((worldParity) => {
+    const localParity = {
+      x: normalizeParity(worldParity - normalizeParity(origins.x / VOXEL_WORLD_SIZE)),
+      y: normalizeParity(worldParity - normalizeParity(origins.y / VOXEL_WORLD_SIZE)),
+      z: normalizeParity(worldParity - normalizeParity(origins.z / VOXEL_WORLD_SIZE)),
+    }
+    const candidate = {
+      x: snapToParity(center.x, localParity.x),
+      y: snapToParity(center.y, localParity.y),
+      z: snapToParity(center.z, localParity.z),
+    }
+    return { candidate, world: { x: candidate.x + origins.x, y: candidate.y + origins.y, z: candidate.z + origins.z } }
+  })
+  const score = (world: { x: number; y: number; z: number }) =>
+    (world.x - centerWorld.x) ** 2 + (world.y - centerWorld.y) ** 2 + (world.z - centerWorld.z) ** 2
+  return score(candidates[0].world) <= score(candidates[1].world) ? candidates[0].candidate : candidates[1].candidate
+}
+
+/**
+ * Repair a persisted rotation pivot without inspecting the asset geometry.
+ *
+ * A pivot is stored in the instance-local project frame, but the quarter-turn
+ * resolver operates on scene-grid voxel centres.  Consequently the three
+ * world-space pivot components must share one lattice parity (integer-cell or
+ * half-cell).  Older transform paths could persist a pivot whose components
+ * used different parities; Math.round then merged distinct cells after a
+ * rotation.  Keep the nearest valid common-parity pivot so old instances are
+ * repaired consistently by rendering, hit testing, and export.
+ */
+export function normalizeInstanceRotationPivot(instance: SceneInstance): { x: number; y: number; z: number } {
+  const pivot = instance.rotationPivot
+  if (!pivot) return { x: 0, y: 0, z: 0 }
+  const origin = { x: instance.x, y: instance.y ?? 0, z: instance.z }
+  const currentWorld = {
+    x: pivot.x + origin.x,
+    y: pivot.y + origin.y,
+    z: pivot.z + origin.z,
+  }
+  const normalizeParity = (value: number) => ((value % 1) + 1) % 1
+  const snapToParity = (value: number, parity: number) => (Math.round(value / VOXEL_WORLD_SIZE - parity) + parity) * VOXEL_WORLD_SIZE
+  const candidates = [0, 0.5].map((parity) => ({
+    x: snapToParity(currentWorld.x, parity),
+    y: snapToParity(currentWorld.y, parity),
+    z: snapToParity(currentWorld.z, parity),
   }))
   const score = (candidate: { x: number; y: number; z: number }) =>
-    (candidate.x - center.x) ** 2 + (candidate.y - center.y) ** 2 + (candidate.z - center.z) ** 2
-  return score(pivotCandidates[0]) <= score(pivotCandidates[1]) ? pivotCandidates[0] : pivotCandidates[1]
+    (candidate.x - currentWorld.x) ** 2
+    + (candidate.y - currentWorld.y) ** 2
+    + (candidate.z - currentWorld.z) ** 2
+  const world = score(candidates[0]) <= score(candidates[1]) ? candidates[0] : candidates[1]
+  return {
+    x: world.x - origin.x,
+    y: world.y - origin.y,
+    z: world.z - origin.z,
+  }
 }
 
 export type VoxelTransformAxis = 'x' | 'y' | 'z'
@@ -929,17 +984,23 @@ function resolveInstanceComponentSceneVoxel(instance: SceneInstance, asset: Voxe
   const localXIndex = mirror.x ? asset.width - 1 - voxel.x : voxel.x
   const localYIndex = mirror.z ? asset.height - 1 - voxel.y : voxel.y
   const localZIndex = mirror.y ? asset.depth - 1 - voxel.z : voxel.z
-  const pivot = instance.rotationPivot ?? { x: 0, y: 0, z: 0 }
+  const pivot = normalizeInstanceRotationPivot(instance)
   const local = rotateSceneVector({
     x: (localXIndex + 0.5 - asset.width / 2) * VOXEL_WORLD_SIZE + (mirror.x ? -offset.x : offset.x) - pivot.x,
     y: (localZIndex + 0.5 - asset.depth / 2) * VOXEL_WORLD_SIZE + (mirror.y ? -offset.z : offset.z) - pivot.z,
     z: (localYIndex + 0.5) * VOXEL_WORLD_SIZE + (mirror.z ? -offset.y : offset.y) - pivot.y,
   }, rotationX, rotationY, rotationZ)
+  // The transform is performed in world units, where a quarter turn is
+  // mathematically exact on the voxel lattice. IEEE-754 arithmetic can leave
+  // a boundary at 18.499999999999996, though, and the ordinary centre helper
+  // then rounds it down. Keep this tolerance local to transformed instance
+  // coordinates so ray-hit conversion elsewhere keeps its existing behavior.
+  const transformedVoxelCenter = (value: number) => Math.round(value / VOXEL_WORLD_SIZE - 0.5 + 1e-8)
   return {
     ...voxel,
-    x: worldToVoxelCenter(x + local.x + pivot.x),
-    y: Math.round((local.z + pivot.y + y) / VOXEL_WORLD_SIZE - 0.5),
-    z: worldToVoxelCenter(z + local.y + pivot.z),
+    x: transformedVoxelCenter(x + local.x + pivot.x),
+    y: transformedVoxelCenter(local.z + pivot.y + y),
+    z: transformedVoxelCenter(z + local.y + pivot.z),
   }
 }
 

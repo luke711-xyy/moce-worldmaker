@@ -157,7 +157,14 @@ function isLegacyProject(value: unknown): value is ProjectState {
 }
 
 export function createSceneFile(project: ProjectState): MoceSceneFile {
-  const usedAssetIds = new Set(project.instances.map((instance) => instance.assetId))
+  // A scene is now self-contained in customVoxels. Asset-library templates
+  // are dependencies only, recorded by the source metadata of scene-owned
+  // entities. Keep the instances fallback solely so an old in-memory project
+  // can still be exported before the one-time migration runs.
+  const usedAssetIds = new Set<string>([
+    ...project.instances.map((instance) => instance.assetId),
+    ...Object.values(project.customEntitySources ?? {}).map((source) => source.assetId),
+  ])
   const assetsById = new Map(project.assets.map((asset) => [asset.id, asset]))
   const missingAssetId = project.instances.find((instance) => !assetsById.has(instance.assetId))?.assetId
   if (missingAssetId) throw new SceneFileError(`当前场景引用了不存在的资产：${missingAssetId}`)
@@ -236,8 +243,13 @@ export function sceneContentSignature(project: ProjectState): string {
     arraySignatureCache.set(values, { length: values.length, signature })
     return signature
   }
+  // Source metadata is informational only after materialization. Editing a
+  // template's name, color, or category must not make an already materialized
+  // scene dirty. Asset signatures are therefore needed only for the legacy
+  // instance representation, whose voxels are still resolved lazily.
+  const legacyInstanceAssetIds = new Set(project.instances.map((instance) => instance.assetId))
   const assetSignatures = project.assets
-    .filter((asset) => project.instances.some((instance) => instance.assetId === asset.id))
+    .filter((asset) => legacyInstanceAssetIds.has(asset.id))
     .map((asset) => [asset.id, signatureForAsset(asset)] as const)
   const { assets: _assets, materials, customVoxels, ...scene } = project
   return JSON.stringify({

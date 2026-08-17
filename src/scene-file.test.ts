@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createSceneFile, parseSceneFile, parseSceneFileText, restoreProject, sceneContentSignature, SceneFileError } from './scene-file'
-import { makeDefaultProject } from './voxel'
+import { makeDefaultProject, makeEmptyProject } from './voxel'
 
 describe('莫测造境场景文件', () => {
   it('only embeds assets referenced by the current scene', () => {
@@ -10,6 +10,41 @@ describe('莫测造境场景文件', () => {
     expect(file.format).toBe('moce-scene')
     expect(file.sceneAssets.map((asset) => asset.id).sort()).toEqual([...used].sort())
     expect(file.sceneAssets.every((asset) => asset.isTemplate === false)).toBe(true)
+  })
+
+  it('writes canonical scene entities without legacy instance records', () => {
+    const sample = makeDefaultProject()
+    const template = sample.assets.find((asset) => asset.isTemplate === true)!
+    const project = makeEmptyProject()
+    project.assets = [template]
+    project.customVoxels = [
+      { x: 3, y: 4, z: 0, materialId: '#c96043', entityId: 'custom-1' },
+      { x: 4, y: 4, z: 0, materialId: '#c96043', entityId: 'custom-1' },
+    ]
+    project.customEntitySources = { 'custom-1': { assetId: template.id, categoryPath: ['基础件'] } }
+
+    const file = createSceneFile(project)
+    expect(file.scene.instances).toEqual([])
+    expect(file.scene.customVoxels).toHaveLength(2)
+    expect(file.sceneAssets.map((asset) => asset.id)).toEqual([template.id])
+
+    const restored = restoreProject(parseSceneFile(file))
+    expect(restored.instances).toEqual([])
+    expect(restored.customVoxels).toEqual(project.customVoxels)
+    expect(restored.customEntitySources).toEqual(project.customEntitySources)
+  })
+
+  it('does not make a materialized scene dirty when its template metadata changes', () => {
+    const sample = makeDefaultProject()
+    const template = sample.assets.find((asset) => asset.isTemplate === true)!
+    const project = makeEmptyProject()
+    project.assets = [template]
+    project.customVoxels = [{ x: 0, y: 0, z: 0, materialId: '#c96043', entityId: 'custom-1' }]
+    project.customEntitySources = { 'custom-1': { assetId: template.id, categoryPath: ['基础件'] } }
+
+    const before = sceneContentSignature(project)
+    project.assets[0] = { ...template, name: '改过的模板名', color: '#ffffff', categoryPath: ['新分类'] }
+    expect(sceneContentSignature(project)).toBe(before)
   })
 
   it('round-trips scene entities, instances, assemblies and colors', () => {

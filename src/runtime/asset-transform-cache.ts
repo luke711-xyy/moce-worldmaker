@@ -2,6 +2,7 @@ import {
   assetOriginGridCoordinate,
   instanceVoxelPairs,
   instanceLocalVoxelToSceneVoxelFast,
+  normalizeInstanceRotationPivot,
   resolveInstanceSceneVoxels,
   SceneInstance,
   snapAssetOrigin,
@@ -146,7 +147,7 @@ export class AssetTransformCache {
     const rotationX = (instance.rotationX ?? 0) * Math.PI / 180
     const rotationY = (instance.rotationY ?? 0) * Math.PI / 180
     const rotationZ = -(instance.rotation + (instance.rotationZ ?? 0)) * Math.PI / 180
-    const pivot = instance.rotationPivot ?? { x: 0, y: 0, z: 0 }
+    const pivot = normalizeInstanceRotationPivot(instance)
     const scene = {
       x: voxelCenterToWorld(sceneVoxel.x) - instance.x - pivot.x,
       y: voxelCenterToWorld(sceneVoxel.z) - instance.z - pivot.z,

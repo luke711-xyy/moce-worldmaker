@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { Box, Brush, ChevronDown, ChevronLeft, ChevronRight, Cloud, Database, Download, Eraser, Eye, FilePlus2, Grid3X3, Image as ImageIcon, Layers3, Lock, LogIn, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, Repeat2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, UserRound, WandSparkles, X } from 'lucide-react'
-import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, MAX_SCENE_BOUND_VOXELS, MIN_SCENE_BOUND_VOXELS, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceRotationPivot, instanceVoxelPairs, isBundledDefaultSampleProject, isLegacyDefaultSampleProject, makeAssemblyAssetFromSceneParts, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblyNodeNameForAsset, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, sceneNameForAsset, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueSceneName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, MAX_SCENE_BOUND_VOXELS, MIN_SCENE_BOUND_VOXELS, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceRotationPivot, instanceVoxelPairs, isBundledDefaultSampleProject, isLegacyDefaultSampleProject, makeAssemblyAssetFromSceneParts, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeInstanceRotationPivot, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblyNodeNameForAsset, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, sceneNameForAsset, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueSceneName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, validateEntityFile } from './persistence'
 import { deleteLocalAsset, deleteLocalScene, duplicateLocalScene, initializeLocalLibrary, loadLocalLibrary, loadLocalScene, saveLocalAsset, saveLocalAssetCategories, saveLocalScene } from './local-library'
@@ -1173,23 +1173,17 @@ type ProjectHistoryEntry = {
 
 const HISTORY_MAX_ENTRIES = 50
 
-// A drag changes the project root, but usually reuses the same assets and
-// instances arrays. Cache the history budget by those immutable collection
-// identities so pointer-up does not rebuild an asset map and rescan every
-// instance on every move release.
-const historyLimitCache = new WeakMap<ReadonlyArray<VoxelAsset>, WeakMap<ReadonlyArray<SceneInstance>, number>>()
+// A drag changes the project root, but usually reuses the same custom-voxel
+// array. Cache the history budget by that immutable collection identity so
+// pointer-up does not rescan the asset catalogue or rebuild legacy instance
+// geometry. Scene instances are a read-only migration input, never part of
+// the live scene budget.
+const historyLimitCache = new WeakMap<ReadonlyArray<Voxel>, number>()
 
 function historyLimitForProject(project: ProjectState): number {
-  const byInstances = historyLimitCache.get(project.assets)
-  const cached = byInstances?.get(project.instances)
+  const cached = historyLimitCache.get(project.customVoxels)
   if (cached !== undefined) return cached
-  // Template-library assets are not part of the scene snapshot's render
-  // payload. Count only assets actually instantiated in the scene, otherwise
-  // a large catalogue would unnecessarily reduce undo depth for a small
-  // scene.
-  const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
-  const assetVoxelCount = project.instances.reduce((total, instance) => total + (assetMap.get(instance.assetId)?.voxels.length ?? 0), 0)
-  const voxelCount = project.customVoxels.length + assetVoxelCount
+  const voxelCount = project.customVoxels.length
   const limit = voxelCount >= 500_000
     ? 6
     : voxelCount >= 100_000
@@ -1197,9 +1191,7 @@ function historyLimitForProject(project: ProjectState): number {
       : voxelCount >= 25_000
         ? 24
         : HISTORY_MAX_ENTRIES
-  const nextByInstances = byInstances ?? new WeakMap<ReadonlyArray<SceneInstance>, number>()
-  nextByInstances.set(project.instances, limit)
-  if (!byInstances) historyLimitCache.set(project.assets, nextByInstances)
+  historyLimitCache.set(project.customVoxels, limit)
   return limit
 }
 
@@ -2232,7 +2224,10 @@ function App() {
     // only keep the assets actually referenced by this scene. This avoids a
     // second full-project clone without changing dirty-state semantics.
     sceneFile.scene.name = savedName
-    const savedAssetIds = new Set(sceneFile.scene.instances.map((instance) => instance.assetId))
+    const savedAssetIds = new Set(Object.values(sceneFile.scene.customEntitySources ?? {}).map((source) => source.assetId))
+    // The fallback keeps a legacy project baseline correct if it reaches this
+    // function before normalization has completed.
+    sceneFile.scene.instances.forEach((instance) => savedAssetIds.add(instance.assetId))
     const savedSnapshot = {
       ...sceneFile.scene,
       assets: projectRef.current.assets.filter((asset) => savedAssetIds.has(asset.id)),
@@ -2352,7 +2347,7 @@ function App() {
       if (cancelled) return
       replaceProject(restored, false)
       setRecentMaterialIds(restored.materials.slice(0, 8).map((material) => material.id))
-      setSelectedId(restored.instances[0]?.id ?? sceneEntityParts(restored)[0]?.id ?? '')
+      setSelectedId(sceneEntityParts(restored)[0]?.id ?? '')
       persistenceReadyRef.current = true
       setPersistenceStatus(loaded ? 'saved' : 'offline')
       const savedSignature = sceneContentSignature(normalized)
@@ -2376,7 +2371,7 @@ function App() {
           const restored = normalizeStoredProject(restoreProject(draft.sceneFile))
           replaceProject(restored, false)
           setRecentMaterialIds(restored.materials.slice(0, 8).map((material) => material.id))
-          setSelectedId(restored.instances[0]?.id ?? sceneEntityParts(restored)[0]?.id ?? '')
+          setSelectedId(sceneEntityParts(restored)[0]?.id ?? '')
           persistenceReadyRef.current = true
           setPersistenceStatus('offline')
           // There is no reliable saved baseline if the local scene store is
@@ -4418,7 +4413,7 @@ function App() {
     const normalized = normalizeStoredProject(withLocalTemplates)
     replaceProject(normalized, false)
     setRecentMaterialIds(normalized.materials.slice(0, 8).map((material) => material.id))
-    setSelectedId(normalized.instances[0]?.id ?? sceneEntityParts(normalized)[0]?.id ?? '')
+    setSelectedId(sceneEntityParts(normalized)[0]?.id ?? '')
     setEditEntityId(null)
     setCheckedTreePartIds([])
     persistenceReadyRef.current = true
@@ -5660,20 +5655,21 @@ function App() {
           const mirror = { x: instance.mirror?.x ?? false, y: instance.mirror?.y ?? false, z: instance.mirror?.z ?? false, [axis]: !(instance.mirror?.[axis] ?? false) }
           const mirrored = { ...instance, mirror }
           const asset = assetMap.get(instance.assetId)
-          // The pivot is a persistent world-space anchor. Recomputing it from
-          // the already transformed instance changes the coordinate frame on
-          // every operation, which is why a second mirror/rotation could
-          // produce an invalid preview or appear to do nothing. Initialize it
-          // only for legacy instances that do not have one yet.
+          // Rebuild the pivot from the effective asset every time. Persisted
+          // pivots can predate the discrete lattice rules (or belong to a
+          // geometry version that was later edited). Reusing one of those
+          // values makes a quarter turn round different source cells onto the
+          // same destination cell. The helper is deterministic and uses the
+          // mirrored geometry, so repeated transforms remain stable.
           return asset
-            ? { ...mirrored, rotationPivot: instance.rotationPivot ?? instanceRotationPivot(instance, asset) }
+            ? { ...mirrored, rotationPivot: instanceRotationPivot(mirrored, asset) }
             : mirrored
         }
         const key = axis === 'x' ? 'rotationX' : axis === 'y' ? 'rotationZ' : 'rotationY'
         const asset = assetMap.get(instance.assetId)
         const rotated = { ...instance, [key]: ((instance[key] ?? 0) + degrees) % 360 }
         return asset
-          ? { ...rotated, rotationPivot: instance.rotationPivot ?? instanceRotationPivot(instance, asset) }
+          ? { ...rotated, rotationPivot: instanceRotationPivot(rotated, asset) }
           : rotated
       })
       : sourceProject.instances
@@ -9423,6 +9419,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       const baseInstance: SceneInstance = incrementalAdds ? { ...instance, overrides: [] } : instance
       const renderSignature = sceneInstanceRenderSignature(baseInstance)
       const geometrySignature = sceneInstanceGeometrySignature(baseInstance)
+      const normalizedPivot = normalizeInstanceRotationPivot(instance)
       const existing = existingAssetGroups.get(instance.id)
       const canReuseGeometry = existing
         && existing.userData.assetRef === asset
@@ -9431,7 +9428,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
         ? existing
         : existing && existing.userData.renderSignature === renderSignature && existing.userData.assetRef === asset
           ? existing
-          : buildAssetGroup(renderAsset, materialMap, incrementalAdds ? [] : instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ, true, `asset:${assetGreedyCacheToken(asset)}:${renderSignature}`, instance.rotationPivot)
+          : buildAssetGroup(renderAsset, materialMap, incrementalAdds ? [] : instance.overrides, instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ, true, `asset:${assetGreedyCacheToken(asset)}:${renderSignature}`, normalizedPivot)
       if (instanceGroup !== existing) {
         // A large imported asset is built by the chunk worker. Keep the old
         // group visible until every replacement mesh is ready; removing it
@@ -9467,13 +9464,13 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
         }
       }
       retainedAssetIds.add(instance.id)
-      const pivot = instance.rotationPivot ?? { x: 0, y: 0, z: 0 }
+      const pivot = normalizedPivot
       instanceGroup.position.copy(toSceneWorld(instance.x + pivot.x, (instance.y ?? 0) + pivot.y, instance.z + pivot.z))
       instanceGroup.userData.instanceId = instance.id
       instanceGroup.userData.renderSignature = renderSignature
       instanceGroup.userData.geometrySignature = geometrySignature
       instanceGroup.userData.assetRef = asset
-      syncAssetAdditionsOverlay(instanceGroup, renderAsset, materialMap, incrementalAdds ?? [], instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ, instance.rotationPivot)
+      syncAssetAdditionsOverlay(instanceGroup, renderAsset, materialMap, incrementalAdds ?? [], instance.partOffsets, instance.rotation, instance.colorOverride, instance.mirror, instance.rotationX, instance.rotationY, instance.rotationZ, pivot)
       syncAssetPartOffsets(instanceGroup, instance.partOffsets, instance.mirror)
       instanceGroup.traverse((object) => {
         object.userData.instanceId = instance.id
@@ -9662,7 +9659,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       // moves the rendered model by half of its height/ground extent after a
       // rotation, while the cached selection outline still uses the pivoted
       // coordinates and appears to remain in the old position.
-      const pivot = instance.rotationPivot ?? { x: 0, y: 0, z: 0 }
+      const pivot = normalizeInstanceRotationPivot(instance)
       instanceGroup.position.copy(toSceneWorld(instance.x + pivot.x, (instance.y ?? 0) + pivot.y, instance.z + pivot.z))
       syncAssetPartOffsets(instanceGroup, instance.partOffsets, instance.mirror)
     })
