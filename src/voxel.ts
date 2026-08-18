@@ -1055,6 +1055,27 @@ type SceneEntityPartsCache = {
   customVoxelOwnerCache: WeakMap<object, string>
 }
 
+export type SceneEntityPartsOptions = {
+  /**
+   * Build the result with a private cache. Preview/candidate projects use this
+   * so they can never mutate or reuse the live scene's lazy part topology.
+   */
+  isolated?: boolean
+}
+
+function createSceneEntityPartsCache(): SceneEntityPartsCache {
+  return {
+    assetsRef: null,
+    assembliesRef: null,
+    assemblySignature: '',
+    assetParts: new Map(),
+    customVoxelsRef: null,
+    customVoxelLength: 0,
+    customGroups: new Map(),
+    customVoxelOwnerCache: new WeakMap(),
+  }
+}
+
 type AssemblyPathResolver = {
   signature: string
   paths: Map<string, string[]>
@@ -1065,16 +1086,7 @@ type AssemblyPathResolver = {
 // occupancy index. Keep the cache independent from the project root and the
 // instances array: a transform-only commit creates a new instances array, but
 // all unaffected instance resolutions remain valid and can be reused.
-const sceneEntityPartsCache: SceneEntityPartsCache = {
-  assetsRef: null,
-  assembliesRef: null,
-  assemblySignature: '',
-  assetParts: new Map(),
-  customVoxelsRef: null,
-  customVoxelLength: 0,
-  customGroups: new Map(),
-  customVoxelOwnerCache: new WeakMap(),
-}
+const sceneEntityPartsCache = createSceneEntityPartsCache()
 
 // Transform-only scene updates replace the project root and instances array,
 // but the asset catalog and assembly tree remain referentially stable. Keep
@@ -1229,9 +1241,9 @@ function sameSceneOffset(left: { x: number; y: number; z: number } | undefined, 
   return (left?.x ?? 0) === right.x && (left?.y ?? 0) === right.y && (left?.z ?? 0) === right.z
 }
 
-export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
+export function sceneEntityParts(project: ProjectState, options: SceneEntityPartsOptions = {}): SceneEntityPart[] {
   const instances = project.instances
-  const cache = sceneEntityPartsCache
+  const cache = options.isolated ? createSceneEntityPartsCache() : sceneEntityPartsCache
 
   let assetMap = assetMapCache.get(project.assets)
   if (!assetMap) {

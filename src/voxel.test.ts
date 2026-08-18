@@ -101,6 +101,47 @@ describe('莫测造境体素核心数据', () => {
     expect(secondParts.find((part) => part.id === stablePart.id)?.voxels).toBe(stablePart.voxels)
   })
 
+  it('isolates transform candidate parts from the live scene cache', () => {
+    const project = makeDefaultProject()
+    const liveParts = sceneEntityParts(project)
+    const livePart = liveParts.find((part) => part.kind === 'asset')!
+    const candidateProject = {
+      ...project,
+      instances: project.instances.map((instance) => instance.id === livePart.instanceId
+        ? { ...instance, x: instance.x + 2 }
+        : instance),
+    }
+    const candidateParts = sceneEntityParts(candidateProject, { isolated: true })
+    const candidatePart = candidateParts.find((part) => part.id === livePart.id)!
+    expect(scenePartVoxels(livePart)[0].x).not.toBe(scenePartVoxels(candidatePart)[0].x)
+    // A candidate preview must not make the next live-scene read resolve to
+    // the candidate's lazy scene offset.
+    expect(scenePartVoxels(sceneEntityParts(project).find((part) => part.id === livePart.id)!)[0].x).toBe(scenePartVoxels(livePart)[0].x)
+  })
+
+  it('resolves each transform candidate from the current instance parameters', () => {
+    const project = makeDefaultProject()
+    const original = project.instances[0]
+    const asset = project.assets.find((item) => item.id === original.assetId)!
+    const keys = (candidate: typeof original) => sceneEntityParts({
+      ...project,
+      instances: project.instances.map((item) => item.id === candidate.id ? candidate : item),
+    }, { isolated: true })
+      .filter((part) => part.instanceId === candidate.id)
+      .flatMap((part) => scenePartVoxels(part))
+      .map(({ x, y, z }) => `${x},${y},${z}`)
+      .sort()
+      .join('|')
+    const pivot = instanceRotationPivot(original, asset)
+    const rotateX = { ...original, rotationX: 90, rotationPivot: pivot }
+    const rotateZ = { ...original, rotationZ: 90, rotationPivot: pivot }
+    const mirrorX = { ...original, mirror: { x: true, y: false, z: false }, rotationPivot: pivot }
+    expect(keys(rotateX)).not.toBe(keys(original))
+    expect(keys(rotateZ)).not.toBe(keys(original))
+    expect(keys(mirrorX)).not.toBe(keys(original))
+    expect(keys(rotateX)).not.toBe(keys(rotateZ))
+  })
+
   it('carries the enlarged entity cell-render policy with its resolved scene part', () => {
     const project = makeDefaultProject()
     const voxels = [

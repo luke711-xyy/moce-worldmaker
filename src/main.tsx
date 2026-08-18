@@ -157,6 +157,8 @@ type CopyPreviewState = {
 }
 
 type DiscreteTransformPreviewState = {
+  /** Monotonic transaction id. A new preview must always rebuild the viewport. */
+  revision: number
   mode: 'mirror' | 'rotate'
   axis: SceneTransformAxis
   degrees: 90 | 180 | 270
@@ -1394,9 +1396,24 @@ function App() {
   // never read a callback's render-time copy after a memoized panel or a
   // queued viewport update has become stale.
   const transformPreviewRef = useRef<DiscreteTransformPreviewState | null>(null)
+  const transformPreviewRevisionRef = useRef(0)
   const publishTransformPreview = (preview: DiscreteTransformPreviewState | null) => {
-    transformPreviewRef.current = preview
-    setTransformPreview(preview)
+    if (!preview) {
+      transformPreviewRef.current = null
+      setTransformPreview(null)
+      return
+    }
+    const revision = ++transformPreviewRevisionRef.current
+    // Give both React and the imperative renderer a fresh transaction identity.
+    // The asset is also cloned so no geometry/material cache can accidentally
+    // treat a later axis/angle choice as the first candidate.
+    const nextPreview: DiscreteTransformPreviewState = {
+      ...preview,
+      revision,
+      asset: { ...preview.asset, id: `transform-preview-${revision}` },
+    }
+    transformPreviewRef.current = nextPreview
+    setTransformPreview(nextPreview)
   }
   const cancelTransformPreview = () => publishTransformPreview(null)
   const [colorPreview, setColorPreview] = useState<ColorPreviewState | null>(null)
@@ -1674,6 +1691,42 @@ function App() {
     checkedTreePartIds: string[]
   }>({ parts: [], selectedId: '', checkedTreePartIds: [] })
   transformSelectionRef.current = { parts: selectedEntityParts, selectedId, selectedScenePart, checkedTreePartIds }
+
+  /**
+   * Resolve the current transform target from semantic selection identity.
+   *
+   * The inspector can retain a callback across an interaction while the
+   * project ref has already advanced (for example after the previous
+   * transform was committed). Reusing the old SceneEntityPart objects in
+   * that situation makes the next preview start from the first transaction's
+   * voxel snapshot. IDs and instance/assembly ownership are stable; the
+   * effective voxel arrays are not, so rebuild the parts from the current
+   * project every time a transform preview starts.
+   */
+  const resolveCurrentTransformParts = (sourceProject: ProjectState): SceneEntityPart[] => {
+    const snapshot = transformSelectionRef.current
+    if (!snapshot.parts.length) return []
+    const currentParts = sceneEntityParts(sourceProject, { isolated: true })
+    const selectedPartIds = new Set(snapshot.parts.map((part) => part.id))
+    const selectedInstanceIds = new Set(snapshot.parts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
+    const selectedCustomIds = new Set(snapshot.parts.filter((part) => part.kind === 'custom').map((part) => part.partId))
+    const selectedAssemblyIds = new Set<string>()
+    snapshot.checkedTreePartIds
+      .filter((id) => id.startsWith('assembly:'))
+      .forEach((id) => selectedAssemblyIds.add(id.slice('assembly:'.length)))
+    if (snapshot.selectedId.startsWith('assembly:')) selectedAssemblyIds.add(snapshot.selectedId.slice('assembly:'.length))
+    snapshot.parts.forEach((part) => (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).forEach((id) => selectedAssemblyIds.add(id)))
+    const resolved = currentParts.filter((part) =>
+      selectedPartIds.has(part.id)
+      || Boolean(part.instanceId && selectedInstanceIds.has(part.instanceId))
+      || (part.kind === 'custom' && selectedCustomIds.has(part.partId))
+      || (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).some((id) => selectedAssemblyIds.has(id)),
+    )
+    // If the scene was replaced between pointer/inspector events, do not
+    // manufacture a target from unrelated parts. Returning an empty list
+    // lets the caller show the normal "select an entity" message.
+    return resolved
+  }
   // Keep selection identity stable across camera/zoom-only App renders. The
   // viewport uses this array as an effect dependency; rebuilding it inline in
   // JSX made every zoom ruler update rerun the scene-wide highlight pass.
@@ -5598,7 +5651,7 @@ function App() {
   const resolveDiscreteTransformSelection = (sourceProject: ProjectState, parts: SceneEntityPart[]): DiscreteTransformSelection => {
     const requestedPartIds = new Set(parts.map((part) => part.id))
     const requestedInstanceIds = new Set(parts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
-    const resolvedParts = sceneEntityParts(sourceProject).filter((part) =>
+    const resolvedParts = sceneEntityParts(sourceProject, { isolated: true }).filter((part) =>
       requestedPartIds.has(part.id) || Boolean(part.instanceId && requestedInstanceIds.has(part.instanceId)),
     )
     return {
@@ -5609,7 +5662,7 @@ function App() {
   }
 
   const transformPartsForSelection = (sourceProject: ProjectState, selection: DiscreteTransformSelection): SceneEntityPart[] => {
-    return sceneEntityParts(sourceProject).filter((part) =>
+    return sceneEntityParts(sourceProject, { isolated: true }).filter((part) =>
       selection.sourcePartIds.has(part.id)
       || Boolean(part.instanceId && selection.instanceIds.has(part.instanceId))
       || (part.kind === 'custom' && selection.customIds.has(part.partId)),
@@ -5703,8 +5756,19 @@ function App() {
     if (!candidateProject) return null
     const selection = resolveDiscreteTransformSelection(sourceProject, parts)
     const sourcePartIds = selection.sourcePartIds
-    const candidateParts = transformPartsForSelection(candidateProject, selection)
-    const candidateVoxels = candidateParts.flatMap((part) => scenePartVoxels(part))
+    // Materialize the candidate into an independent scene-space snapshot
+    // before building the preview.  Transform candidates may contain lazy
+    // instance offsets; passing those parts through the normal scene cache
+    // lets a later preview reuse the first candidate's canonical voxel array
+    // and offset.  A preview is a transaction, so it must never share either
+    // with the live scene or with the previous preview.
+    const candidateParts = transformPartsForSelection(candidateProject, selection).map((part) => ({
+      ...part,
+      voxels: scenePartVoxels(part).map((voxel) => ({ ...voxel })),
+      sceneOffset: undefined,
+      partSceneOffset: undefined,
+    }))
+    const candidateVoxels = candidateParts.flatMap((part) => part.voxels)
     if (!candidateVoxels.length) return null
     const bounds = sceneBoundsForProject(sourceProject)
     let invalidReason: DiscreteTransformPreviewState['invalidReason']
@@ -5716,7 +5780,7 @@ function App() {
     // a valid second mirror/rotation look like a collision with the object
     // itself. The exact snapshot check is cheap enough at button/preview
     // cadence and is the single source of truth for this operation.
-    else if (shapeBatchCollidesWithScene(candidateVoxels, sceneEntityParts(sourceProject), sourcePartIds)) invalidReason = 'collision'
+    else if (shapeBatchCollidesWithScene(candidateVoxels, sceneEntityParts(sourceProject, { isolated: true }), sourcePartIds)) invalidReason = 'collision'
     const previewAsset = makeAssetFromSceneParts('transform-preview', mode === 'mirror' ? '镜像预览' : '旋转预览', candidateParts, '#6c827d', '#d2a354', (voxel, part) => scenePartVoxelDisplayColor(candidateProject, part, voxel))
     const previewBounds = voxelBounds(previewAsset.voxels)!
     const origin = {
@@ -5725,6 +5789,7 @@ function App() {
       z: (Math.min(...candidateVoxels.map((voxel) => voxel.z)) - previewBounds.min.z + previewAsset.depth / 2) * VOXEL_WORLD_SIZE,
     }
     return {
+      revision: 0,
       mode,
       axis,
       degrees,
@@ -5760,15 +5825,15 @@ function App() {
     return true
   }
 
-  const selectedContainsLockedEntity = () => transformSelectionRef.current.parts.some((part) => scenePartIsLocked(projectRef.current, part))
+  const selectedContainsLockedEntity = (parts = transformSelectionRef.current.parts) => parts.some((part) => scenePartIsLocked(projectRef.current, part))
 
   const startDiscreteTransformPreview = (mode: 'mirror' | 'rotate', axis: SceneTransformAxis, degrees: 90 | 180 | 270 = 90) => {
-    const currentSelection = [...transformSelectionRef.current.parts]
+    const currentSelection = resolveCurrentTransformParts(projectRef.current)
     if (!currentSelection.length) {
       setNotice(`请先选择要${mode === 'mirror' ? '镜像' : '旋转'}的实体`)
       return
     }
-    if (selectedContainsLockedEntity()) {
+    if (selectedContainsLockedEntity(currentSelection)) {
       setNotice(`选中的实体中包含已固定实体 · 请先取消固定后再${mode === 'mirror' ? '镜像' : '旋转'}`)
       return
     }
@@ -6065,7 +6130,7 @@ function App() {
               </div>}
             </div>
           </div>
-          <MemoizedVoxelViewport project={project} authoritativeProjectRef={projectRef} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectionRefreshKey={selectionRefreshKey} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} geometryApplying={geometryApplying} historyResetKey={historyRevision} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} voxelBrushShape={voxelBrushShape} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} transformPreview={transformPreview} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSyncSceneOccupancyTransforms={stableViewportSyncOccupancyTransforms} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onCancelScenePartsMove={stableViewportCancelMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
+        <MemoizedVoxelViewport project={project} authoritativeProjectRef={projectRef} sceneParts={sceneParts} occupancyIndex={sceneOccupancyRef.current} assetTransformCache={assetTransformCacheRef.current!} selectedId={selectedId} selectionRefreshKey={selectionRefreshKey} selectedPartIds={selectedEntityPartIds} checkedPartIds={checkedTreePartIds} lockedPartIds={lockedPartIds} editEntityId={editEntityId} colorPreview={colorPreview} geometryPreview={geometryPreview} geometryApplying={geometryApplying} historyResetKey={historyRevision} tool={tool} toolboxOpen={toolboxOpen} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} voxelBrushShape={voxelBrushShape} activeMaterial={activeMaterial} materials={recentMaterials} dragAxis={dragAxis} placementAsset={pendingEntityImport?.asset ?? project.assets.find((asset) => asset.id === placementAssetId) ?? null} copyPreview={copyPreview} transformPreview={transformPreview} transformPreviewRevision={transformPreview?.revision ?? 0} viewMode={viewMode} showGrid={showGrid} showBoundary={showBoundary} zoomLevel={zoomLevel} onZoomChange={stableViewportZoomChange} onCameraApiChange={setCameraControlApi} onInteractionChange={stableViewportInteractionChange} onRaycastVoxel={stableViewportRaycast} onSyncSceneOccupancyTransforms={stableViewportSyncOccupancyTransforms} onSelect={stableViewportSelect} onSelectMultiple={stableViewportSelectMultiple} onCancelPendingEntityOperation={stableViewportCancelPending} onSelectMaterial={stableViewportSelectMaterial} onReplaceMaterial={stableViewportReplaceMaterial} onAddVoxel={stableViewportAddVoxel} onRemoveVoxel={stableViewportRemoveVoxel} onRemoveVoxels={stableViewportRemoveVoxels} onEditInstanceVoxel={stableViewportEditInstanceVoxel} onEditInstanceVoxels={stableViewportEditInstanceVoxels} onApplyVoxelBatch={stableViewportApplyVoxelBatch} onPreviewScenePartsMove={stableViewportPreviewMove} onCommitScenePartsMove={stableViewportCommitMove} onCancelScenePartsMove={stableViewportCancelMove} onPreviewPlacement={stableViewportPreviewPlacement} onPlaceAsset={stableViewportPlaceAsset} onNotice={stableViewportNotice} onExitEditMode={stableViewportExitEdit} onEnterEditMode={stableViewportEnterEdit} onRename={stableViewportRename} onBatchOperation={stableViewportBatchOperation}>{sceneTreeOverlay}</MemoizedVoxelViewport>
           <ToolboxPopover open={toolboxOpen} onClose={() => setToolboxOpen(false)} tool={tool} drawingPlane={drawingPlane} drawOperation={drawOperation} brushSize={brushSize} voxelBrushShape={voxelBrushShape} onToolChange={changeTool} onPlaneChange={setDrawingPlane} onOperationChange={setDrawOperation} onBrushSizeChange={setBrushSize} onBrushShapeChange={setVoxelBrushShape} />
           <ReferenceImagePopover open={referenceImageOpen} image={referenceImage} index={referenceImageIndex} count={referenceImages.length} onPrevious={() => setReferenceImageIndex((current) => (current - 1 + referenceImages.length) % referenceImages.length)} onNext={() => setReferenceImageIndex((current) => (current + 1) % referenceImages.length)} onClose={() => setReferenceImageOpen(false)} onOpen={openReferenceImagePicker} />
           <div className="viewport-footer">
@@ -6907,18 +6972,27 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
   const [mirrorAxis, setMirrorAxis] = useState<'x' | 'y' | 'z'>('x')
   const [rotateAxis, setRotateAxis] = useState<'x' | 'y' | 'z'>('z')
   const [rotateDegrees, setRotateDegrees] = useState<90 | 180 | 270>(90)
+  // Pointer clicks can arrive before React has committed the render caused by
+  // changing an axis/angle button. Keep the operation controls in refs so a
+  // preview always uses the value the user most recently selected.
+  const mirrorAxisRef = useRef<'x' | 'y' | 'z'>('x')
+  const rotateAxisRef = useRef<'x' | 'y' | 'z'>('z')
+  const rotateDegreesRef = useRef<90 | 180 | 270>(90)
   const selectedPartsKey = selectedParts.map((part) => part.id).join('|')
   const mirrorPreviewActive = transformPreview?.mode === 'mirror'
   const rotatePreviewActive = transformPreview?.mode === 'rotate'
   const chooseMirrorAxis = (axis: 'x' | 'y' | 'z') => {
+    mirrorAxisRef.current = axis
     setMirrorAxis(axis)
     if (transformPreview) onCancelTransform()
   }
   const chooseRotateAxis = (axis: 'x' | 'y' | 'z') => {
+    rotateAxisRef.current = axis
     setRotateAxis(axis)
     if (transformPreview) onCancelTransform()
   }
   const chooseRotateDegrees = (degrees: 90 | 180 | 270) => {
+    rotateDegreesRef.current = degrees
     setRotateDegrees(degrees)
     if (transformPreview) onCancelTransform()
   }
@@ -6929,6 +7003,9 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
     setMirrorAxis('x')
     setRotateAxis('z')
     setRotateDegrees(90)
+    mirrorAxisRef.current = 'x'
+    rotateAxisRef.current = 'z'
+    rotateDegreesRef.current = 90
   }, [selectedPartsKey, selectedTransformSignature])
   const previewKey = previewPartsSignature(selectedParts)
   const geometryResultVoxels = geometryPreview?.result?.voxels
@@ -6959,8 +7036,8 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
       <div className="entity-actions">
         <div className="entity-transform-operation copy-entity-row"><span className="copy-entity-label">复制实体</span><div className="copy-count-choice"><button disabled={Boolean(copyPreview)} onClick={() => setCopyCount((value) => Math.max(1, value - 1))} title="减少复制数量">−</button><span className="copy-entity-count">{copyPreview?.count ?? copyCount}</span><button disabled={Boolean(copyPreview)} onClick={() => setCopyCount((value) => Math.min(99, value + 1))} title="增加复制数量">＋</button></div>{copyPreview ? <button className="operation-confirm copy-confirm" onClick={onCancelDuplicate}>取消</button> : <button className="operation-confirm copy-confirm" onClick={() => onDuplicate(copyCount)}>预览</button>}</div>
         {copyPreview && <div className="copy-preview-panel"><div className="copy-preview-title">复制方向</div><div className="copy-preview-axis">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={copyPreview.axis === axis ? 'active' : ''} onClick={() => onChangeCopyDirection(axis, copyPreview.sign)}>{axis.toUpperCase()}</button>)}<button className={copyPreview.sign === 1 ? 'active' : ''} onClick={() => onChangeCopyDirection(copyPreview.axis, 1)}>正向 +</button><button className={copyPreview.sign === -1 ? 'active' : ''} onClick={() => onChangeCopyDirection(copyPreview.axis, -1)}>负向 −</button></div><div className="copy-preview-gap"><span>实体间隔</span><button disabled={copyPreview.gap <= 0} onClick={() => onChangeCopyGap(copyPreview.gap - 1)}>−</button><strong>{copyPreview.gap}</strong><button disabled={copyPreview.gap >= 99} onClick={() => onChangeCopyGap(copyPreview.gap + 1)}>＋</button><em>体素</em></div><div className={`copy-preview-status ${copyPreview.valid ? 'valid' : 'invalid'}`}>{copyPreview.valid ? `预览有效 · 将生成 ${copyPreview.count} 个复制实体` : copyPreview.invalidReason === 'collision' ? '预览与已有实体重叠，无法生成' : '预览超出场景边界，无法生成'}</div><button className="operation-confirm copy-preview-generate" onClick={onConfirmDuplicate}>生成复制实体</button></div>}
-        <div className="entity-transform-operation"><span>镜像实体</span><div className="axis-choice">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={mirrorAxis === axis ? 'active' : ''} onClick={() => chooseMirrorAxis(axis)}>{axis.toUpperCase()}</button>)}</div><button className="operation-confirm" disabled={mirrorPreviewActive} onClick={() => onMirror(mirrorAxis)}>{mirrorPreviewActive ? '预览中' : '预览'}</button></div>
-        <div className="entity-transform-operation"><span>旋转实体</span><div className="axis-choice">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={rotateAxis === axis ? 'active' : ''} onClick={() => chooseRotateAxis(axis)}>{axis.toUpperCase()}</button>)}</div><div className="degree-choice">{([90, 180, 270] as const).map((degrees) => <button key={degrees} className={rotateDegrees === degrees ? 'active' : ''} onClick={() => chooseRotateDegrees(degrees)}>{degrees}°</button>)}</div><button className="operation-confirm" disabled={rotatePreviewActive} onClick={() => onRotate(rotateAxis, rotateDegrees)}>{rotatePreviewActive ? '预览中' : '预览'}</button></div>
+        <div className="entity-transform-operation"><span>镜像实体</span><div className="axis-choice">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={mirrorAxis === axis ? 'active' : ''} onClick={() => chooseMirrorAxis(axis)}>{axis.toUpperCase()}</button>)}</div><button className="operation-confirm" disabled={mirrorPreviewActive} onClick={() => onMirror(mirrorAxisRef.current)}>{mirrorPreviewActive ? '预览中' : '预览'}</button></div>
+        <div className="entity-transform-operation"><span>旋转实体</span><div className="axis-choice">{(['x', 'y', 'z'] as const).map((axis) => <button key={axis} className={rotateAxis === axis ? 'active' : ''} onClick={() => chooseRotateAxis(axis)}>{axis.toUpperCase()}</button>)}</div><div className="degree-choice">{([90, 180, 270] as const).map((degrees) => <button key={degrees} className={rotateDegrees === degrees ? 'active' : ''} onClick={() => chooseRotateDegrees(degrees)}>{degrees}°</button>)}</div><button className="operation-confirm" disabled={rotatePreviewActive} onClick={() => onRotate(rotateAxisRef.current, rotateDegreesRef.current)}>{rotatePreviewActive ? '预览中' : '预览'}</button></div>
         {transformPreview && <div className="copy-preview-panel transform-preview-panel"><div className="copy-preview-title">{transformPreview.mode === 'mirror' ? '镜像预览' : '旋转预览'}</div><div className={`copy-preview-status ${transformPreview.valid ? 'valid' : 'invalid'}`}>{transformPreview.valid ? '预览有效 · 可以应用' : transformPreview.invalidReason === 'collision' ? '预览与已有实体重叠，无法应用' : '预览超出场景边界，无法应用'}</div><div className="geometry-preview-actions"><button onClick={onCancelTransform}>取消</button><button className="operation-confirm" disabled={!transformPreview.valid} onClick={onConfirmTransform}>确认应用</button></div></div>}
         {!geometryPreview && !transformPreview && <>
           <div className="entity-transform-operation"><span>去除内部</span><button className="operation-confirm" disabled={!selectedParts.length} onClick={onStartShell}>预览</button></div>
@@ -7026,7 +7103,10 @@ function sameScaleOptions(left: InspectorProps['scaleOptions'], right: Inspector
 // onMirror/onRotate/onConfirmTransform handlers and make every later preview
 // reuse the first axis/angle. The panel is small compared with the viewport;
 // correctness is more important than saving this render.
-const MemoizedInspector = React.memo(Inspector)
+// Transform previews are transactional state.  Do not memoize this panel:
+// keeping a stale Inspector render can leave the first mirror/rotation
+// candidate visible while the parent has already published a new one.
+const MemoizedInspector = Inspector
 
 function sliceCoordinates(plane: SlicePlane, voxel: SliceVoxel): { u: number; v: number } {
   if (plane === 'xy') return { u: voxel.x, v: voxel.y }
@@ -8332,7 +8412,7 @@ function ViewportCameraControls({ onRotate, onView, onReset, showJoystick = true
   </div>
 }
 
-function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancyIndex, assetTransformCache, selectedId, selectionRefreshKey, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, geometryApplying, historyResetKey, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, voxelBrushShape, activeMaterial, materials, dragAxis, placementAsset, copyPreview, transformPreview, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSyncSceneOccupancyTransforms, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onCancelScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; authoritativeProjectRef: React.MutableRefObject<ProjectState>; sceneParts: SceneEntityPart[]; occupancyIndex: SceneOccupancyIndex | null; assetTransformCache: AssetTransformCache; selectedId: string; selectionRefreshKey: number; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; geometryApplying: boolean; historyResetKey: number; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; voxelBrushShape: VoxelShape; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; transformPreview: DiscreteTransformPreviewState | null; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSyncSceneOccupancyTransforms: () => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCancelScenePartsMove: () => void; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
+function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancyIndex, assetTransformCache, selectedId, selectionRefreshKey, selectedPartIds, checkedPartIds, lockedPartIds, editEntityId, colorPreview, geometryPreview, geometryApplying, historyResetKey, tool, toolboxOpen, drawingPlane, drawOperation, brushSize, voxelBrushShape, activeMaterial, materials, dragAxis, placementAsset, copyPreview, transformPreview, transformPreviewRevision, viewMode, showGrid, showBoundary, zoomLevel, onZoomChange, onCameraApiChange, onInteractionChange, onRaycastVoxel, onSyncSceneOccupancyTransforms, onSelect, onSelectMultiple, onCancelPendingEntityOperation, onSelectMaterial, onReplaceMaterial, onAddVoxel, onRemoveVoxel, onRemoveVoxels, onEditInstanceVoxel, onEditInstanceVoxels, onApplyVoxelBatch, onPreviewScenePartsMove, onCommitScenePartsMove, onCancelScenePartsMove, onPreviewPlacement, onPlaceAsset, onNotice, onExitEditMode, onEnterEditMode, onRename, onBatchOperation, children }: { project: ProjectState; authoritativeProjectRef: React.MutableRefObject<ProjectState>; sceneParts: SceneEntityPart[]; occupancyIndex: SceneOccupancyIndex | null; assetTransformCache: AssetTransformCache; selectedId: string; selectionRefreshKey: number; selectedPartIds: string[]; checkedPartIds: string[]; lockedPartIds: Set<string>; editEntityId: string | null; colorPreview: ColorPreviewState | null; geometryPreview: GeometryPreviewState | null; geometryApplying: boolean; historyResetKey: number; tool: Tool; toolboxOpen: boolean; drawingPlane: DrawingPlane; drawOperation: DrawOperation; brushSize: number; voxelBrushShape: VoxelShape; activeMaterial: string; materials: Material[]; dragAxis: 'horizontal' | 'vertical'; placementAsset: VoxelAsset | null; copyPreview: CopyPreviewState | null; transformPreview: DiscreteTransformPreviewState | null; transformPreviewRevision: number; viewMode: '正交' | '透视'; showGrid: boolean; showBoundary: boolean; zoomLevel: number; onZoomChange: (value: number) => void; onCameraApiChange: (api: CameraControlApi | null) => void; onInteractionChange: (active: boolean) => void; onRaycastVoxel: (origin: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => SceneVoxelRayHit | null; onSyncSceneOccupancyTransforms: () => void; onSelect: (id: string) => void; onSelectMultiple: (partIds: string[], additive?: boolean) => void; onCancelPendingEntityOperation: () => void; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void; onAddVoxel: (voxel: Voxel) => void; onRemoveVoxel: (voxel: Voxel) => void; onRemoveVoxels: (voxels: Voxel[]) => void; onEditInstanceVoxel: (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => void; onEditInstanceVoxels: (instanceId: string, voxels: Voxel[], mode: VoxelOverride['mode']) => void; onApplyVoxelBatch: (voxels: Voxel[], operation: DrawOperation) => void; onPreviewScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCommitScenePartsMove: (parts: SceneEntityPart[], deltaX: number, deltaY: number, deltaZ: number) => GridMoveResult; onCancelScenePartsMove: () => void; onPreviewPlacement: (assetId: string, x: number, z: number) => PlacementPreview | null; onPlaceAsset: (assetId: string, x: number, z: number) => void; onNotice: (message: string) => void; onExitEditMode: () => void; onEnterEditMode: (entityId: string) => void; onRename: (targetId: string, assemblyId?: string) => void; onBatchOperation: (partIds: string[], operation: 'delete' | 'lock' | 'assemble') => void; children?: React.ReactNode }) {
   const mountRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
   const cameraRef = useRef<THREE.Camera | null>(null)
@@ -10043,7 +10123,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     })
     root.add(preview)
     invalidateRenderRef.current(160)
-  }, [transformPreview, materialMap])
+  }, [transformPreview, transformPreviewRevision, materialMap])
 
   const showPlacementPreview = (previewState: PlacementPreview | null) => {
     const preview = placementGroupRef.current?.children[0]
