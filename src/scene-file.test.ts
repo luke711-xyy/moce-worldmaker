@@ -90,10 +90,21 @@ describe('莫测造境场景文件', () => {
     expect(sceneContentSignature(project)).toBe(sceneContentSignature(restoreProject(parsed)))
   })
 
-  it('invalidates a cached signature when a transaction appends a voxel in place', () => {
+  it('detects an appended voxel in place', () => {
     const project = makeDefaultProject()
     const before = sceneContentSignature(project)
     project.customVoxels.push({ x: 9, y: 2, z: 1, materialId: '#c96043', entityId: 'custom-append' })
+    expect(sceneContentSignature(project)).not.toBe(before)
+  })
+
+  it('detects same-length voxel replacement in place', () => {
+    const project = makeDefaultProject()
+    project.customVoxels = [
+      { x: 1, y: 2, z: 0, materialId: '#c96043', entityId: 'custom-same-length' },
+      { x: 2, y: 2, z: 0, materialId: '#c96043', entityId: 'custom-same-length' },
+    ]
+    const before = sceneContentSignature(project)
+    project.customVoxels[0] = { ...project.customVoxels[0], x: 8, paintMaterialId: '#ffffff' }
     expect(sceneContentSignature(project)).not.toBe(before)
   })
 })

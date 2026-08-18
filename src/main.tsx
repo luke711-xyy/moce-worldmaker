@@ -761,6 +761,29 @@ function cloneProjectForMutation(source: ProjectState, options: { shareCatalogs?
   }
 }
 
+/**
+ * Make a history-owned snapshot. Scene collections and voxel records are
+ * copied so later batched edits cannot mutate a past/future entry. Large
+ * catalog geometry remains shared because editor operations replace asset
+ * records instead of mutating their voxel arrays in place.
+ */
+function cloneProjectForHistory(source: ProjectState): ProjectState {
+  const snapshot = cloneProjectForMutation(source)
+  snapshot.customVoxels = source.customVoxels.map((voxel) => ({ ...voxel }))
+  snapshot.assets = source.assets.map((asset) => ({
+    ...asset,
+    categoryPath: asset.categoryPath ? [...asset.categoryPath] : undefined,
+    parts: [...asset.parts],
+    assembly: asset.assembly ? {
+      ...asset.assembly,
+      rootIds: asset.assembly.rootIds ? [...asset.assembly.rootIds] : undefined,
+      partNames: asset.assembly.partNames ? { ...asset.assembly.partNames } : undefined,
+      nodes: asset.assembly.nodes.map((node) => ({ ...node, memberKeys: [...node.memberKeys] })),
+    } : undefined,
+  }))
+  return snapshot
+}
+
 function scenePartIsLocked(project: ProjectState, part: SceneEntityPart): boolean {
   const lockedKeys = new Set(project.lockedMemberKeys ?? [])
   if (lockedKeys.has(part.memberKey)) return true
@@ -1175,41 +1198,23 @@ type ProjectHistoryEntry = {
 
 const HISTORY_MAX_ENTRIES = 50
 
-// A drag changes the project root, but usually reuses the same custom-voxel
-// array. Cache the history budget by that immutable collection identity so
-// pointer-up does not rescan the asset catalogue or rebuild legacy instance
-// geometry. Scene instances are a read-only migration input, never part of
-// the live scene budget.
-const historyLimitCache = new WeakMap<ReadonlyArray<Voxel>, number>()
-
 function historyLimitForProject(project: ProjectState): number {
-  const cached = historyLimitCache.get(project.customVoxels)
-  if (cached !== undefined) return cached
   const voxelCount = project.customVoxels.length
-  const limit = voxelCount >= 500_000
+  return voxelCount >= 500_000
     ? 6
     : voxelCount >= 100_000
       ? 12
       : voxelCount >= 25_000
         ? 24
         : HISTORY_MAX_ENTRIES
-  historyLimitCache.set(project.customVoxels, limit)
-  return limit
 }
 
-const historyProjectSignatureCache = new WeakMap<object, string>()
-
 function sameHistoryProject(left: ProjectState, right: ProjectState): boolean {
-  if (left === right) return true
-  const signatureFor = (project: ProjectState) => {
-    const cached = historyProjectSignatureCache.get(project as object)
-    if (cached) return cached
-    const signature = sceneContentSignature(project)
-    historyProjectSignatureCache.set(project as object, signature)
-    return signature
-  }
   try {
-    return signatureFor(left) === signatureFor(right)
+    // Project roots and voxel arrays may be reused by the fast editor paths.
+    // Always inspect current content; object identity is not a correctness
+    // signal for a mutable project.
+    return sceneContentSignature(left) === sceneContentSignature(right)
   } catch {
     // A malformed intermediate project must not be silently treated as a
     // no-op. The normalizer/validator will report it at the actual commit
@@ -1246,6 +1251,13 @@ type VoxelStrokeTransaction = {
   historySelectedId: string
   historyCheckedTreePartIds: string[]
   occupiedCustomSceneKeys: Set<string>
+  /**
+   * Exact scene-space ownership captured at pointer-down. The occupancy index
+   * is deliberately incremental and can still contain the previous React
+   * snapshot for one frame after a model/template is materialized. Editing
+   * must never treat that window as empty space.
+   */
+  customOwnerIdsBySceneKey: Map<string, Set<string>>
   dirtyOwnerIds: Set<string>
   dirtyOwnerRoots: Set<string>
   touchedOwnerIds: Set<string>
@@ -1354,6 +1366,7 @@ function App() {
   const historyEpochRef = useRef(0)
   const [historyRevision, setHistoryRevision] = useState(0)
   const [selectedId, setSelectedId] = useState('inst-chinese')
+  const selectedIdRef = useRef(selectedId)
   // Selection is also an imperative Three.js state.  Re-clicking the same
   // entity must be able to re-assert its outline after an async render batch
   // or a stale visibility toggle has replaced/hidden the previous lines.
@@ -1385,6 +1398,7 @@ function App() {
   const [voxelSizeDraft, setVoxelSizeDraft] = useState<number>(() => makeEmptyProject().voxelSizeMm)
   const [dragAxis, setDragAxis] = useState<'horizontal' | 'vertical'>('horizontal')
   const [editEntityId, setEditEntityId] = useState<string | null>(null)
+  const editEntityIdRef = useRef<string | null>(null)
   const [placementAssetId, setPlacementAssetId] = useState<string | null>(null)
   const [pendingEntityImport, setPendingEntityImport] = useState<PendingEntityImport | null>(null)
   const [zoomLevel, setZoomLevel] = useState(100)
@@ -1474,6 +1488,7 @@ function App() {
   const [assetSidebarCollapsed, setAssetSidebarCollapsed] = useState(false)
   const [expandedAssemblies, setExpandedAssemblies] = useState<Record<string, boolean>>({})
   const [checkedTreePartIds, setCheckedTreePartIds] = useState<string[]>([])
+  const checkedTreePartIdsRef = useRef<string[]>([])
   const [treeContextMenu, setTreeContextMenu] = useState<TreeContextMenuState>(null)
   const [assetContextMenu, setAssetContextMenu] = useState<AssetContextMenuState>(null)
   const [assetCategoryContextMenu, setAssetCategoryContextMenu] = useState<AssetCategoryContextMenuState>(null)
@@ -1481,6 +1496,9 @@ function App() {
   const [assetCategoryPaths, setAssetCategoryPaths] = useState<string[][]>(() => collectAssetCategoryPaths(makeEmptyProject().assets))
   const [assetCategorySave, setAssetCategorySave] = useState<AssetCategorySaveState>(null)
   const [sliceDialogOpen, setSliceDialogOpen] = useState(false)
+  useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
+  useEffect(() => { editEntityIdRef.current = editEntityId }, [editEntityId])
+  useEffect(() => { checkedTreePartIdsRef.current = checkedTreePartIds }, [checkedTreePartIds])
   const persistenceReadyRef = useRef(false)
   const cloudInitialRefreshRef = useRef(false)
   const cloudInitialRefreshCompletedRef = useRef(false)
@@ -1603,11 +1621,14 @@ function App() {
   }
 
   const sceneParts = useMemo(() => sceneEntityParts(project), [project])
-  const makeHistoryEntry = (historyProject: ProjectState): ProjectHistoryEntry => ({
-    project: historyProject,
-    editEntityId,
-    selectedId,
-    checkedTreePartIds: [...checkedTreePartIds],
+  const makeHistoryEntry = (
+    historyProject: ProjectState,
+    metadata: Partial<Omit<ProjectHistoryEntry, 'project'>> = {},
+  ): ProjectHistoryEntry => ({
+    project: cloneProjectForHistory(historyProject),
+    editEntityId: metadata.editEntityId !== undefined ? metadata.editEntityId : editEntityIdRef.current,
+    selectedId: metadata.selectedId !== undefined ? metadata.selectedId : selectedIdRef.current,
+    checkedTreePartIds: metadata.checkedTreePartIds ? [...metadata.checkedTreePartIds] : [...checkedTreePartIdsRef.current],
   })
 
   const recordHistoryBeforeChange = (
@@ -1615,17 +1636,23 @@ function App() {
     after: ProjectState,
     equals: (left: ProjectState, right: ProjectState) => boolean = sameHistoryProject,
   ) => {
+    let changed = true
+    try {
+      changed = !equals(before, after)
+    } catch {
+      changed = true
+    }
+    if (!changed) return false
     const afterEntry: ProjectHistoryEntry = {
-      project: after,
-      editEntityId,
-      selectedId,
-      checkedTreePartIds: [...checkedTreePartIds],
+      ...makeHistoryEntry(after),
     }
     const recorded = recordHistoryTransition(
       historyRef.current,
       makeHistoryEntry(before),
       afterEntry,
-      (left, right) => equals(left.project, right.project),
+      // Content equality was checked before snapshotting. Never compare the
+      // snapshots again by a stale identity/cache while recording them.
+      () => false,
       historyLimitForProject(before),
     )
     if (recorded) historyEpochRef.current += 1
@@ -1976,9 +2003,33 @@ function App() {
     // collections. Keep the previous root as the immutable history snapshot
     // and structurally share the read-only catalogs; clone only collections
     // that the stroke handlers can replace or mutate.
-    const original = projectRef.current
+    // A scene instance is only a legacy persistence representation. Before a
+    // stroke starts, materialize it once so the transaction has exactly the
+    // same scene-space custom-voxel representation as a hand-drawn entity.
+    const original = projectRef.current.instances.length
+      ? normalizeStoredProject(projectRef.current, { normalizeNaming: false })
+      : projectRef.current
+    if (original !== projectRef.current) {
+      projectRef.current = original
+      sceneOccupancyRef.current?.syncParts(sceneEntityParts(original))
+      skipSceneOccupancySyncRef.current = true
+      setProject(original)
+    }
     const draft = cloneProjectForMutation(original, { shareCatalogs: true })
-    const initialParts = sceneEntityParts(projectRef.current)
+    const initialParts = sceneEntityParts(original)
+    const occupiedCustomSceneKeys = new Set<string>()
+    const customOwnerIdsBySceneKey = new Map<string, Set<string>>()
+    initialParts
+      .filter((part) => part.kind === 'custom')
+      .forEach((part) => {
+        scenePartVoxels(part).forEach((voxel) => {
+          const key = sceneVoxelKey(voxel)
+          occupiedCustomSceneKeys.add(key)
+          const owners = customOwnerIdsBySceneKey.get(key) ?? new Set<string>()
+          owners.add(part.id)
+          customOwnerIdsBySceneKey.set(key, owners)
+        })
+      })
     voxelStrokeTransactionRef.current = {
       draft,
       original,
@@ -1988,10 +2039,8 @@ function App() {
       // Build this once at pointer-down. The previous batch path rebuilt a
       // flattened Set of every custom voxel for every animation-frame commit,
       // which made long strokes increasingly expensive as the entity grew.
-      occupiedCustomSceneKeys: new Set(initialParts
-        .filter((part) => part.kind === 'custom')
-        .flatMap((part) => scenePartVoxels(part))
-        .map(sceneVoxelKey)),
+      occupiedCustomSceneKeys,
+      customOwnerIdsBySceneKey,
       dirtyOwnerIds: new Set(),
       dirtyOwnerRoots: new Set(),
       touchedOwnerIds: new Set(),
@@ -2022,18 +2071,19 @@ function App() {
     // collections it can mutate. Avoid the general persistence normalizer's
     // full asset/voxel clone on pointer-up.
     const next = finalizeVoxelStrokeProject(transaction.draft)
-    recordHistoryTransition(
-      historyRef.current,
-      {
-        ...makeHistoryEntry(transaction.original),
-        editEntityId: transaction.historyEditEntityId,
-        selectedId: transaction.historySelectedId,
-        checkedTreePartIds: [...transaction.historyCheckedTreePartIds],
-      },
-      { project: next, editEntityId: editEntityId, selectedId, checkedTreePartIds: [...checkedTreePartIds] },
-      (left, right) => sameHistoryProject(left.project, right.project),
-      historyLimitForProject(transaction.original),
-    )
+    if (!sameHistoryProject(transaction.original, next)) {
+      recordHistoryTransition(
+        historyRef.current,
+        makeHistoryEntry(transaction.original, {
+          editEntityId: transaction.historyEditEntityId,
+          selectedId: transaction.historySelectedId,
+          checkedTreePartIds: transaction.historyCheckedTreePartIds,
+        }),
+        makeHistoryEntry(next),
+        () => false,
+        historyLimitForProject(transaction.original),
+      )
+    }
     // The stroke publishes synchronously on pointer-up, but a transition from
     // an earlier operation may still be queued. Advance the same generation
     // used by move/geometry commits so that an old transition cannot repaint
@@ -2070,6 +2120,15 @@ function App() {
 
   const commitProject = (next: ProjectState, trackHistory = true) => {
     if (geometryApplyingRef.current) return
+    if (!trackHistory) {
+      // Loading/new-scene replacement starts a new history domain. Keeping
+      // entries from the previous scene makes undo/redo restore unrelated
+      // project roots and is the source of several delayed "reappearing"
+      // entities after a later edit.
+      historyRef.current = { past: [], future: [] }
+      historyEpochRef.current += 1
+      setHistoryRevision((value) => value + 1)
+    }
     // updateProject()/replaceProject() already provide an isolated next
     // project. The default storage normalizer would deep-clone it again from
     // normalizeProjectNaming(), which is especially costly for large voxel
@@ -2136,7 +2195,8 @@ function App() {
     // not send it through updateProject(): that path deep-clones the whole
     // project and normalizeStoredProject() then walks every asset and voxel.
     // The project root and mutable scene arrays were prepared by the caller;
-    // history can therefore retain the immutable previous root directly.
+    // history snapshots are cloned at this boundary, so the previous root can
+    // remain shared with the live read-only state.
     recordHistoryBeforeChange(projectRef.current, next)
     // The occupancy index was updated incrementally above. The following
     // sceneParts effect must not sort and rescan the same large result again.
@@ -2568,22 +2628,37 @@ function App() {
   }
 
   const restoreHistoryEntry = (entry: ProjectHistoryEntry, notice: string) => {
-    const currentProject = projectRef.current
-    const currentParts = sceneEntityParts(currentProject)
     // Derived SceneEntityPart arrays are runtime caches. They can be mutated
     // in place by append-only voxel publishing or by lazy transform refreshes,
     // so never retain them in a history entry. Rebuild from the immutable
     // ProjectState snapshot that is actually being restored.
-    const targetParts = sceneEntityParts(entry.project)
-    const changedOwnerIds = changedOccupancyOwnerIds(currentParts, targetParts)
-    if (changedOwnerIds.size) sceneOccupancyRef.current?.syncOwnerParts(targetParts, changedOwnerIds)
+    // Do not make a history entry's own object the live mutable project. A
+    // later fast edit may structurally share nested catalog data, and an
+    // in-place normalizer or renderer refresh must never be able to mutate a
+    // snapshot that is still needed by redo.
+    const restoredProject = cloneProjectForHistory(entry.project)
+    const targetParts = sceneEntityParts(restoredProject)
+    // Undo/redo is a state-domain switch, not an ordinary owner update. A
+    // partial owner sync can leave stale cells from an erased entity (or stale
+    // transformed coordinates) in the occupancy index; those cells then make
+    // later drawing, picking and collision checks disagree with the restored
+    // React project. Rebuild the complete index atomically at this boundary.
+    sceneOccupancyRef.current?.syncParts(targetParts)
     skipSceneOccupancySyncRef.current = true
-    projectRef.current = entry.project
+    // Invalidate worker callbacks and deferred React transitions that were
+    // created before this restore. The epoch is advanced here as well as in
+    // cancelPendingHistoryInteractions because restoreHistoryEntry is the
+    // single authoritative publication point for both undo and redo.
+    historyEpochRef.current += 1
+    projectRef.current = restoredProject
+    selectedIdRef.current = entry.selectedId
+    editEntityIdRef.current = entry.editEntityId
+    checkedTreePartIdsRef.current = [...entry.checkedTreePartIds]
     markSceneDirty()
     // History restoration is deliberately synchronous. It must win over any
     // pending transition and make the viewport/inspector agree in the same
     // React update batch.
-    setProject(entry.project)
+    setProject(restoredProject)
     setEditEntityId(entry.editEntityId)
     setSelectedId(entry.selectedId)
     setCheckedTreePartIds([...entry.checkedTreePartIds])
@@ -2627,23 +2702,7 @@ function App() {
       ? activeEditEntityId.slice('custom:'.length)
       : currentParts.find((part) => part.kind === 'custom' && (part.id === activeEditEntityId || (editAssemblyId && (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(editAssemblyId))))?.partId
     if (activeEditEntityId && !editingCustomId) {
-      const editingAssetPart = currentParts.find((part) => part.kind === 'asset' && (part.id === activeEditEntityId || part.instanceId === activeEditEntityId || partBelongsToEditTarget(part, activeEditEntityId)))
-      if (editingAssetPart?.instanceId) {
-        const instance = currentProject.instances.find((item) => item.id === editingAssetPart.instanceId)
-        const asset = instance ? currentProject.assets.find((item) => item.id === instance.assetId) : undefined
-        const localTarget = instance && asset
-          ? assetTransformCacheRef.current!.localCoordinateAtSceneVoxel(instance, asset, voxel, editingAssetPart.partId)
-          : undefined
-        if (instance && asset && localTarget) {
-          markVoxelStrokeOwnerRoot(instance.id)
-          editInstanceVoxel(instance.id, { ...localTarget, materialId: voxel.materialId }, 'add')
-          notifyEditor(`已在当前编辑实体上添加体素 · ${voxel.x}, ${voxel.y}, ${voxel.z}`)
-          return
-        }
-        notifyEditor('当前编辑实体无法解析该体素位置 · 未创建新实体')
-        return
-      }
-      notifyEditor('当前处于实体编辑模式 · 未找到可修改的原实体')
+      notifyEditor('当前处于实体编辑模式 · 未找到可修改的普通体素实体')
       return
     }
     // Outside edit mode every brush stroke starts a new user entity, even if
@@ -2683,7 +2742,10 @@ function App() {
         return
       }
       markVoxelStrokeOwners([part.id])
-      const offset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
+      // `partSceneOffset` is used by assembly children and by imported/model
+      // parts.  The hit is in effective scene coordinates, so both offsets
+      // must be removed before writing the canonical custom voxel back.
+      const offset = scenePartGridOffset(part)
       storedTargetKeys.add(`${entityId}:${sceneVoxelKey({ x: voxel.x - offset.x, y: voxel.y - offset.y, z: voxel.z - offset.z })}`)
     })
     if (unresolvedTargets.size) customParts.forEach((part) => {
@@ -2734,6 +2796,25 @@ function App() {
         }).filter((assembly) => assembly.memberKeys.length > 0)
       }
     })
+    // Keep the in-flight stroke ownership index in sync with erasures. Without
+    // this, a cell erased from an imported/template-derived custom entity can
+    // remain marked as occupied until pointer-up, so the next draw is rejected
+    // or appears to edit an unrelated owner.
+    const transaction = voxelStrokeTransactionRef.current
+    if (transaction) {
+      voxels.forEach((voxel) => {
+        const key = sceneVoxelKey(voxel)
+        const owners = transaction.customOwnerIdsBySceneKey.get(key)
+        if (!owners) return
+        const entityId = voxelEntityId(voxel)
+        if (entityId) owners.delete(`custom:${entityId}`)
+        else owners.clear()
+        if (!owners.size) {
+          transaction.customOwnerIdsBySceneKey.delete(key)
+          transaction.occupiedCustomSceneKeys.delete(key)
+        }
+      })
+    }
     // A newly drawn child can be the selected row while the enclosing
     // assembly is the edit target. If that child is erased completely, keep
     // the edit mode attached to the surviving assembly instead of leaving a
@@ -2772,6 +2853,32 @@ function App() {
     const targets = uniqueVoxels(voxels).filter((voxel) => voxel.y >= 0)
     if (!targets.length) return
     if (operation !== 'subtract') useMaterial(activeMaterial)
+    const currentProject = projectRef.current
+    const currentParts = voxelStrokePartsRef.current ?? sceneEntityParts(currentProject)
+    const transaction = voxelStrokeTransactionRef.current
+    // Resolve ownership in effective scene coordinates. The occupancy index
+    // is the fast path; the stroke map and exact custom-part lookup cover the
+    // short window after a model/template has been materialized or edited,
+    // before the next derived index snapshot is published.
+    const ownerIdsAtSceneVoxel = (voxel: Pick<Voxel, 'x' | 'y' | 'z'>) => {
+      const key = sceneVoxelKey(voxel)
+      // Prefer the current custom-part snapshot over the occupancy index. The
+      // latter can briefly retain an old asset owner while a materialized
+      // model/template is being published; using that stale owner here would
+      // make a valid edit look like a collision.
+      const owners = new Set<string>()
+      transaction?.customOwnerIdsBySceneKey.get(key)?.forEach((ownerId) => owners.add(ownerId))
+      if (!owners.size) {
+        currentParts.forEach((part) => {
+          if (part.kind !== 'custom') return
+          if (scenePartVoxelAtCoordinate(part, voxel.x, voxel.y, voxel.z)) owners.add(part.id)
+        })
+      }
+      if (!owners.size) {
+        sceneOccupancyRef.current?.queryProjectVoxel(voxel).ownerIds.forEach((ownerId) => owners.add(ownerId))
+      }
+      return [...owners]
+    }
     if (operation === 'add' && tool !== 'brush') {
       const bounds = sceneBoundsForProject(projectRef.current)
       if (!sceneVoxelsWithinBounds(targets, bounds)) {
@@ -2802,8 +2909,6 @@ function App() {
       // keep the valid cells instead of allowing an out-of-bounds cell to
       // poison the entire stroke. Shape tools remain atomic below.
       const addTargets = tool === 'brush' ? inBoundsTargets : targets
-      const currentProject = projectRef.current
-      const currentParts = voxelStrokePartsRef.current ?? sceneEntityParts(currentProject)
       // A shape gesture is an atomic operation. Outside edit mode it must
       // always create a fresh entity, never reuse the entity id left by a
       // previous brush stroke. Reusing that id made the new cuboid/sphere
@@ -2813,10 +2918,10 @@ function App() {
       const activeEditEntityId = editEntityId
         ?? (createsNewShapeEntity ? null : (voxelStrokeEntityRef.current ? `custom:${voxelStrokeEntityRef.current}` : null))
       const editAssemblyId = activeEditEntityId?.startsWith('assembly:') ? activeEditEntityId.slice('assembly:'.length) : undefined
-      const editingAsset = activeEditEntityId && currentParts.some((part) => part.kind === 'asset' && partBelongsToEditTarget(part, activeEditEntityId))
-      // Custom entities and assembly children can be committed as one draft
-      // mutation. Asset instances keep the established local-coordinate path.
-      if (!editingAsset) {
+      // Every placed/imported object is materialized as customVoxels before it
+      // reaches this path. Keep one coordinate and mutation path for hand
+      // drawn entities, model imports, and template placements.
+      {
         const entityId = activeEditEntityId?.startsWith('custom:')
           ? activeEditEntityId.slice('custom:'.length)
           : createsNewShapeEntity
@@ -2826,13 +2931,19 @@ function App() {
         markVoxelStrokeOwners([`custom:${entityId}`])
         const excluded = currentParts.filter((part) => activeEditEntityId && partBelongsToEditTarget(part, activeEditEntityId)).map((part) => part.id)
         const insertable = addTargets.filter((voxel) => {
-          const owners = sceneOccupancyRef.current?.queryProjectVoxel(voxel).ownerIds ?? []
+          const owners = ownerIdsAtSceneVoxel(voxel)
           return owners.every((ownerId) => excluded.includes(ownerId))
         })
-        const transaction = voxelStrokeTransactionRef.current
         const occupiedCustomSceneKeys = transaction?.occupiedCustomSceneKeys
           ?? new Set(currentParts.filter((part) => part.kind === 'custom').flatMap((part) => scenePartVoxels(part)).map(sceneVoxelKey))
-        const filteredInsertable = insertable.filter((voxel) => !occupiedCustomSceneKeys.has(sceneVoxelKey(voxel)))
+        const filteredInsertable = insertable.filter((voxel) => {
+          // Re-check against the authoritative scene owners. The old code
+          // relied on a potentially stale occupancy query and could append a
+          // duplicate voxel at the hit location, which looked like a model
+          // edit had replaced an existing interior cell.
+          return ownerIdsAtSceneVoxel(voxel).every((ownerId) => excluded.includes(ownerId))
+            && !occupiedCustomSceneKeys.has(sceneVoxelKey(voxel))
+        })
         if (filteredInsertable.length) updateProject((draft) => {
           filteredInsertable.forEach((voxel) => {
             // Shape previews, especially extrusion, carry the source voxel's
@@ -2840,7 +2951,11 @@ function App() {
             // palette swatch: a multicolour source layer must remain
             // multicolour at the exact same coordinates.
             draft.customVoxels.push(sceneToStoredCustomVoxel(draft, { ...voxel, entityId }, entityId))
-            occupiedCustomSceneKeys.add(sceneVoxelKey(voxel))
+            const key = sceneVoxelKey(voxel)
+            occupiedCustomSceneKeys.add(key)
+            const owners = transaction?.customOwnerIdsBySceneKey.get(key) ?? new Set<string>()
+            owners.add(`custom:${entityId}`)
+            transaction?.customOwnerIdsBySceneKey.set(key, owners)
           })
           if (editAssemblyId) {
             const assembly = (draft.assemblies ?? []).find((item) => item.id === editAssemblyId)
@@ -2855,47 +2970,8 @@ function App() {
         notifyEditor(activeEditEntityId ? `已在当前编辑实体中添加 ${filteredInsertable.length} 个体素` : `已新建用户实体并进入编辑模式 · ${filteredInsertable.length} 个体素`)
         return
       }
-      // Asset edits used to call addVoxel once per sampled cell. That caused a
-      // full override-array replacement and notification for every voxel in a
-      // brush frame. Resolve the local coordinates first, then commit one
-      // grouped override batch per affected instance.
-      const excludedOwnerIds = currentParts
-        .filter((part) => partBelongsToEditTarget(part, activeEditEntityId!))
-        .map((part) => part.id)
-      const editableAssetParts = currentParts.filter((part) => part.kind === 'asset' && part.instanceId && partBelongsToEditTarget(part, activeEditEntityId!))
-      const assetTargets = new Map<string, Voxel[]>()
-      addTargets.forEach((voxel) => {
-        const owners = sceneOccupancyRef.current?.queryProjectVoxel(voxel).ownerIds ?? []
-        if (owners.some((ownerId) => !excludedOwnerIds.includes(ownerId))) return
-        for (const part of editableAssetParts) {
-          const instance = currentProject.instances.find((item) => item.id === part.instanceId)
-          const asset = instance ? currentProject.assets.find((item) => item.id === instance.assetId) : undefined
-          if (!instance || !asset || !part.instanceId) continue
-          const local = assetTransformCacheRef.current!.localCoordinateAtSceneVoxel(instance, asset, voxel, part.partId)
-          if (!local) continue
-          const targets = assetTargets.get(part.instanceId) ?? []
-          // Keep the material carried by the scene-space candidate. For a
-          // brush/shape this is the active swatch; for extrusion it is the
-          // corresponding source-layer material.
-          targets.push({
-            ...local,
-            materialId: voxel.materialId,
-            ...(voxel.paintMaterialId ? { paintMaterialId: voxel.paintMaterialId } : {}),
-            ...(voxel.shape ? {
-              shape: voxel.shape,
-              facing: voxel.facing,
-              rotation: voxel.rotation,
-            } : {}),
-          })
-          assetTargets.set(part.instanceId, targets)
-          break
-        }
-      })
-      assetTargets.forEach((voxels, instanceId) => editInstanceVoxels(instanceId, uniqueVoxels(voxels), 'add'))
-      return
     }
     if (operation === 'subtract') {
-      const assetTargets = new Map<string, Voxel[]>()
       const parts = voxelStrokePartsRef.current ?? sceneEntityParts(projectRef.current)
       const partsById = new Map(parts.map((part) => [part.id, part]))
       const customTargets: Voxel[] = []
@@ -2904,27 +2980,17 @@ function App() {
       // This matters most for a large brush/shape applied to an imported
       // model, where the old nested find/some loop was O(targets * model).
       targets.forEach((target) => {
-        const ownerIds = sceneOccupancyRef.current?.queryProjectVoxel(target).ownerIds ?? []
+        const ownerIds = ownerIdsAtSceneVoxel(target)
         ownerIds.forEach((ownerId) => {
           const part = partsById.get(ownerId)
           if (!part || (editEntityId && !partBelongsToEditTarget(part, editEntityId))) return
           if (part.kind === 'custom') {
             markVoxelStrokeOwners([part.id])
             customTargets.push({ ...target, entityId: part.partId })
-            return
           }
-          if (!part.instanceId) return
-          markVoxelStrokeOwnerRoot(part.instanceId)
-          const instance = projectRef.current.instances.find((item) => item.id === part.instanceId)
-          const asset = instance ? projectRef.current.assets.find((item) => item.id === instance.assetId) : undefined
-          const local = instance && asset
-            ? assetTransformCacheRef.current!.localVoxelAtSceneVoxel(instance, asset, target)
-            : undefined
-          if (local) assetTargets.set(part.instanceId, [...(assetTargets.get(part.instanceId) ?? []), local])
         })
       })
       if (customTargets.length) removeVoxels(customTargets)
-      assetTargets.forEach((items, instanceId) => editInstanceVoxels(instanceId, items, 'remove'))
       return
     }
     if (!editEntityId) {
@@ -2942,29 +3008,6 @@ function App() {
         return targetKeys.has(sceneKey)
           ? { ...voxel, paintMaterialId: activeMaterial }
           : voxel
-      })
-      const assetTargets = new Map<string, Voxel[]>()
-      const partsById = new Map(parts.map((part) => [part.id, part]))
-      targets.forEach((target) => {
-        const ownerIds = sceneOccupancyRef.current?.queryProjectVoxel(target).ownerIds ?? []
-        ownerIds.forEach((ownerId) => {
-          const part = partsById.get(ownerId)
-          if (part?.kind !== 'asset' || !part.instanceId || !partBelongsToEditTarget(part, editEntityId)) return
-          markVoxelStrokeOwnerRoot(part.instanceId)
-          const instance = draft.instances.find((item) => item.id === part.instanceId)
-          const asset = instance ? draft.assets.find((item) => item.id === instance.assetId) : undefined
-          const local = instance && asset
-            ? assetTransformCacheRef.current!.localVoxelAtSceneVoxel(instance, asset, target)
-            : undefined
-          if (local) assetTargets.set(part.instanceId, [...(assetTargets.get(part.instanceId) ?? []), local])
-        })
-      })
-      assetTargets.forEach((items, instanceId) => {
-        const instance = draft.instances.find((item) => item.id === instanceId)
-        if (!instance) return
-        const keys = new Set(items.map((item) => `${item.x},${item.y},${item.z}`))
-        instance.overrides = (instance.overrides ?? []).filter((item) => !keys.has(`${item.x},${item.y},${item.z}`))
-        instance.overrides.push(...items.map((item) => ({ ...item, materialId: activeMaterial, mode: 'paint' as const })))
       })
     })
     notifyEditor(`已改色 ${targets.length} 个体素`)
@@ -4005,7 +4048,7 @@ function App() {
       const localWorkspace = await initializeLocalLibrary(emptyProject.assets)
       const next = normalizeStoredProject({ ...emptyProject, assets: localWorkspace.assets })
       setAssetCategoryPaths(normalizeAssetCategoryPaths(localWorkspace.categories, next.assets))
-      replaceProject(next)
+      replaceProject(next, false)
       const firstPart = sceneEntityParts(next)[0]
       setSelectedId(firstPart?.id ?? '')
       setEditEntityId(null)
@@ -5813,11 +5856,10 @@ function App() {
     const nextProject = buildSceneDiscreteTransformProject(sourceProject, parts, mode, axis, degrees)
     if (!nextProject) return false
     const selection = resolveDiscreteTransformSelection(sourceProject, parts)
-    // A transform is already a fully materialized transaction. Do not use
-    // the general content-signature cache here: it is deliberately optimized
-    // for normal edits and can retain an array identity after a large
-    // transform, making a real rotation/mirror look like a no-op to history.
-    const recorded = recordHistoryBeforeChange(sourceProject, nextProject, (left, right) => left === right)
+    // Use the same content-based history boundary as every other edit. A
+    // transform may reuse unrelated project arrays, but its changed voxel
+    // coordinates must always produce a distinct snapshot.
+    const recorded = recordHistoryBeforeChange(sourceProject, nextProject)
     if (!recorded) return false
     // A discrete transform changes the absolute coordinates of every voxel in
     // the selected object. Reconcile the complete index atomically instead of
@@ -8672,7 +8714,10 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   // voxel bounds. During edit mode the bounds can change on every brush
   // transaction; following that moving AABB would translate the camera and
   // make the edited entity drift in the viewport.
-  const orbitSelectionKey = selectedPartIds.join('|')
+  // Entering edit mode is also a pivot reset, even when the selected part IDs
+  // did not change. After that reset the live OrbitControls target is allowed
+  // to move with the user's pan gesture.
+  const orbitSelectionKey = `${editEntityId ?? ''}::${selectedPartIds.join('|')}`
   const orbitPivotRef = useRef<THREE.Vector3 | null>(null)
   const orbitPivotSelectionKeyRef = useRef<string | null>(null)
 
@@ -9185,6 +9230,19 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     const handleControlsEnd = () => interactionQualityRef.current(false)
     controls.addEventListener('start', handleControlsStart)
     controls.addEventListener('end', handleControlsEnd)
+    // OrbitControls.target is the actual center of the current view. A pan
+    // changes this target, so the following rotation must orbit around the
+    // user's current view center instead of jumping back to the selection.
+    // Keep the selection pivot as the reset value, but promote every real
+    // target change (mouse/touch pan, view command, or selection sync) to the
+    // live pivot.
+    const lastOrbitTarget = controls.target.clone()
+    const handleControlsChange = () => {
+      if (controls.target.distanceToSquared(lastOrbitTarget) < 0.00000001) return
+      lastOrbitTarget.copy(controls.target)
+      orbitPivotRef.current = controls.target.clone()
+    }
+    controls.addEventListener('change', handleControlsChange)
     // Initialize the camera from the external ruler once. After this point
     // all zoom changes go through setCameraZoomLevel imperatively.
     setCameraZoomLevel(zoomLevel)
@@ -9345,6 +9403,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       renderer.domElement.removeEventListener('wheel', applyWheelZoom)
       controls.removeEventListener('start', handleControlsStart)
       controls.removeEventListener('end', handleControlsEnd)
+      controls.removeEventListener('change', handleControlsChange)
       controls.dispose()
       disposeThreeObject(scene)
       renderer.dispose()
@@ -9417,7 +9476,13 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     controls.update()
     controls.enableDamping = dampingEnabled
     const sceneBounds = sceneBoundsForProject(project)
-    const target = selectedOrbitCenterRef.current?.clone() ?? sceneViewTarget(sceneBounds)
+    // View commands change orientation and framing, but they are not a new
+    // selection. Preserve the live pivot established by the current camera
+    // target, including a target moved by pan. The selection effect is the
+    // only place that intentionally resets this back to entity center.
+    const target = orbitPivotRef.current?.clone()
+      ?? selectedOrbitCenterRef.current?.clone()
+      ?? sceneViewTarget(sceneBounds)
     let direction = new THREE.Vector3(16, 18, 18).normalize()
     let up = new THREE.Vector3(0, 0, 1)
     if (view !== 'default') {
@@ -9460,10 +9525,9 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   const rotateCameraByInput = (deltaX: number, deltaY: number) => {
     const controls = controlsRef.current
     if (!controls) return
-    // A camera pan or a previous view command can leave OrbitControls' target
-    // away from the selected geometry. Re-anchor immediately before each
-    // joystick gesture so the rotation is always selection-relative.
-    syncOrbitTarget()
+    // Do not re-anchor here. On initial selection/edit entry the selection
+    // effect sets the pivot once. After a pan, OrbitControls.target is the
+    // user's current view center and must remain the rotation center.
     controls.rotateLeft(deltaX * 0.008)
     controls.rotateUp(deltaY * 0.008)
     controls.update()
@@ -9474,17 +9538,23 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   // from the file tree. This makes the first joystick movement feel anchored
   // instead of requiring a hidden preparatory drag.
   useEffect(() => {
-    // Change the pivot only when the selected entity IDs change. A voxel edit
-    // changes selectedOrbitCenter because the AABB changes, but it must not
-    // move the camera or the entity on screen. Clearing the selection also
-    // deliberately leaves the current camera/target untouched; the fallback
-    // scene pivot is used lazily by the next explicit camera rotation.
-    if (orbitSelectionKey && !selectedOrbitCenter) return
+    // Change the pivot only when the selection/edit identity changes. A voxel
+    // edit changes selectedOrbitCenter because the AABB changes, but it must
+    // not move the camera or the entity on screen. Clearing the selection
+    // deliberately preserves the current camera target so the next view
+    // operation does not create a second, hidden camera jump.
+    if ((selectedPartIds.length > 0 || Boolean(editEntityId)) && !selectedOrbitCenter) return
     if (orbitPivotSelectionKeyRef.current === orbitSelectionKey) return
     orbitPivotSelectionKeyRef.current = orbitSelectionKey
-    orbitPivotRef.current = selectedOrbitCenter?.clone() ?? null
-    if (selectedOrbitCenter) syncOrbitTarget(selectedOrbitCenter)
-  }, [orbitSelectionKey, selectedOrbitCenter])
+    if (selectedOrbitCenter) {
+      orbitPivotRef.current = selectedOrbitCenter.clone()
+      syncOrbitTarget(selectedOrbitCenter)
+    } else if (controlsRef.current) {
+      orbitPivotRef.current = controlsRef.current.target.clone()
+    } else {
+      orbitPivotRef.current = null
+    }
+  }, [editEntityId, orbitSelectionKey, selectedOrbitCenter, selectedPartIds.length])
 
   useEffect(() => {
     onCameraApiChange({
@@ -10730,8 +10800,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
   const handleEntityDoubleClick = (event: { clientX: number; clientY: number }) => {
     if (tool !== 'select' || placementAsset || editEntityId) return
     const context = getPointerContext(event)
-    const hitPartId = context?.voxelHit?.ownerIds[0]
-    const hitPart = hitPartId ? sceneEntityParts(authoritativeProjectRef.current).find((part) => part.id === hitPartId) : undefined
+    const hitPart = resolvePointerHitPart(context?.voxelHit, sceneEntityParts(authoritativeProjectRef.current))
     if (!hitPart) return
     onEnterEditMode(hitPart.id)
   }
@@ -10978,32 +11047,45 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     return (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).includes(assemblyId)
   }
 
+  // ownerIds is only a raycast/occupancy hint and can be stale for one frame
+  // after imported or asset-backed data is materialized. Editing resolves the
+  // authoritative scene-space coordinate first, so every entity uses the same
+  // custom-voxel batch path as a hand-drawn entity.
+  const resolvePointerHitPart = (hit: SceneVoxelRayHit | null | undefined, parts: SceneEntityPart[]) => {
+    if (!hit) return undefined
+    const exactParts = parts.filter((part) => Boolean(scenePartVoxelAtCoordinate(part, hit.voxel.x, hit.voxel.y, hit.voxel.z)))
+    if (!exactParts.length) return undefined
+    const hintedIds = new Set(hit.ownerIds)
+    return exactParts.find((part) => part.kind === 'custom' && hintedIds.has(part.id))
+      ?? exactParts.find((part) => hintedIds.has(part.id))
+      ?? exactParts.find((part) => part.kind === 'custom')
+      ?? exactParts[0]
+  }
+
   const strokeVoxelKey = (voxel: Pick<Voxel, 'x' | 'y' | 'z'>) => `${voxel.x},${voxel.y},${voxel.z}`
   const applyStrokeAdd = (voxel: Voxel, key = `scene:${strokeVoxelKey(voxel)}`) => {
     const operationKey = `add:${key}`
     if (editStrokeVisitedRef.current.has(operationKey)) return
     editStrokeVisitedRef.current.add(operationKey)
-    onAddVoxel(voxel)
+    // Keep the compatibility pointer path on the same batch/edit pipeline as
+    // continuous drawing and shape tools. Calling the legacy single-voxel
+    // callback here made imported/template-derived entities take a different
+    // ownership and collision path from hand-drawn entities.
+    onApplyVoxelBatch([voxel], 'add')
   }
   const applyStrokeRemove = (voxel: Voxel, key = `scene:${strokeVoxelKey(voxel)}`) => {
     const operationKey = `remove:${key}`
     if (editStrokeVisitedRef.current.has(operationKey)) return
     editStrokeVisitedRef.current.add(operationKey)
-    onRemoveVoxel(voxel)
+    onApplyVoxelBatch([voxel], 'subtract')
   }
-  const applyStrokeInstance = (instanceId: string, voxel: Voxel, mode: VoxelOverride['mode']) => {
-    const operationKey = `instance:${mode}:${instanceId}:${strokeVoxelKey(voxel)}`
-    if (editStrokeVisitedRef.current.has(operationKey)) return
-    editStrokeVisitedRef.current.add(operationKey)
-    onEditInstanceVoxel(instanceId, voxel, mode)
-  }
-
   const applyEditAtPointer = (event: { clientX: number; clientY: number }, options: { allowFloorFallback?: boolean } = {}) => {
     const context = getPointerContext(event)
     if (!context) return
     const { voxelHit, floorPoint } = context
-    const hitPartId = voxelHit?.ownerIds[0]
-    const hitPart = hitPartId ? scenePartsRef.current.find((part) => part.id === hitPartId) : undefined
+    const currentProject = authoritativeProjectRef.current
+    const currentSceneParts = sceneEntityParts(currentProject)
+    const hitPart = resolvePointerHitPart(voxelHit, currentSceneParts)
     if (tool === 'select' && editEntityId) return
     if (tool === 'select' && partBelongsToEditEntity(hitPart)) {
       onSelect(hitPart!.id)
@@ -11021,59 +11103,28 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
         else onNotice('擦除模式只能作用于当前编辑实体 · 其他实体仍会阻挡穿透')
         return
       }
-      if (hitPart.kind === 'asset' && hitPart.instanceId) {
-        const instance = project.instances.find((candidate) => candidate.id === hitPart.instanceId)
-        const asset = instance ? project.assets.find((candidate) => candidate.id === instance.assetId) : undefined
-        if (!instance || !asset) return
-        const localHitVoxel = assetTransformCache.localVoxelAtSceneVoxel(instance, asset, hitVoxel)
-        if (!localHitVoxel) return
-        if (!editEntityId) {
-          if (tool === 'brush') applyStrokeAdd(adjacentVoxel(voxelHit.voxel, voxelHit.normal, activeMaterial))
-          else onNotice('非编辑模式下不能擦除资产实体 · 请先进入编辑模式')
-        } else if (tool === 'brush') {
-          const targetSceneVoxel = adjacentVoxel(voxelHit.voxel, voxelHit.normal, activeMaterial)
-          const localTarget = assetTransformCache.localVoxelAtSceneVoxel(instance, asset, targetSceneVoxel)
-          if (localTarget) applyStrokeInstance(instance.id, { ...localTarget, materialId: activeMaterial }, 'add')
-        } else {
-          applyStrokeInstance(instance.id, localHitVoxel, 'remove')
-        }
-        return
-      }
-      if (hitPart.kind === 'custom') {
-        if (tool === 'brush') applyStrokeAdd(adjacentVoxel(hitVoxel, voxelHit.normal, activeMaterial))
-        else applyStrokeRemove(hitVoxel)
-        return
-      }
+      // Imported models and asset-library placements are materialized into
+      // scene customVoxels. Do not route them through the old instance-local
+      // override path: it uses a different coordinate origin and is the
+      // reason drawing can replace an internal voxel while erase misses.
+      if (tool === 'brush') applyStrokeAdd(adjacentVoxel(hitVoxel, voxelHit.normal, activeMaterial))
+      else applyStrokeRemove(hitVoxel)
       return
     }
     if (!floorPoint || options.allowFloorFallback === false) return
     const x = worldToVoxelCell(floorPoint.x)
     const z = worldToVoxelCell(floorPoint.y)
     const sceneVoxel = { x, y: 0, z, materialId: activeMaterial }
-    const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
-    const occupiedAsset = project.instances.find((instance) => {
-      if (!instance.visible) return false
-      const asset = assetMap.get(instance.assetId)
-      return asset ? Boolean(assetTransformCache.localVoxelAtSceneVoxel(instance, asset, sceneVoxel)) : false
-    })
-    if (occupiedAsset) {
-      const asset = assetMap.get(occupiedAsset.assetId)
-      const localVoxel = asset
-        ? assetTransformCache.localVoxelAtSceneVoxel(occupiedAsset, asset, sceneVoxel)
-        : undefined
-      if (editEntityId && tool === 'erase' && localVoxel) applyStrokeInstance(occupiedAsset.id, localVoxel, 'remove')
-      else onNotice('目标网格已有资产体素 · 请点击资产表面编辑')
-      return
-    }
     if (tool === 'brush') {
       const floorOwners = occupancyIndex?.queryProjectVoxel(sceneVoxel).ownerIds ?? []
       if (floorOwners.some((ownerId) => ownerId.startsWith('custom:'))) onNotice('目标网格已有体素 · 请点击体素表面添加')
       else applyStrokeAdd(sceneVoxel)
     } else {
-      const bounds = sceneBoundsForProject(project)
+      const bounds = sceneBoundsForProject(currentProject)
       const highestHit = occupancyIndex?.highestProjectVoxelAt(x, z, 0, bounds.z - 1, 'custom:')
       if (!highestHit) return
-      const part = scenePartsRef.current.find((candidate) => candidate.id === highestHit.ownerId)
+      const part = currentSceneParts.find((candidate) => candidate.id === highestHit.ownerId)
+        ?? currentSceneParts.find((candidate) => Boolean(scenePartVoxelAtCoordinate(candidate, highestHit.voxel.x, highestHit.voxel.y, highestHit.voxel.z)))
       const highest = part
         ? scenePartVoxelAtCoordinate(part, highestHit.voxel.x, highestHit.voxel.y, highestHit.voxel.z)
         : undefined
@@ -11176,8 +11227,7 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
       if (placementAsset) return
       if (tool === 'select') onCancelPendingEntityOperation()
       const context = geometryApplying ? null : getPointerContext(event)
-      const hitPartId = context?.voxelHit?.ownerIds[0]
-      const hitPart = hitPartId ? sceneEntityParts(authoritativeProjectRef.current).find((part) => part.id === hitPartId) : undefined
+      const hitPart = resolvePointerHitPart(context?.voxelHit, sceneEntityParts(authoritativeProjectRef.current))
       const explicitMultiSelection = selectedPartIds.length > 1 && (checkedPartIds.length > 1 || (checkedPartIds.length === 1 && !checkedPartIds[0].startsWith('assembly:')))
       const targetPartIds = !editEntityId && hitPart
         ? explicitMultiSelection && selectedPartIds.includes(hitPart.id) ? selectedPartIds : hitSelectionPartIds(hitPart)
@@ -11195,10 +11245,9 @@ function VoxelViewport({ project, authoritativeProjectRef, sceneParts, occupancy
     if (tool === 'select') {
       const context = getPointerContext(event)
       const floorPoint = context?.floorPoint
-      const hitPartId = context?.voxelHit?.ownerIds[0]
       const currentProject = authoritativeProjectRef.current
       const currentSceneParts = sceneEntityParts(currentProject)
-      const hitPart = hitPartId ? currentSceneParts.find((part) => part.id === hitPartId) : undefined
+      const hitPart = resolvePointerHitPart(context?.voxelHit, currentSceneParts)
       if (hitPart) {
         const explicitMultiSelection = selectedPartIds.length > 1 && (checkedPartIds.length > 1 || (checkedPartIds.length === 1 && !checkedPartIds[0].startsWith('assembly:')))
         const selectedParts = explicitMultiSelection && selectedPartIds.includes(hitPart.id)

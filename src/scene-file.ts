@@ -231,17 +231,11 @@ export function sceneContentSignature(project: ProjectState): string {
   // imported voxel arrays on every release, which made large entities pause
   // the UI for seconds. The portable file path still uses createSceneFile;
   // this signature only needs deterministic content equality.
-  const arraySignatureCache = sceneSignatureArrayCache
   const signatureForArray = (values: unknown[]): string => {
-    const cached = arraySignatureCache.get(values)
-    // Some high-volume edit transactions append to their private voxel array
-    // in place between animation frames. The array identity therefore is not
-    // by itself an immutable-cache key. At minimum, invalidate an append-only
-    // mutation when its length changes; replacement edits use a new array.
-    if (cached && cached.length === values.length) return cached.signature
-    const signature = JSON.stringify(values)
-    arraySignatureCache.set(values, { length: values.length, signature })
-    return signature
+    // Project arrays are deliberately mutable inside the batched voxel editor.
+    // Do not cache by array identity: a same-length paint/replace operation
+    // must still change the signature used by save/undo boundaries.
+    return JSON.stringify(values)
   }
   // Source metadata is informational only after materialization. Editing a
   // template's name, color, or category must not make an already materialized
@@ -263,13 +257,6 @@ export function sceneContentSignature(project: ProjectState): string {
   })
 }
 
-const sceneSignatureArrayCache = new WeakMap<object, { length: number; signature: string }>()
-const sceneSignatureAssetCache = new WeakMap<object, string>()
-
 function signatureForAsset(asset: VoxelAsset): string {
-  const cached = sceneSignatureAssetCache.get(asset)
-  if (cached) return cached
-  const signature = JSON.stringify(asset)
-  sceneSignatureAssetCache.set(asset, signature)
-  return signature
+  return JSON.stringify(asset)
 }
