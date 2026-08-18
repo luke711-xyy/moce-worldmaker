@@ -6491,7 +6491,7 @@ function AssetSidebar({ assets, categoryPaths, query, setQuery, selectedAssetIds
       {renderThumbnailShell(previewContent, asset, percent)}
       <span>{asset.name.replace('·主屋', '')}</span>
       <small className={`asset-cloud-status ${failed ? 'failed' : ''}`}><Cloud size={10} /> {label}</small>
-      <small className="asset-cloud-category">{asset.categoryPath.join(' / ') || '未命名类别'} · {formatBytesUi(asset.sizeBytes)}</small>
+      <small className="asset-cloud-category">{asset.categoryPath.join(' / ') || '未命名类别'}</small>
       <div className="asset-cloud-actions"><button onClick={(event) => { event.stopPropagation(); onDownloadCloudAsset(asset) }} title={failed ? '重试下载' : '下载云端实体'}><Download size={12} /></button><button className="cloud-delete-button" onClick={(event) => { event.stopPropagation(); onDeleteCloudAsset(asset) }} title="删除云端副本"><Trash2 size={12} /></button></div>
     </div>
   }
@@ -8078,8 +8078,10 @@ function createExposedVoxelEdgeGeometry(
  * Selection lines are deliberately rendered with depth testing enabled so
  * hidden edges do not show through the model.  Their vertices still sit on
  * the voxel surface, though, which makes them fight the solid mesh in the
- * depth buffer at oblique camera angles.  A tiny clip-space bias breaks that
- * tie without moving the outline in world space or disabling occlusion.
+ * depth buffer at oblique camera angles. A very small clip-space bias breaks
+ * that tie without moving the outline in world space or disabling occlusion.
+ * It must stay below the depth separation of a real voxel face in perspective
+ * mode; a larger bias makes hidden edges jump in front of nearer solids.
  */
 function configureSelectionOutlineMaterial(material: THREE.LineBasicMaterial, cacheKey: string) {
   material.depthTest = true
@@ -8088,10 +8090,12 @@ function configureSelectionOutlineMaterial(material: THREE.LineBasicMaterial, ca
   material.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader.replace(
       '#include <project_vertex>',
-      '#include <project_vertex>\n      gl_Position.z -= 0.00003 * gl_Position.w;'
+      '#include <project_vertex>\n      gl_Position.z -= 0.0000015 * gl_Position.w;'
     )
   }
-  material.customProgramCacheKey = () => cacheKey
+  // Bump this whenever the depth-bias shader changes. Three.js otherwise may
+  // reuse the previous compiled program during the same renderer lifetime.
+  material.customProgramCacheKey = () => `${cacheKey}-depth-v3`
 }
 
 function isVisibleInObjectHierarchy(object: THREE.Object3D): boolean {
@@ -8211,7 +8215,7 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
     edgeGeometry = createVoxelOutlineGeometry()
   }
   const glowMaterial = new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.2 })
-  configureSelectionOutlineMaterial(glowMaterial, 'moce-selection-outline-glow-v2')
+  configureSelectionOutlineMaterial(glowMaterial, 'moce-selection-outline-glow-v3')
   const glow = new THREE.LineSegments(edgeGeometry, glowMaterial)
   if (!(mesh instanceof THREE.InstancedMesh) && !mesh.userData.greedyMesh && !mesh.userData.surfaceMesh) glow.scale.setScalar(1.055)
   glow.renderOrder = 20
@@ -8222,7 +8226,7 @@ function addVoxelHighlight(mesh: THREE.Mesh) {
   // resolution model first became selected; the materials still provide the
   // soft underlay and crisp line as separate render passes.
   const edgeMaterial = new THREE.LineBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.9 })
-  configureSelectionOutlineMaterial(edgeMaterial, 'moce-selection-outline-edge-v2')
+  configureSelectionOutlineMaterial(edgeMaterial, 'moce-selection-outline-edge-v3')
   const edge = new THREE.LineSegments(edgeGeometry, edgeMaterial)
   if (!(mesh instanceof THREE.InstancedMesh) && !mesh.userData.greedyMesh && !mesh.userData.surfaceMesh) edge.scale.setScalar(1.012)
   edge.renderOrder = 21
