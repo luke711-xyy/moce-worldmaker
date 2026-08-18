@@ -2934,32 +2934,65 @@ function App() {
           const owners = ownerIdsAtSceneVoxel(voxel)
           return owners.every((ownerId) => excluded.includes(ownerId))
         })
-        const occupiedCustomSceneKeys = transaction?.occupiedCustomSceneKeys
-          ?? new Set(currentParts.filter((part) => part.kind === 'custom').flatMap((part) => scenePartVoxels(part)).map(sceneVoxelKey))
         const filteredInsertable = insertable.filter((voxel) => {
           // Re-check against the authoritative scene owners. The old code
           // relied on a potentially stale occupancy query and could append a
           // duplicate voxel at the hit location, which looked like a model
-          // edit had replaced an existing interior cell.
+          // edit had replaced an existing interior cell. A cell owned by the
+          // current edit target is intentionally insertable: a later
+          // extrusion must be able to overwrite an earlier extrusion at the
+          // same scene coordinate. Cells owned by another entity were already
+          // rejected by the collision check above.
           return ownerIdsAtSceneVoxel(voxel).every((ownerId) => excluded.includes(ownerId))
-            && !occupiedCustomSceneKeys.has(sceneVoxelKey(voxel))
         })
-        if (filteredInsertable.length) updateProject((draft) => {
-          filteredInsertable.forEach((voxel) => {
-            // Shape previews, especially extrusion, carry the source voxel's
-            // own material. Do not replace it with the currently selected
-            // palette swatch: a multicolour source layer must remain
-            // multicolour at the exact same coordinates.
-            draft.customVoxels.push(sceneToStoredCustomVoxel(draft, { ...voxel, entityId }, entityId))
+        const insertionPlan = filteredInsertable.map((voxel) => {
+          const owners = ownerIdsAtSceneVoxel(voxel)
+          const existingCustomOwner = owners.find((ownerId) => excluded.includes(ownerId) && ownerId.startsWith('custom:'))
+          // For an assembly edit, an extrusion copied from one of its child
+          // parts should remain owned by that child when it lands in an empty
+          // cell. This preserves the file-tree relationship instead of
+          // accidentally creating a new sibling entity. For an occupied cell,
+          // the existing owner always wins so the new voxel replaces that
+          // exact entity's previous voxel.
+          const sourceCustomOwner = voxel.entityId
+            && activeEditEntityId
+            && currentParts.some((part) => part.kind === 'custom'
+              && part.partId === voxel.entityId
+              && partBelongsToEditTarget(part, activeEditEntityId))
+            ? voxel.entityId
+            : undefined
+          const targetEntityId = existingCustomOwner?.slice('custom:'.length)
+            ?? sourceCustomOwner
+            ?? entityId
+          return { voxel, entityId: targetEntityId }
+        })
+        insertionPlan.forEach(({ entityId: targetEntityId }) => markVoxelStrokeOwners([`custom:${targetEntityId}`]))
+        if (insertionPlan.length) updateProject((draft) => {
+          // Replace by canonical entity-local coordinates, not by the current
+          // scene coordinate alone. This keeps lazy entity offsets correct and
+          // prevents two rows for one logical voxel from surviving in the
+          // persisted project.
+          const replacements = insertionPlan.map(({ voxel, entityId: targetEntityId }) =>
+            sceneToStoredCustomVoxel(draft, { ...voxel, entityId: targetEntityId }, targetEntityId))
+          const replacementKeys = new Set(replacements.map((voxel) =>
+            `${voxelEntityId(voxel)}:${sceneVoxelKey(voxel)}`))
+          draft.customVoxels = draft.customVoxels.filter((voxel) =>
+            !replacementKeys.has(`${voxelEntityId(voxel)}:${sceneVoxelKey(voxel)}`))
+          draft.customVoxels.push(...replacements)
+          insertionPlan.forEach(({ voxel, entityId: targetEntityId }) => {
             const key = sceneVoxelKey(voxel)
-            occupiedCustomSceneKeys.add(key)
             const owners = transaction?.customOwnerIdsBySceneKey.get(key) ?? new Set<string>()
-            owners.add(`custom:${entityId}`)
+            owners.add(`custom:${targetEntityId}`)
             transaction?.customOwnerIdsBySceneKey.set(key, owners)
+            transaction?.occupiedCustomSceneKeys.add(key)
           })
           if (editAssemblyId) {
             const assembly = (draft.assemblies ?? []).find((item) => item.id === editAssemblyId)
-            if (assembly && !assembly.memberKeys.includes(`voxel:${entityId}`)) assembly.memberKeys.push(`voxel:${entityId}`)
+            insertionPlan.forEach(({ entityId: targetEntityId }) => {
+              if (assembly && !assembly.memberKeys.includes(`voxel:${targetEntityId}`)) {
+                assembly.memberKeys.push(`voxel:${targetEntityId}`)
+              }
+            })
           }
         })
         if (!activeEditEntityId) {
@@ -2967,7 +3000,7 @@ function App() {
           setEditEntityId(`custom:${entityId}`)
           setCheckedTreePartIds([`custom:${entityId}`])
         } else setSelectedId(`custom:${entityId}`)
-        notifyEditor(activeEditEntityId ? `已在当前编辑实体中添加 ${filteredInsertable.length} 个体素` : `已新建用户实体并进入编辑模式 · ${filteredInsertable.length} 个体素`)
+        notifyEditor(activeEditEntityId ? `已在当前编辑实体中添加 ${insertionPlan.length} 个体素` : `已新建用户实体并进入编辑模式 · ${insertionPlan.length} 个体素`)
         return
       }
     }
