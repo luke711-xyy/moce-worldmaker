@@ -514,6 +514,26 @@ describe('莫测造境体素核心数据', () => {
     }
   })
 
+  it('keeps mixed-parity quarter turns on integer cells without losing voxels', () => {
+    const source: Voxel[] = []
+    for (let x = 0; x < 2; x += 1) {
+      for (let y = 0; y < 3; y += 1) {
+        for (let z = 0; z < 4; z += 1) source.push({ x, y, z, materialId: 'stone' })
+      }
+    }
+
+    for (const axis of ['x', 'y', 'z'] as const) {
+      const rotated = rotateVoxels(source, axis, 90)
+      expect(rotated).toHaveLength(source.length)
+      expect(new Set(rotated.map(({ x, y, z }) => `${x},${y},${z}`)).size).toBe(source.length)
+      expect(rotated.every(({ x, y, z }) => Number.isInteger(x) && Number.isInteger(y) && Number.isInteger(z))).toBe(true)
+
+      let result = source
+      for (let turn = 0; turn < 4; turn += 1) result = rotateVoxels(result, axis, 90)
+      expect(result.map(({ x, y, z }) => `${x},${y},${z}`).sort()).toEqual(source.map(({ x, y, z }) => `${x},${y},${z}`).sort())
+    }
+  })
+
   it('rotates a non-square entity around its geometric centre instead of its bounding-box corner', () => {
     const source: Voxel[] = []
     for (let x = 0; x <= 3; x += 1) {

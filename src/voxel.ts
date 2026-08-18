@@ -673,6 +673,26 @@ export function voxelBoundsPivot(voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | '
   }
 }
 
+/**
+ * A quarter turn can only preserve both the exact geometric centre and the
+ * voxel lattice when the two dimensions perpendicular to the turn have the
+ * same parity.  For example, a 2 x 3 footprint has a half-cell centre on one
+ * axis and a whole-cell centre on the other.  Rotating that footprint around
+ * the exact centre necessarily produces half-integer cell coordinates.
+ *
+ * Keep this decision in one place so callers do not silently round transformed
+ * coordinates after the fact (rounding can collapse two voxels into one).
+ */
+function rotationPlaneHasCompatibleParity(
+  bounds: VoxelBounds,
+  axis: VoxelTransformAxis,
+): boolean {
+  const spanParity = (min: number, max: number) => Math.abs(max - min) % 2
+  if (axis === 'x') return spanParity(bounds.min.y, bounds.max.y) === spanParity(bounds.min.z, bounds.max.z)
+  if (axis === 'y') return spanParity(bounds.min.x, bounds.max.x) === spanParity(bounds.min.z, bounds.max.z)
+  return spanParity(bounds.min.x, bounds.max.x) === spanParity(bounds.min.y, bounds.max.y)
+}
+
 export function voxelEntityId(voxel: Voxel): string {
   return voxel.entityId ?? `legacy:${voxelKey(voxel)}`
 }
@@ -941,11 +961,41 @@ export function rotateVoxelsAroundPivot(
   })
 }
 
-/** Rotate around the selected voxels' actual geometric centre. */
+/**
+ * Rotate around the selected voxels' geometric centre while keeping the
+ * result on the discrete voxel lattice.
+ *
+ * When the perpendicular dimensions have compatible parity, the exact centre
+ * is safe and is used.  With mixed parity, an exact quarter-turn centre lies
+ * between cells.  In that case use the canonical integer-grid quarter turn
+ * around the occupied bounding rectangle.  It differs from the mathematical
+ * centre by at most half a cell, but never creates half-cell coordinates,
+ * never needs a lossy post-transform round, and four quarter turns are stable.
+ */
 export function rotateVoxels(voxels: Voxel[], axis: VoxelTransformAxis, degrees: 90 | 180 | 270): Voxel[] {
   if (!voxels.length) return []
+  const bounds = voxelBounds(voxels)
   const pivot = voxelBoundsPivot(voxels)
-  return pivot ? rotateVoxelsAroundPivot(voxels, axis, degrees, pivot) : []
+  if (!bounds || !pivot) return []
+  if (degrees === 180 || rotationPlaneHasCompatibleParity(bounds, axis)) {
+    return rotateVoxelsAroundPivot(voxels, axis, degrees, pivot)
+  }
+
+  return voxels.map((voxel) => {
+    if (axis === 'x') {
+      return degrees === 90
+        ? { ...voxel, y: bounds.min.y + bounds.max.z - voxel.z, z: bounds.min.z + voxel.y - bounds.min.y }
+        : { ...voxel, y: bounds.min.y + voxel.z - bounds.min.z, z: bounds.min.z + bounds.max.y - voxel.y }
+    }
+    if (axis === 'y') {
+      return degrees === 90
+        ? { ...voxel, x: bounds.min.x + voxel.z - bounds.min.z, z: bounds.min.z + bounds.max.x - voxel.x }
+        : { ...voxel, x: bounds.min.x + bounds.max.z - voxel.z, z: bounds.min.z + voxel.x - bounds.min.x }
+    }
+    return degrees === 90
+      ? { ...voxel, x: bounds.min.x + bounds.max.y - voxel.y, y: bounds.min.y + voxel.x - bounds.min.x }
+      : { ...voxel, x: bounds.min.x + voxel.y - bounds.min.y, y: bounds.min.y + bounds.max.x - voxel.x }
+  })
 }
 
 export function findInstanceVoxelAtSceneVoxel(instance: SceneInstance, asset: VoxelAsset, sceneVoxel: Pick<Voxel, 'x' | 'y' | 'z'>): Voxel | undefined {
