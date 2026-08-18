@@ -1610,7 +1610,11 @@ function App() {
     checkedTreePartIds: [...checkedTreePartIds],
   })
 
-  const recordHistoryBeforeChange = (before: ProjectState, after: ProjectState) => {
+  const recordHistoryBeforeChange = (
+    before: ProjectState,
+    after: ProjectState,
+    equals: (left: ProjectState, right: ProjectState) => boolean = sameHistoryProject,
+  ) => {
     const afterEntry: ProjectHistoryEntry = {
       project: after,
       editEntityId,
@@ -1621,7 +1625,7 @@ function App() {
       historyRef.current,
       makeHistoryEntry(before),
       afterEntry,
-      (left, right) => sameHistoryProject(left.project, right.project),
+      (left, right) => equals(left.project, right.project),
       historyLimitForProject(before),
     )
     if (recorded) historyEpochRef.current += 1
@@ -5809,7 +5813,12 @@ function App() {
     const nextProject = buildSceneDiscreteTransformProject(sourceProject, parts, mode, axis, degrees)
     if (!nextProject) return false
     const selection = resolveDiscreteTransformSelection(sourceProject, parts)
-    recordHistoryBeforeChange(sourceProject, nextProject)
+    // A transform is already a fully materialized transaction. Do not use
+    // the general content-signature cache here: it is deliberately optimized
+    // for normal edits and can retain an array identity after a large
+    // transform, making a real rotation/mirror look like a no-op to history.
+    const recorded = recordHistoryBeforeChange(sourceProject, nextProject, (left, right) => left === right)
+    if (!recorded) return false
     // A discrete transform changes the absolute coordinates of every voxel in
     // the selected object. Reconcile the complete index atomically instead of
     // trying to maintain a partial owner list while component IDs and lazy

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_SCENE_BOUND_VOXELS, MIN_SCENE_BOUND_VOXELS, VOXEL_WORLD_SIZE, Voxel, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceLocalVoxelToSceneVoxelFast, instanceRotationPivot, instanceVoxelPairs, makeAssemblyAssetFromSceneParts, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, sceneNameForAsset, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueSceneName, uniqueTemplateAssetName, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
+import { MAX_SCENE_BOUND_VOXELS, MIN_SCENE_BOUND_VOXELS, VOXEL_WORLD_SIZE, Voxel, adjacentVoxel, deduplicateVoxels, findInstanceVoxelAtSceneVoxel, instanceLocalVoxelToSceneVoxel, instanceLocalVoxelToSceneVoxelFast, instanceRotationPivot, instanceVoxelPairs, makeAssemblyAssetFromSceneParts, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStl, makeStlWithDiagnostics, mirrorVoxels, nextVoxelY, normalizeProjectNaming, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, rotateVoxelsAroundPivot, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, sceneNameForAsset, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueSceneName, uniqueTemplateAssetName, voxelBounds, voxelBoundsPivot, voxelCenterToWorld, voxelComponentAt, voxelComponents, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 
 describe('莫测造境体素核心数据', () => {
   it('creates the four-style sample neighborhood on a 1mm grid', () => {
@@ -512,6 +512,31 @@ describe('莫测造境体素核心数据', () => {
       for (let turn = 0; turn < 4; turn += 1) result = rotateVoxels(result, axis, 90)
       expect(signature(result)).toEqual(signature(source))
     }
+  })
+
+  it('rotates a non-square entity around its geometric centre instead of its bounding-box corner', () => {
+    const source: Voxel[] = []
+    for (let x = 0; x <= 3; x += 1) {
+      for (let y = 0; y <= 1; y += 1) source.push({ x, y, z: 0, materialId: 'stone' })
+    }
+    const pivot = voxelBoundsPivot(source)
+    expect(pivot).toEqual({ x: 1.5, y: 0.5, z: 0 })
+    const rotated = rotateVoxelsAroundPivot(source, 'z', 90, pivot!)
+    expect(voxelBoundsPivot(rotated)).toEqual(pivot)
+    expect(new Set(rotated.map(({ x, y, z }) => `${x},${y},${z}`)).size).toBe(source.length)
+    expect(voxelBounds(rotated)).toEqual({ min: { x: 1, y: -1, z: 0 }, max: { x: 2, y: 2, z: 0 } })
+  })
+
+  it('keeps a centred entity stable through four explicit quarter turns', () => {
+    const source: Voxel[] = [
+      { x: -2, y: 1, z: 0, materialId: 'stone', entityId: 'manual' },
+      { x: 1, y: 1, z: 0, materialId: 'jade', entityId: 'manual' },
+      { x: -2, y: 2, z: 0, materialId: 'gold', entityId: 'manual' },
+    ]
+    const pivot = voxelBoundsPivot(source)!
+    let result = source
+    for (let turn = 0; turn < 4; turn += 1) result = rotateVoxelsAroundPivot(result, 'z', 90, pivot)
+    expect(result).toEqual(source)
   })
 
   it('maps scene grid cells to centered asset voxels, including rotated instances', () => {

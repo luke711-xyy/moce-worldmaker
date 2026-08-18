@@ -655,6 +655,24 @@ export function voxelBounds(voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>)
   return { min, max }
 }
 
+/**
+ * Return the centre of the occupied voxel-cell bounds in voxel-index space.
+ *
+ * Voxel coordinates identify cells, not their corner coordinates.  Therefore
+ * the centre of cells `min..max` is `(min + max) / 2`.  It is intentionally
+ * allowed to be a half integer: rotating an even-sized footprint around its
+ * true centre still maps cell centres back onto the integer voxel lattice.
+ */
+export function voxelBoundsPivot(voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>): { x: number; y: number; z: number } | null {
+  const bounds = voxelBounds(voxels)
+  if (!bounds) return null
+  return {
+    x: (bounds.min.x + bounds.max.x) / 2,
+    y: (bounds.min.y + bounds.max.y) / 2,
+    z: (bounds.min.z + bounds.max.z) / 2,
+  }
+}
+
 export function voxelEntityId(voxel: Voxel): string {
   return voxel.entityId ?? `legacy:${voxelKey(voxel)}`
 }
@@ -891,36 +909,43 @@ export function mirrorVoxels(voxels: Voxel[], axis: VoxelTransformAxis): Voxel[]
   return voxels.map((voxel) => ({ ...voxel, [axis]: min + max - voxel[axis] }))
 }
 
-export function rotateVoxels(voxels: Voxel[], axis: VoxelTransformAxis, degrees: 90 | 180 | 270): Voxel[] {
-  if (!voxels.length) return []
-  const bounds = voxelBounds(voxels)!
-  const { min: minBounds, max: maxBounds } = bounds
-  const minX = minBounds.x
-  const maxX = maxBounds.x
-  const minY = minBounds.y
-  const maxY = maxBounds.y
-  const minZ = minBounds.z
-  const maxZ = maxBounds.z
+/** Rotate around an explicit voxel-cell centre, preserving the entity's place. */
+export function rotateVoxelsAroundPivot(
+  voxels: Voxel[],
+  axis: VoxelTransformAxis,
+  degrees: 90 | 180 | 270,
+  pivot: { x: number; y: number; z: number },
+): Voxel[] {
   return voxels.map((voxel) => {
+    const dx = voxel.x - pivot.x
+    const dy = voxel.y - pivot.y
+    const dz = voxel.z - pivot.z
     if (degrees === 180) {
-      if (axis === 'x') return { ...voxel, y: minY + maxY - voxel.y, z: minZ + maxZ - voxel.z }
-      if (axis === 'y') return { ...voxel, x: minX + maxX - voxel.x, z: minZ + maxZ - voxel.z }
-      return { ...voxel, x: minX + maxX - voxel.x, y: minY + maxY - voxel.y }
+      if (axis === 'x') return { ...voxel, y: pivot.y - dy, z: pivot.z - dz }
+      if (axis === 'y') return { ...voxel, x: pivot.x - dx, z: pivot.z - dz }
+      return { ...voxel, x: pivot.x - dx, y: pivot.y - dy }
     }
     if (axis === 'x') {
       return degrees === 90
-        ? { ...voxel, y: minY + maxZ - voxel.z, z: minZ + voxel.y - minY }
-        : { ...voxel, y: minY + voxel.z - minZ, z: minZ + maxY - voxel.y }
+        ? { ...voxel, y: pivot.y - dz, z: pivot.z + dy }
+        : { ...voxel, y: pivot.y + dz, z: pivot.z - dy }
     }
     if (axis === 'y') {
       return degrees === 90
-        ? { ...voxel, x: minX + voxel.z - minZ, z: minZ + maxX - voxel.x }
-        : { ...voxel, x: minX + maxZ - voxel.z, z: minZ + voxel.x - minX }
+        ? { ...voxel, x: pivot.x + dz, z: pivot.z - dx }
+        : { ...voxel, x: pivot.x - dz, z: pivot.z + dx }
     }
     return degrees === 90
-      ? { ...voxel, x: minX + maxY - voxel.y, y: minY + voxel.x - minX }
-      : { ...voxel, x: minX + voxel.y - minY, y: minY + maxX - voxel.x }
+      ? { ...voxel, x: pivot.x - dy, y: pivot.y + dx }
+      : { ...voxel, x: pivot.x + dy, y: pivot.y - dx }
   })
+}
+
+/** Rotate around the selected voxels' actual geometric centre. */
+export function rotateVoxels(voxels: Voxel[], axis: VoxelTransformAxis, degrees: 90 | 180 | 270): Voxel[] {
+  if (!voxels.length) return []
+  const pivot = voxelBoundsPivot(voxels)
+  return pivot ? rotateVoxelsAroundPivot(voxels, axis, degrees, pivot) : []
 }
 
 export function findInstanceVoxelAtSceneVoxel(instance: SceneInstance, asset: VoxelAsset, sceneVoxel: Pick<Voxel, 'x' | 'y' | 'z'>): Voxel | undefined {
