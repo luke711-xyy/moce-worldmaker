@@ -27,6 +27,36 @@ export type RuntimeLocalCoord = {
   lz: number
 }
 
+export type SceneWorldPoint = { x: number; y: number; z: number }
+
+/**
+ * Convert a Three.js scene-space ray to the runtime ray coordinate system.
+ *
+ * Project voxels use X/Z as the ground plane and Y as height. In Three.js the
+ * project coordinates are rendered as world (X, Z, Y), so the runtime DDA
+ * receives world X as ground-X, world Y as ground-Z, and world Z as height.
+ * Keeping this conversion next to the voxel conversion functions prevents
+ * pointer hit testing from silently swapping ground depth and height.
+ */
+export function sceneWorldRayToRuntime(
+  origin: SceneWorldPoint,
+  direction: SceneWorldPoint,
+  voxelWorldSize: number,
+): { origin: SceneWorldPoint; direction: SceneWorldPoint } {
+  return {
+    origin: {
+      x: origin.x / voxelWorldSize,
+      y: origin.y / voxelWorldSize,
+      z: origin.z / voxelWorldSize,
+    },
+    direction: {
+      x: direction.x,
+      y: direction.y,
+      z: direction.z,
+    },
+  }
+}
+
 /**
  * Project files historically store X/Z on the ground plane and Y as height.
  * Runtime code uses the editor-facing X/Y ground plane with Z as height.

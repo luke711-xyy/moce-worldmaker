@@ -6,6 +6,7 @@ import {
   runtimeLocalCoord,
   runtimeLocalIndex,
   runtimeVoxelToProject,
+  sceneWorldRayToRuntime,
 } from './runtime-coordinates'
 import { SceneOccupancyIndex } from './spatial-index'
 import { AssetTransformCache } from './asset-transform-cache'
@@ -34,6 +35,17 @@ describe('runtime coordinates', () => {
     expect(runtimeChunkCoord(runtime)).toEqual({ cx: -1, cy: -2, cz: 1 })
     expect(runtimeLocalCoord(runtime)).toEqual({ lx: 31, ly: 31, lz: 0 })
     expect(runtimeLocalIndex(runtimeLocalCoord(runtime))).toBe(31 | (31 << 5))
+  })
+
+  it('maps scene-world rays to the runtime ground/height axes', () => {
+    expect(sceneWorldRayToRuntime(
+      { x: 10, y: 20, z: 30 },
+      { x: 1, y: 2, z: 3 },
+      10,
+    )).toEqual({
+      origin: { x: 1, y: 2, z: 3 },
+      direction: { x: 1, y: 2, z: 3 },
+    })
   })
 })
 
