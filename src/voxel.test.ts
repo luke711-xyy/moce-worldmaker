@@ -356,6 +356,13 @@ describe('莫测造境体素核心数据', () => {
     expect(stl).toContain('vertex 0.000000 0.000000 0.000000')
   })
 
+  it('scales the complete STL bounds when the configured voxel edge length changes', () => {
+    const voxel = { x: 0, y: 0, z: 0, materialId: 'stone' }
+    const stl = makeStl({ ...makeDefaultProject().assets[0], voxels: [voxel] }, 4)
+    expect(stl).toContain('vertex 4.000000 4.000000 4.000000')
+    expect(stl).toContain('vertex 0.000000 0.000000 0.000000')
+  })
+
   it('welds vertices, unions cells, and bridges diagonal voxel contacts before STL export', () => {
     const asset = { ...makeDefaultProject().assets[0], voxels: [
       { x: 0, y: 0, z: 0, materialId: 'stone' },

@@ -1681,7 +1681,7 @@ function App() {
     updateProject((draft) => { draft.voxelSizeMm = next })
     setVoxelSizeDraft(next)
     setVoxelSizeOpen(false)
-    setNotice(`已设置体素边长 · ${formatVoxelSizeMm(next)} mm · 将在 STL 导出时生效`)
+    setNotice(`已设置体素边长 · ${formatVoxelSizeMm(next)} mm · 将在 STL/GLB 导出时生效；标准 VOX 仅保存逻辑体素网格`)
   }
 
   const sceneParts = useMemo(() => sceneEntityParts(project), [project])
@@ -4270,7 +4270,7 @@ function App() {
     const exportName = selectedAsset?.name ?? selectedEntityParts[0]?.label ?? '选中实体'
     try {
       const exportAsset = createVoxelExportAsset(`vox-export-${Date.now()}`, exportName, selectedEntityParts)
-      await runVoxelExport(exportAsset, 'vox', `${exportName}-选中实体.vox`, `${hasNonCubeVoxels(exportAsset.voxels) ? '提示：VOX 不支持非立方体几何，已按逻辑立方体体素降级导出 · ' : ''}已导出选中实体 VOX · ${selectedEntityParts.length} 个实体`, projectRef.current.voxelSizeMm)
+      await runVoxelExport(exportAsset, 'vox', `${exportName}-选中实体.vox`, `提示：标准 VOX 只保存逻辑体素网格，当前毫米设置不会写入 · ${hasNonCubeVoxels(exportAsset.voxels) ? '非立方体几何已按逻辑立方体体素降级 · ' : ''}已导出选中实体 VOX · ${selectedEntityParts.length} 个实体`, projectRef.current.voxelSizeMm)
     } catch (error) {
       setNotice(`VOX 导出失败 · ${error instanceof Error ? error.message : '无法生成文件'}`)
     }
@@ -4300,7 +4300,7 @@ function App() {
     try {
       const name = projectRef.current.name || '莫测造境场景'
       const exportAsset = createVoxelExportAsset(`scene-vox-export-${Date.now()}`, name, allParts)
-      await runVoxelExport(exportAsset, 'vox', `${name}-完整场景.vox`, `${hasNonCubeVoxels(exportAsset.voxels) ? '提示：VOX 不支持非立方体几何，已按逻辑立方体体素降级导出 · ' : ''}已导出完整场景 VOX · ${allParts.length} 个实体`, projectRef.current.voxelSizeMm)
+      await runVoxelExport(exportAsset, 'vox', `${name}-完整场景.vox`, `提示：标准 VOX 只保存逻辑体素网格，当前毫米设置不会写入 · ${hasNonCubeVoxels(exportAsset.voxels) ? '非立方体几何已按逻辑立方体体素降级 · ' : ''}已导出完整场景 VOX · ${allParts.length} 个实体`, projectRef.current.voxelSizeMm)
     } catch (error) {
       setNotice(`场景 VOX 导出失败 · ${error instanceof Error ? error.message : '无法生成文件'}`)
     }
@@ -6299,7 +6299,7 @@ function App() {
               <button className={`micro-control ${voxelSizeOpen ? 'active' : ''}`} onClick={() => { setVoxelSizeDraft(project.voxelSizeMm); setVoxelSizeOpen((value) => !value); setBoundaryOpen(false) }}><Grid3X3 size={14} /> {formatVoxelSizeMm(project.voxelSizeMm)} mm体素 <ChevronDown size={13} /></button>
               {voxelSizeOpen && <div className="voxel-size-popover" onClick={(event) => event.stopPropagation()}>
                 <div className="boundary-popover-title">体素边长</div>
-                <div className="boundary-popover-subtitle">每个体素导出 STL 后代表的实际边长</div>
+                <div className="boundary-popover-subtitle">每个体素导出 STL / GLB 后代表的实际边长；标准 VOX 只保存逻辑体素网格</div>
                 <div className="voxel-size-options">{[0.25, 0.5, 1, 2, 3, 5].map((value) => <button key={value} className={voxelSizeDraft === value ? 'active' : ''} onClick={() => { setVoxelSizeDraft(value); applyVoxelSize(value) }}>{formatVoxelSizeMm(value)} mm</button>)}</div>
                 <label className="boundary-field voxel-size-field"><span>自定义</span><NumericInput min={0.1} max={100} step={0.1} value={voxelSizeDraft} onCommit={setVoxelSizeDraft} /><em>mm</em></label>
                 <div className="boundary-limit">允许范围：0.1–100 mm</div>
@@ -7504,7 +7504,7 @@ function SliceDialog({ parts, project, name, onClose, onNotice }: { parts: Scene
         entries.push({ name: `${asset.name}.${modelFormat}`, data: asArrayBuffer(data) })
       }
       downloadBlob(new Blob([createZip(entries)], { type: 'application/zip' }), `${name}-${slicePlaneLabel(plane)}-模型切片.zip`)
-      onNotice(`${modelFormat === 'vox' && layers.some((layer) => hasNonCubeVoxels(layer.voxels)) ? '提示：VOX 不支持非立方体几何，已按逻辑立方体体素降级导出 · ' : ''}已导出 ${layers.length} 个 ${modelFormat.toUpperCase()} 模型切片`)
+      onNotice(`${modelFormat === 'vox' ? `提示：标准 VOX 只保存逻辑体素网格，当前毫米设置不会写入 · ${layers.some((layer) => hasNonCubeVoxels(layer.voxels)) ? '非立方体几何已按逻辑立方体体素降级 · ' : ''}` : ''}已导出 ${layers.length} 个 ${modelFormat.toUpperCase()} 模型切片`)
     } catch (error) {
       onNotice(`模型切片导出失败 · ${error instanceof Error ? error.message : '无法生成文件'}`)
     }
