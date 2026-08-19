@@ -266,9 +266,7 @@ export function buildGreedyMesh(voxels: ReadonlyArray<MesherVoxel>, options: Gre
             const sideUOccupied = occupiedAt(sideU)
             const sideVOccupied = occupiedAt(sideV)
             const cornerOccupied = occupiedAt(corner)
-            const ao = sideUOccupied && sideVOccupied
-              ? 0.52
-              : 1 - (sideUOccupied ? 0.18 : 0) - (sideVOccupied ? 0.18 : 0) - (cornerOccupied ? 0.10 : 0)
+            const ao = Math.max(0.84, 1 - (sideUOccupied ? 0.08 : 0) - (sideVOccupied ? 0.08 : 0) - (cornerOccupied ? 0.04 : 0))
             aoValues.push(ao)
             materialIds.push(cell.materialId)
           })

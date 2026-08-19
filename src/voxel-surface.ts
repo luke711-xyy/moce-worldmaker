@@ -285,7 +285,7 @@ export function buildVoxelSurfaceMesh(voxels: ReadonlyArray<Voxel>, colorResolve
     for (const ox of [-1, 0]) for (const oy of [-1, 0]) for (const oz of [-1, 0]) {
       if (occupied.has(cellKey(px + ox, py + oy, pz + oz))) occupiedAround += 1
     }
-    weldedAo.push(1 - Math.min(0.24, occupiedAround * 0.03))
+    weldedAo.push(1 - Math.min(0.12, occupiedAround * 0.015))
     remapped.push(next)
   }
 
