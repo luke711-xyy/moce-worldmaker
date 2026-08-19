@@ -25,7 +25,8 @@ button { border: 0; cursor: pointer; color: inherit; }
 .app-shell { width: 100%; min-width: var(--editor-min-width); height: 100dvh; min-height: 100svh; display: flex; flex-direction: column; background: #171a1d; }
 .topbar { min-height: calc(64px + var(--safe-top)); height: auto; flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; align-content: center; row-gap: 5px; border-bottom: 1px solid #303638; padding: var(--safe-top) max(18px, calc(18px + var(--safe-right))) 0 max(22px, calc(22px + var(--safe-left))); background: #171a1d; }
 .brand-lockup { display: flex; align-items: center; gap: 10px; width: 260px; flex: 0 0 260px; }
-.brand-mark { width: 30px; height: 30px; display: grid; place-items: center; color: #f3caa1; border: 1px solid #6c4b38; background: #282323; }
+.brand-mark { width: 34px; height: 34px; display: grid; place-items: center; overflow: hidden; color: #f3caa1; border: 1px solid #6c4b38; background: #090d0f; }
+.brand-logo { display: block; width: 100%; height: 100%; object-fit: cover; }
 .brand-name { font-size: 18px; font-weight: 700; letter-spacing: .12em; line-height: 1.15; }
 .brand-subtitle { color: #92999a; font-size: 10px; letter-spacing: .08em; margin-top: 3px; }
 .top-actions { min-width: 0; min-height: 34px; height: auto; display: flex; flex-wrap: wrap; align-items: center; align-content: center; gap: 4px; flex: 1 1 420px; }
@@ -570,7 +571,7 @@ button { border: 0; cursor: pointer; color: inherit; }
    chrome and floating controls consume less vertical space. */
 @media (max-height: 720px) {
   .topbar { min-height: calc(54px + var(--safe-top)); height: auto; flex-basis: auto; }
-  .brand-mark { width: 27px; height: 27px; }
+  .brand-mark { width: 30px; height: 30px; }
   .brand-name { font-size: 16px; }
   .viewport-toolbar { height: 40px; flex-basis: 40px; }
   .viewport-footer { min-height: calc(44px + var(--safe-bottom)); height: auto; flex-basis: auto; }
@@ -622,12 +623,13 @@ button { border: 0; cursor: pointer; color: inherit; }
 .asset-cloud-progress { display: flex; align-items: center; gap: 3px; color: #c88672; font: 8px 'DM Mono', monospace; }
 
 .auth-backdrop { position: fixed; inset: 0; z-index: 500; display: grid; place-items: center; padding: 24px; background: rgba(5,8,9,.72); }
-.auth-backdrop.auth-gate { z-index: 2000; padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left)); background: #0b1011; }
+.auth-backdrop.auth-gate { z-index: 2000; padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left)); background-color: #0b1011; background-position: center; background-repeat: no-repeat; background-size: cover; }
 .auth-gate .auth-dialog { width: min(430px, calc(100vw - 48px)); }
-.auth-dialog { position: relative; width: min(390px, calc(100vw - 32px)); padding: 30px; color: #dbe2de; background: #20282b; border: 1px solid #586466; box-shadow: 0 24px 80px rgba(0,0,0,.48); }
+.auth-dialog { position: relative; width: min(390px, calc(100vw - 32px)); padding: 30px; color: #dbe2de; background: rgba(24,31,33,.92); border: 1px solid rgba(191,205,204,.55); box-shadow: 0 24px 80px rgba(0,0,0,.48); backdrop-filter: blur(6px); }
 .auth-close { position: absolute; top: 12px; right: 12px; display: grid; place-items: center; width: 30px; height: 30px; color: #aab5b2; background: transparent; border: 1px solid transparent; }
 .auth-close:hover { color: #fff0df; border-color: #a9523c; }
-.auth-mark { display: grid; place-items: center; width: 38px; height: 38px; margin-bottom: 16px; color: #fff0df; background: #a9523c; border: 1px solid #d47b5e; }
+.auth-mark { display: grid; place-items: center; width: 58px; height: 58px; margin-bottom: 18px; overflow: hidden; background: #090d0f; border: 1px solid #d47b5e; }
+.auth-logo { display: block; width: 100%; height: 100%; object-fit: cover; }
 .auth-dialog h2 { margin: 0 0 8px; color: #f4eee4; font-size: 22px; }
 .auth-subtitle { margin: 0 0 22px; color: #9aa6a3; font: 11px 'DM Mono', monospace; }
 .auth-dialog form { display: grid; gap: 14px; }

@@ -33,6 +33,8 @@ import { createZip } from './zip'
 import { assetPreviewAsset, withAssetThumbnail } from './asset-thumbnail'
 import { CloudAssetSummary, CloudProgress, CloudSceneSummary, CloudUsage, deleteCloudAsset, deleteCloudScene, downloadCloudObject, loadCloudAssetPreview, loadCloudLibrary, loadCloudUsage, uploadCloudAsset, uploadCloudScene } from './cloud-backup'
 import { AuthUser, loadAuthUser, loginAuthUser, logoutAuthUser, registerAuthUser, requestPasswordReset, resendVerificationEmail, resetAuthPassword, setCloudAuthRequiredHandler, verifyAuthEmail } from './auth'
+import loginBackgroundUrl from './assets/moce-login-background.png'
+import brandLogoUrl from './assets/moce-brand-logo.png'
 import './styles.css'
 
 function useStableEvent<T extends (...args: any[]) => any>(handler: T): T {
@@ -6261,7 +6263,7 @@ function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand-lockup">
-          <div className="brand-mark"><Box size={19} strokeWidth={1.7} /></div>
+          <div className="brand-mark"><img className="brand-logo" src={brandLogoUrl} alt="莫测造境" draggable={false} /></div>
           <div><div className="brand-name">莫测造境</div><div className="brand-subtitle">体素世界编辑器</div></div>
         </div>
         <div className="top-actions">
@@ -6423,10 +6425,10 @@ function AuthDialog({ required, mode, user, onModeChange, onClose, onAuthenticat
   }
   const resetMode = Boolean(resetToken)
   const title = resetMode ? '设置新密码' : user ? '账号' : mode === 'login' ? '登录莫测造境' : mode === 'register' ? '注册莫测造境' : '忘记密码'
-  return <div className={`auth-backdrop ${required ? 'auth-gate' : ''}`} onPointerDown={(event) => { if (!required && event.target === event.currentTarget) onClose() }}>
+  return <div className={`auth-backdrop ${required ? 'auth-gate' : ''}`} style={required ? { backgroundImage: `linear-gradient(90deg, rgba(7,10,11,.66) 0%, rgba(7,10,11,.32) 46%, rgba(7,10,11,.58) 100%), url("${loginBackgroundUrl}")` } : undefined} onPointerDown={(event) => { if (!required && event.target === event.currentTarget) onClose() }}>
     <section className="auth-dialog" role="dialog" aria-modal="true">
       {!required && <button className="auth-close" onClick={onClose} aria-label="关闭"><X size={18} /></button>}
-      <div className="auth-mark"><Box size={20} /></div>
+      <div className="auth-mark"><img className="auth-logo" src={brandLogoUrl} alt="莫测造境" draggable={false} /></div>
       <h2>{title}</h2>
       {user && !resetMode ? <><p className="auth-subtitle">当前账号：{user.email}</p><button className="auth-submit" onClick={() => void onLogout()}>退出登录</button></> : <form onSubmit={submit}>
         {!resetMode && <label>邮箱<input type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>}
