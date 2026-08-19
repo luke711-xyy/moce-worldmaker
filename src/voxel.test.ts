@@ -907,8 +907,8 @@ describe('莫测造境体素核心数据', () => {
 
     expect(asset?.name).toBe('装配体 7')
     expect(asset?.sceneName).toBe('装配体 7')
-    expect(sceneNameForAsset({ ...asset!, name: '资产库改名' })).toBe('装配体 7')
-    expect(sceneNameForAsset({ ...asset!, name: '资产库改名', sceneName: '错误的旧字段' })).toBe('装配体 7')
+    expect(sceneNameForAsset({ ...asset!, name: '资产库改名' })).toBe('资产库改名')
+    expect(sceneNameForAsset({ ...asset!, name: '资产库改名', sceneName: '错误的旧字段' })).toBe('资产库改名')
     expect(asset?.assembly?.rootId).toBe('assembly-node-assembly-root')
     expect(asset?.assembly?.nodes).toHaveLength(2)
     expect(asset?.assembly?.nodes.find((node) => node.id === 'assembly-node-assembly-child')?.parentAssemblyId)

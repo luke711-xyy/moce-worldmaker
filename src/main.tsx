@@ -23,6 +23,7 @@ import { VoxelFacing, VoxelRotation, VoxelShape, VOXEL_FACE_FRAMES, applyVoxelVa
 import { buildVariantGeometry, variantGeometryCacheKey } from './voxel-variant-geometry'
 import { buildVoxelSurfaceMesh } from './voxel-surface'
 import { VoxelToolsGeometryResult, VoxelToolsWorkerClient, VoxelToolsShapeRequest } from './runtime/voxel-tools-client'
+import { ExportWorkerClient } from './runtime/export-worker-client'
 import { adjustHexHsl, hexToHsl } from './color-utils'
 import { SliceLayer, SlicePlane, SliceVoxel, sliceEntityParts, sliceLayerToAsset, slicePlaneLabel } from './slicing'
 import { computeScale, computeShell, GeometryScaleMode, GeometryVoxel, validScaleFactors, VoxelGeometryMesh, VoxelGeometryPreview } from './voxel-geometry'
@@ -1433,9 +1434,12 @@ function App() {
   const [colorPreview, setColorPreview] = useState<ColorPreviewState | null>(null)
   const [geometryPreview, setGeometryPreview] = useState<GeometryPreviewState | null>(null)
   const [geometryApplying, setGeometryApplying] = useState(false)
+  const [exportBusy, setExportBusy] = useState(false)
   const geometryApplyingRef = useRef(false)
   const geometryApplyRevisionRef = useRef(0)
   const geometryWorkerRef = useRef<VoxelToolsWorkerClient | null>(null)
+  const exportWorkerRef = useRef<ExportWorkerClient | null>(null)
+  const exportBusyRef = useRef(false)
   const geometryRequestRevisionRef = useRef(0)
   const colorPreviewPendingRef = useRef<ColorPreviewState | null>(null)
   const colorPreviewFrameRef = useRef<number | null>(null)
@@ -1459,6 +1463,11 @@ function App() {
     const client = new VoxelToolsWorkerClient()
     geometryWorkerRef.current = client
     return () => { client.dispose(); geometryWorkerRef.current = null }
+  }, [])
+  useEffect(() => {
+    const client = new ExportWorkerClient()
+    exportWorkerRef.current = client
+    return () => { client.dispose(); exportWorkerRef.current = null }
   }, [])
   const [persistenceStatus, setPersistenceStatus] = useState<PersistenceStatus>('loading')
   const [libraryOpen, setLibraryOpen] = useState(false)
@@ -2299,8 +2308,16 @@ function App() {
     const anchor = document.createElement('a')
     anchor.href = url
     anchor.download = fileName
+    anchor.style.display = 'none'
+    document.body.appendChild(anchor)
     anchor.click()
-    URL.revokeObjectURL(url)
+    // Let the browser finish consuming the object URL before releasing it.
+    // Immediate revocation is not the source of the export freeze, but it can
+    // make large downloads intermittently disappear in Chromium/Safari.
+    window.setTimeout(() => {
+      URL.revokeObjectURL(url)
+      anchor.remove()
+    }, 1000)
   }
 
   const saveProjectToLibrary = async (forceSaveAs = false): Promise<boolean> => {
@@ -3260,23 +3277,10 @@ function App() {
   }
 
   const sceneNameForPlacement = (asset: VoxelAsset): string => {
-    // New templates carry an immutable scene-facing snapshot. Never consult
-    // the editable library label when that snapshot exists.
-    if (asset.sceneName?.trim() || asset.assembly?.sceneName?.trim()) return sceneNameForAsset(asset)
-
-    // Older ordinary templates cannot be retroactively reconstructed from
-    // the asset itself. If one is still represented in the current scene,
-    // however, its source link gives us the authored file-tree name. This
-    // makes old local records behave like new records without changing their
-    // library label or topology.
-    const sourceEntityIds = new Set(Object.entries(projectRef.current.customEntitySources ?? {})
-      .filter(([, source]) => source.assetId === asset.id)
-      .map(([entityId]) => entityId))
-    if (sourceEntityIds.size) {
-      const sourcePart = sceneEntityParts(projectRef.current).find((part) => sourceEntityIds.has(part.partId))
-      if (sourcePart) return sceneEntityTreeName(projectRef.current, sourcePart)
-    }
-    return sceneNameForAsset(asset)
+    // The asset-library label is the name the user chose for the reusable
+    // entity. Use it as the next scene entity's base name; uniqueSceneName
+    // below is the only place that may add a collision suffix.
+    return asset.name?.trim() || sceneNameForAsset(asset)
   }
 
   const placeAssetAt = (assetId: string, x: number, z: number) => {
@@ -3351,10 +3355,9 @@ function App() {
       // initial display name.
       if (!asset.assembly && materializedParts.length === 1) {
         const memberKey = `voxel:${materializedParts[0].entityId}`
-        // `asset.name` is the editable asset-library label. The scene-facing
-        // name is captured separately when the template is saved, so changing
-        // a template's library name cannot rename an entity that is placed
-        // back into a scene.
+        // Start from the current asset-library label. The scene-facing name is
+        // allocated independently so a collision gets a suffix without
+        // renaming either the existing scene entity or the library asset.
         const existingNames = Object.values(draft.entityNames ?? {})
         const sceneName = uniqueSceneName(existingNames, sceneNameForPlacement(asset), '实体')
         draft.entityNames = { ...(draft.entityNames ?? {}), [memberKey]: sceneName }
@@ -4100,40 +4103,54 @@ function App() {
     (voxel, part) => scenePartVoxelDisplayColor(projectRef.current, part, voxel),
   )
 
-  const exportSelectedPart = () => {
+  const runVoxelExport = async (asset: VoxelAsset, format: 'stl' | 'glb' | 'vox', fileName: string, noticeLabel: string, voxelSizeMm: number) => {
+    if (exportBusyRef.current) {
+      setNotice('已有导出任务正在进行，请稍候')
+      return
+    }
+    const client = exportWorkerRef.current
+    if (!client) {
+      setNotice('导出引擎尚未就绪，请稍候重试')
+      return
+    }
+    exportBusyRef.current = true
+    setExportBusy(true)
+    setNotice(`正在导出 ${format.toUpperCase()} · 0%`)
+    try {
+      const result = await client.export(asset, format, voxelSizeMm, (progress, phase) => {
+        setNotice(`${phase} · ${Math.max(1, Math.round(progress * 100))}%`)
+      })
+      const mimeType = format === 'stl' ? 'model/stl' : format === 'glb' ? 'model/gltf-binary' : 'application/octet-stream'
+      downloadBinaryFile(result.data, fileName, mimeType)
+      const diagnostics = result.diagnostics
+      setNotice(`${noticeLabel}${diagnostics?.bridgeVoxelCount ? ` · 已补连接 ${diagnostics.bridgeVoxelCount} 个体素` : ''}${diagnostics?.nonManifoldEdgesAfter ? ` · 仍有 ${diagnostics.nonManifoldEdgesAfter} 条非流形边` : ''}`)
+    } catch (error) {
+      setNotice(`${format.toUpperCase()} 导出失败 · ${error instanceof Error ? error.message : '无法生成文件'}`)
+    } finally {
+      exportBusyRef.current = false
+      setExportBusy(false)
+    }
+  }
+
+  const exportSelectedPart = async () => {
     if (!selectedEntityParts.length) {
       setNotice('请先选择要导出的实体')
       return
     }
     const exportName = selectedAsset?.name ?? selectedEntityParts[0]?.label ?? '选中实体'
     const exportAsset = makeAssetFromSceneParts(`export-${Date.now()}`, exportName, selectedEntityParts, selectedAsset?.color ?? '#6c827d', selectedAsset?.accent ?? '#d2a354')
-    const { stl, diagnostics } = makeStlWithDiagnostics(exportAsset, projectRef.current.voxelSizeMm)
-    const blob = new Blob([stl], { type: 'model/stl' })
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = `${exportName}-选中实体.stl`
-    anchor.click()
-    URL.revokeObjectURL(url)
-    setNotice(`已导出选中实体 · ${exportName} · ${selectedEntityParts.length} 个实体${diagnostics.bridgeVoxelCount ? ` · 已补连接 ${diagnostics.bridgeVoxelCount} 个体素` : ''}${diagnostics.nonManifoldEdgesAfter ? ` · 仍有 ${diagnostics.nonManifoldEdgesAfter} 条非流形边` : ''}`)
+    await runVoxelExport(exportAsset, 'stl', `${exportName}-选中实体.stl`, `已导出选中实体 · ${exportName} · ${selectedEntityParts.length} 个实体`, projectRef.current.voxelSizeMm)
   }
 
-  const exportSceneStl = () => {
+  const exportSceneStl = async () => {
     const allParts = sceneEntityParts(projectRef.current)
     if (!allParts.length) {
       setNotice('当前场景没有可导出的实体')
       return
     }
     const sceneAsset = makeAssetFromSceneParts(`scene-export-${Date.now()}`, projectRef.current.name || '莫测造境场景', allParts, '#6c827d', '#d2a354')
-    const { stl, diagnostics } = makeStlWithDiagnostics(sceneAsset, projectRef.current.voxelSizeMm)
-    const blob = new Blob([stl], { type: 'model/stl' })
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = `${projectRef.current.name || '莫测造境场景'}-完整场景.stl`
-    anchor.click()
-    URL.revokeObjectURL(url)
-    setNotice(`已导出完整场景 STL · ${allParts.length} 个实体${diagnostics.bridgeVoxelCount ? ` · 已补连接 ${diagnostics.bridgeVoxelCount} 个体素` : ''}${diagnostics.nonManifoldEdgesAfter ? ` · 仍有 ${diagnostics.nonManifoldEdgesAfter} 条非流形边` : ''}`)
+    const name = projectRef.current.name || '莫测造境场景'
+    await runVoxelExport(sceneAsset, 'stl', `${name}-完整场景.stl`, `已导出完整场景 STL · ${allParts.length} 个实体`, projectRef.current.voxelSizeMm)
   }
 
   const exportSelectedPartGlb = async () => {
@@ -4144,15 +4161,13 @@ function App() {
     const exportName = selectedAsset?.name ?? selectedEntityParts[0]?.label ?? '选中实体'
     try {
       const exportAsset = createVoxelExportAsset(`glb-export-${Date.now()}`, exportName, selectedEntityParts)
-      const glb = await encodeGlb(exportAsset, (voxel) => voxel.paintMaterialId ?? voxel.materialId, projectRef.current.voxelSizeMm)
-      downloadBinaryFile(glb, `${exportName}-选中实体.glb`, 'model/gltf-binary')
-      setNotice(`已导出选中实体 GLB · ${selectedEntityParts.length} 个实体`)
+      await runVoxelExport(exportAsset, 'glb', `${exportName}-选中实体.glb`, `已导出选中实体 GLB · ${selectedEntityParts.length} 个实体`, projectRef.current.voxelSizeMm)
     } catch (error) {
       setNotice(`GLB 导出失败 · ${error instanceof Error ? error.message : '无法生成文件'}`)
     }
   }
 
-  const exportSelectedPartVox = () => {
+  const exportSelectedPartVox = async () => {
     if (!selectedEntityParts.length) {
       setNotice('请先选择要导出的实体')
       return
@@ -4160,9 +4175,7 @@ function App() {
     const exportName = selectedAsset?.name ?? selectedEntityParts[0]?.label ?? '选中实体'
     try {
       const exportAsset = createVoxelExportAsset(`vox-export-${Date.now()}`, exportName, selectedEntityParts)
-      const vox = encodeVox(exportAsset, (voxel) => voxel.paintMaterialId ?? voxel.materialId)
-      downloadBinaryFile(vox, `${exportName}-选中实体.vox`, 'application/octet-stream')
-      setNotice(`${hasNonCubeVoxels(exportAsset.voxels) ? '提示：VOX 不支持非立方体几何，已按逻辑立方体体素降级导出 · ' : ''}已导出选中实体 VOX · ${selectedEntityParts.length} 个实体`)
+      await runVoxelExport(exportAsset, 'vox', `${exportName}-选中实体.vox`, `${hasNonCubeVoxels(exportAsset.voxels) ? '提示：VOX 不支持非立方体几何，已按逻辑立方体体素降级导出 · ' : ''}已导出选中实体 VOX · ${selectedEntityParts.length} 个实体`, projectRef.current.voxelSizeMm)
     } catch (error) {
       setNotice(`VOX 导出失败 · ${error instanceof Error ? error.message : '无法生成文件'}`)
     }
@@ -4177,15 +4190,13 @@ function App() {
     try {
       const name = projectRef.current.name || '莫测造境场景'
       const exportAsset = createVoxelExportAsset(`scene-glb-export-${Date.now()}`, name, allParts)
-      const glb = await encodeGlb(exportAsset, (voxel) => voxel.paintMaterialId ?? voxel.materialId, projectRef.current.voxelSizeMm)
-      downloadBinaryFile(glb, `${name}-完整场景.glb`, 'model/gltf-binary')
-      setNotice(`已导出完整场景 GLB · ${allParts.length} 个实体`)
+      await runVoxelExport(exportAsset, 'glb', `${name}-完整场景.glb`, `已导出完整场景 GLB · ${allParts.length} 个实体`, projectRef.current.voxelSizeMm)
     } catch (error) {
       setNotice(`场景 GLB 导出失败 · ${error instanceof Error ? error.message : '无法生成文件'}`)
     }
   }
 
-  const exportSceneVox = () => {
+  const exportSceneVox = async () => {
     const allParts = sceneEntityParts(projectRef.current)
     if (!allParts.length) {
       setNotice('当前场景没有可导出的实体')
@@ -4194,9 +4205,7 @@ function App() {
     try {
       const name = projectRef.current.name || '莫测造境场景'
       const exportAsset = createVoxelExportAsset(`scene-vox-export-${Date.now()}`, name, allParts)
-      const vox = encodeVox(exportAsset, (voxel) => voxel.paintMaterialId ?? voxel.materialId)
-      downloadBinaryFile(vox, `${name}-完整场景.vox`, 'application/octet-stream')
-      setNotice(`${hasNonCubeVoxels(exportAsset.voxels) ? '提示：VOX 不支持非立方体几何，已按逻辑立方体体素降级导出 · ' : ''}已导出完整场景 VOX · ${allParts.length} 个实体`)
+      await runVoxelExport(exportAsset, 'vox', `${name}-完整场景.vox`, `${hasNonCubeVoxels(exportAsset.voxels) ? '提示：VOX 不支持非立方体几何，已按逻辑立方体体素降级导出 · ' : ''}已导出完整场景 VOX · ${allParts.length} 个实体`, projectRef.current.voxelSizeMm)
     } catch (error) {
       setNotice(`场景 VOX 导出失败 · ${error instanceof Error ? error.message : '无法生成文件'}`)
     }
@@ -6167,7 +6176,7 @@ function App() {
           <div className="top-divider" />
           <ActionButton icon={<WandSparkles size={17} />} label="模型转体素" onClick={() => modelImportInputRef.current?.click()} />
           <ActionButton icon={<Upload size={17} />} label="导入实体" onClick={() => entityFileInputRef.current?.click()} />
-          <ExportMenu label="导出场景" strong onExportStl={exportSceneStl} onExportGlb={exportSceneGlb} onExportVox={exportSceneVox} />
+          <ExportMenu label="导出场景" strong disabled={exportBusy} onExportStl={exportSceneStl} onExportGlb={exportSceneGlb} onExportVox={exportSceneVox} />
           <button className="icon-button" title="撤销" aria-label="撤销" disabled={!canUndo} onClick={undoProject}><Undo2 size={17} /></button>
           <button className="icon-button" title="重做" aria-label="重做" disabled={!canRedo} onClick={redoProject}><Redo2 size={17} /></button>
           <div className="top-spacer" />
@@ -6236,7 +6245,7 @@ function App() {
             <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { if (cameraControlApi) cameraControlApi.zoomOut(); else setZoomLevel((value) => stepZoomLevel(value, -1)); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${zoomTrackProgress(zoomLevel)}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { if (cameraControlApi) cameraControlApi.zoomIn(); else setZoomLevel((value) => stepZoomLevel(value, 1)); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{Math.round(zoomLevel)}%</span></div>
           </div>
         </section>
-        <MemoizedInspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} selectedTransformSignature={selectedEntityTransformSignature} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} transformPreview={transformPreview} geometryPreview={geometryPreview} shellThicknessOptions={geometryShellThicknessOptions} scaleOptions={geometryScaleOptions} onChangeColor={changeSelectedColor} onPreviewHsl={previewSelectedHsl} onCommitHsl={commitSelectedHsl} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onConfirmTransform={confirmDiscreteTransform} onCancelTransform={cancelTransformPreview} onExport={exportSelectedPart} onExportGlb={exportSelectedPartGlb} onExportVox={exportSelectedPartVox} onExportEntityFile={exportSelectedEntityFile} onOpenSlicer={() => setSliceDialogOpen(true)} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => { setCopyPreview(null); cancelTransformPreview() }} onStartShell={startShellPreview} onStartScale={startScalePreview} onChangeShellThickness={changeGeometryShellThickness} onChangeScale={changeGeometryScale} onConfirmGeometry={confirmGeometryPreview} onCancelGeometry={cancelGeometryPreview} onDelete={deleteSelected} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
+        <MemoizedInspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} selectedTransformSignature={selectedEntityTransformSignature} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} transformPreview={transformPreview} geometryPreview={geometryPreview} shellThicknessOptions={geometryShellThicknessOptions} scaleOptions={geometryScaleOptions} exportBusy={exportBusy} onChangeColor={changeSelectedColor} onPreviewHsl={previewSelectedHsl} onCommitHsl={commitSelectedHsl} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onConfirmTransform={confirmDiscreteTransform} onCancelTransform={cancelTransformPreview} onExport={exportSelectedPart} onExportGlb={exportSelectedPartGlb} onExportVox={exportSelectedPartVox} onExportEntityFile={exportSelectedEntityFile} onOpenSlicer={() => setSliceDialogOpen(true)} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => { setCopyPreview(null); cancelTransformPreview() }} onStartShell={startShellPreview} onStartScale={startScalePreview} onChangeShellThickness={changeGeometryShellThickness} onChangeScale={changeGeometryScale} onConfirmGeometry={confirmGeometryPreview} onCancelGeometry={cancelGeometryPreview} onDelete={deleteSelected} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
       </main>
       {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} selectedSceneLoading={selectedLibrarySceneLoading} selectionRevision={selectedLibrarySceneRevision} error={libraryError} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} cloudAssets={cloudAssets} cloudScenes={cloudScenes} cloudUsage={cloudUsage} cloudError={cloudError} cloudTransfers={cloudTransfers} cloudTransferErrors={cloudTransferErrors} onBackupCurrentScene={() => backupCurrentSceneToCloud()} onDownloadCloudScene={downloadCloudSceneToLocal} onDeleteCloudScene={removeCloudScene} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null); setSelectedLibrarySceneLoading(false) }} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} onBackupScene={backupStoredSceneToCloud} />}
       {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
@@ -6342,19 +6351,20 @@ function ActionButton({ icon, label, onClick, strong = false }: { icon: React.Re
   return <button className={`action-button ${strong ? 'action-strong' : ''}`} onClick={onClick}>{icon}<span>{label}</span></button>
 }
 
-function ExportMenu({ label, strong = false, onExportStl, onExportGlb, onExportVox, onExportEntityFile }: { label: string; strong?: boolean; onExportStl: () => void; onExportGlb: () => void | Promise<void>; onExportVox: () => void; onExportEntityFile?: () => void }) {
+function ExportMenu({ label, strong = false, disabled = false, onExportStl, onExportGlb, onExportVox, onExportEntityFile }: { label: string; strong?: boolean; disabled?: boolean; onExportStl: () => void; onExportGlb: () => void | Promise<void>; onExportVox: () => void; onExportEntityFile?: () => void }) {
   const [open, setOpen] = useState(false)
   const run = (action: () => void | Promise<void>) => {
+    if (disabled) return
     setOpen(false)
     void action()
   }
   return <div className="export-menu">
-    <button aria-label={label} className={`action-button ${strong ? 'action-strong' : ''}`} onClick={() => setOpen((value) => !value)}><Download size={17} /><span>{label}</span><ChevronDown size={13} /></button>
+    <button aria-label={label} disabled={disabled} className={`action-button ${strong ? 'action-strong' : ''}`} onClick={() => setOpen((value) => !value)}><Download size={17} /><span>{label}</span><ChevronDown size={13} /></button>
     {open && <div className="export-menu-popover" onPointerDown={(event) => event.stopPropagation()}>
-      <button onClick={() => run(onExportStl)}>导出 STL</button>
-      <button onClick={() => run(onExportGlb)}>导出 GLB</button>
-      <button onClick={() => run(onExportVox)}>导出 VOX</button>
-      {onExportEntityFile && <button onClick={() => run(onExportEntityFile)}>导出普通实体文件</button>}
+      <button disabled={disabled} onClick={() => run(onExportStl)}>导出 STL</button>
+      <button disabled={disabled} onClick={() => run(onExportGlb)}>导出 GLB</button>
+      <button disabled={disabled} onClick={() => run(onExportVox)}>导出 VOX</button>
+      {onExportEntityFile && <button disabled={disabled} onClick={() => run(onExportEntityFile)}>导出普通实体文件</button>}
     </div>}
   </div>
 }
@@ -7051,7 +7061,7 @@ function ToolButton({ icon, label, description, active, onClick }: { icon: React
   return <button className={`tool-button ${active ? 'active' : ''}`} data-tooltip={description} aria-label={label} onClick={onClick} title={description}>{icon}</button>
 }
 
-function Inspector({ entityName, source, selectedAsset, selectedPart, selectedParts, selectedTransformSignature, editEntityId, canEnterEditMode, editTargetId, selectedColor, previewColor, previewVoxelColors, previewMaterialColors, copyPreview, transformPreview, geometryPreview, shellThicknessOptions, scaleOptions, onChangeColor, onPreviewHsl, onCommitHsl, onMirror, onRotate, onConfirmTransform, onCancelTransform, onExport, onExportGlb, onExportVox, onExportEntityFile, onOpenSlicer, onDuplicate, onChangeCopyDirection, onChangeCopyGap, onConfirmDuplicate, onCancelDuplicate, onStartShell, onStartScale, onChangeShellThickness, onChangeScale, onConfirmGeometry, onCancelGeometry, onDelete, onSaveAsAsset, onEnterEditMode }: { entityName: string; source: string; selectedAsset?: VoxelAsset; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; selectedTransformSignature: string; editEntityId: string | null; canEnterEditMode: boolean; editTargetId: string; selectedColor: string; previewColor?: string; previewVoxelColors: Record<string, string>; previewMaterialColors: Record<string, string>; copyPreview: CopyPreviewState | null; transformPreview: DiscreteTransformPreviewState | null; geometryPreview: GeometryPreviewState | null; shellThicknessOptions: number[]; scaleOptions: { up: number[]; down: number[] }; onChangeColor: (color: string) => void; onPreviewHsl: (hueDelta: number, saturationTarget: number) => void; onCommitHsl: (hueDelta: number, saturationTarget: number) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onConfirmTransform: () => void; onCancelTransform: () => void; onExport: () => void; onExportGlb: () => void | Promise<void>; onExportVox: () => void; onExportEntityFile: () => void; onOpenSlicer: () => void; onDuplicate: (count: number) => void; onChangeCopyDirection: (axis: CopyDirectionAxis, sign: 1 | -1) => void; onChangeCopyGap: (gap: number) => void; onConfirmDuplicate: () => void; onCancelDuplicate: () => void; onStartShell: () => void; onStartScale: (mode: GeometryScaleMode) => void; onChangeShellThickness: (value: number) => void; onChangeScale: (mode: GeometryScaleMode, value: number) => void; onConfirmGeometry: () => void; onCancelGeometry: () => void; onDelete: () => void; onSaveAsAsset: () => void; onEnterEditMode: (entityId: string) => void }) {
+function Inspector({ entityName, source, selectedAsset, selectedPart, selectedParts, selectedTransformSignature, editEntityId, canEnterEditMode, editTargetId, selectedColor, previewColor, previewVoxelColors, previewMaterialColors, copyPreview, transformPreview, geometryPreview, shellThicknessOptions, scaleOptions, exportBusy, onChangeColor, onPreviewHsl, onCommitHsl, onMirror, onRotate, onConfirmTransform, onCancelTransform, onExport, onExportGlb, onExportVox, onExportEntityFile, onOpenSlicer, onDuplicate, onChangeCopyDirection, onChangeCopyGap, onConfirmDuplicate, onCancelDuplicate, onStartShell, onStartScale, onChangeShellThickness, onChangeScale, onConfirmGeometry, onCancelGeometry, onDelete, onSaveAsAsset, onEnterEditMode }: { entityName: string; source: string; selectedAsset?: VoxelAsset; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; selectedTransformSignature: string; editEntityId: string | null; canEnterEditMode: boolean; editTargetId: string; selectedColor: string; previewColor?: string; previewVoxelColors: Record<string, string>; previewMaterialColors: Record<string, string>; copyPreview: CopyPreviewState | null; transformPreview: DiscreteTransformPreviewState | null; geometryPreview: GeometryPreviewState | null; shellThicknessOptions: number[]; scaleOptions: { up: number[]; down: number[] }; exportBusy: boolean; onChangeColor: (color: string) => void; onPreviewHsl: (hueDelta: number, saturationTarget: number) => void; onCommitHsl: (hueDelta: number, saturationTarget: number) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onConfirmTransform: () => void; onCancelTransform: () => void; onExport: () => void; onExportGlb: () => void | Promise<void>; onExportVox: () => void; onExportEntityFile: () => void; onOpenSlicer: () => void; onDuplicate: (count: number) => void; onChangeCopyDirection: (axis: CopyDirectionAxis, sign: 1 | -1) => void; onChangeCopyGap: (gap: number) => void; onConfirmDuplicate: () => void; onCancelDuplicate: () => void; onStartShell: () => void; onStartScale: (mode: GeometryScaleMode) => void; onChangeShellThickness: (value: number) => void; onChangeScale: (mode: GeometryScaleMode, value: number) => void; onConfirmGeometry: () => void; onCancelGeometry: () => void; onDelete: () => void; onSaveAsAsset: () => void; onEnterEditMode: (entityId: string) => void }) {
   const [copyCount, setCopyCount] = useState(1)
   const [mirrorAxis, setMirrorAxis] = useState<'x' | 'y' | 'z'>('x')
   const [rotateAxis, setRotateAxis] = useState<'x' | 'y' | 'z'>('z')
@@ -7138,7 +7148,7 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
           </div>}
         <button onClick={onSaveAsAsset}><Save size={14} /> 保存为模板实体</button>
         <button className="danger-action" onClick={onDelete}><Trash2 size={14} /> 删除实体</button>
-        <ExportMenu label="导出实体" onExportStl={onExport} onExportGlb={onExportGlb} onExportVox={onExportVox} onExportEntityFile={onExportEntityFile} />
+        <ExportMenu label="导出实体" disabled={exportBusy} onExportStl={onExport} onExportGlb={onExportGlb} onExportVox={onExportVox} onExportEntityFile={onExportEntityFile} />
         <button className="slice-action" disabled={!selectedParts.length} onClick={onOpenSlicer}><Layers3 size={14} /> 模型实体模型切片</button>
       </div>
       </div>

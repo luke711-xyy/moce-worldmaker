@@ -88,24 +88,23 @@ export type AssetAssembly = {
 }
 
 /**
- * Resolve the name that should be written into the scene tree when a template
- * asset is materialized. `name` belongs to the asset-library namespace and is
- * intentionally the last fallback only. New assets carry the scene-facing
- * snapshot explicitly; assembly assets also carry it on `assembly` so the
- * root node remains stable after a library rename.
+ * Resolve the name written into the scene tree when an asset is placed.
+ *
+ * The asset-library label is the user's explicit name for the thing they are
+ * dragging. It therefore has priority over the historical sceneName snapshot.
+ * The snapshot remains as a fallback for old/incomplete records, but changing
+ * the display name in the library must be reflected the next time the asset is
+ * placed. Callers still run the result through uniqueSceneName so an existing
+ * scene object is never renamed or overwritten.
  */
 export function sceneNameForAsset(asset: Pick<VoxelAsset, 'name' | 'sceneName' | 'assembly'>, fallback = '实体'): string {
   const rootNodeName = asset.assembly?.rootId
     ? asset.assembly.nodes.find((node) => node.id === asset.assembly?.rootId)?.name
     : undefined
-  // Assembly snapshots are authoritative for the root of an assembly. Keep
-  // this ahead of the top-level field so an older asset whose library label
-  // was accidentally copied into `sceneName` can still recover its authored
-  // assembly name from the nested snapshot.
-  return asset.assembly?.sceneName?.trim()
+  return asset.name?.trim()
+    || asset.assembly?.sceneName?.trim()
     || asset.sceneName?.trim()
     || rootNodeName?.trim()
-    || asset.name?.trim()
     || fallback
 }
 
