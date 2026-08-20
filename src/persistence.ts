@@ -10,6 +10,8 @@ export type LibrarySceneSummary = {
   assetCount: number
   instanceCount: number
   customVoxelCount: number
+  assemblyCount: number
+  entityCount: number
   updatedAt: string
 }
 
@@ -22,11 +24,19 @@ export type LibraryResponse = {
 async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
   const response = await fetch(input, { headers: { 'Content-Type': 'application/json' }, ...init })
   if (!response.ok) {
+    if (response.status === 401) {
+      ;(globalThis as typeof globalThis & { __moceAuthRequired?: (() => void) | null }).__moceAuthRequired?.()
+    }
     const body = await response.json().catch(() => ({})) as { error?: string }
     throw new Error(body.error ?? `请求失败 · ${response.status}`)
   }
   return response.json() as Promise<T>
 }
+
+// Autosave and explicit save can be triggered close together. Serializing
+// writes for one scene prevents an older R2 blob from arriving after a newer
+// D1 summary and leaving the library metadata and scene content out of sync.
+const sceneSaveQueues = new Map<string, Promise<unknown>>()
 
 export function loadLibrary(): Promise<LibraryResponse> {
   return request<LibraryResponse>('/api/library')
@@ -36,8 +46,20 @@ export function loadScene(sceneId: string): Promise<ProjectState> {
   return request<ProjectState>(`/api/scenes/${encodeURIComponent(sceneId)}`)
 }
 
-export function saveScene(sceneId: string, sceneFile: MoceSceneFile | ProjectState): Promise<{ ok: boolean }> {
-  return request<{ ok: boolean }>(`/api/scenes/${encodeURIComponent(sceneId)}`, { method: 'PUT', body: JSON.stringify(sceneFile) })
+export function loadScenePreview(sceneId: string, signal?: AbortSignal): Promise<ProjectState> {
+  return request<ProjectState>(`/api/scenes/${encodeURIComponent(sceneId)}?preview=1`, { signal })
+}
+
+export function saveScene(sceneId: string, sceneFile: MoceSceneFile | ProjectState): Promise<{ ok: boolean; scene?: LibrarySceneSummary }> {
+  const previous = sceneSaveQueues.get(sceneId) ?? Promise.resolve()
+  const next = previous
+    .catch(() => undefined)
+    .then(() => request<{ ok: boolean; scene?: LibrarySceneSummary }>(`/api/scenes/${encodeURIComponent(sceneId)}`, { method: 'PUT', body: JSON.stringify(sceneFile) }))
+  sceneSaveQueues.set(sceneId, next)
+  void next.finally(() => {
+    if (sceneSaveQueues.get(sceneId) === next) sceneSaveQueues.delete(sceneId)
+  }).catch(() => undefined)
+  return next
 }
 
 export function importScene(sceneFile: MoceSceneFile): Promise<{ ok: boolean; sceneId: string; scene: LibrarySceneSummary }> {

@@ -2,3 +2,7 @@ node_modules/
 dist/
 tsconfig.tsbuildinfo
 .DS_Store
+.wrangler/
+.dev.vars
+.env
+.env.*

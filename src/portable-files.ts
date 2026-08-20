@@ -1,5 +1,5 @@
 import { MoceSceneFile, parseSceneFile } from './scene-file'
-import { AssetAssembly, SceneAssembly, SceneEntityPart, Voxel, VoxelAsset, ProjectState, makeAssetFromSceneParts, normalizeAssetCategoryPath } from './voxel'
+import { AssetAssembly, SceneAssembly, SceneEntityPart, Voxel, VoxelAsset, ProjectState, makeAssetFromSceneParts, normalizeAssetCategoryPath, scenePartVoxels, voxelBounds } from './voxel'
 
 export const MOCE_ASSET_FORMAT = 'moce-asset' as const
 export const MOCE_ENTITY_FORMAT = 'moce-entity' as const
@@ -71,6 +71,10 @@ function validateVoxel(value: unknown, label: string) {
   integer(voxel.y, `${label}.y`)
   integer(voxel.z, `${label}.z`)
   text(voxel.materialId, `${label}.materialId`)
+  if (voxel.paintMaterialId !== undefined) text(voxel.paintMaterialId, `${label}.paintMaterialId`)
+  if (voxel.shape !== undefined && (typeof voxel.shape !== 'string' || !['cube', 'tri-prism', 'quarter-cylinder', 'stair'].includes(voxel.shape))) throw new PortableFileError(`${label}.shape无效`)
+  if (voxel.facing !== undefined && (typeof voxel.facing !== 'string' || !['+x', '-x', '+y', '-y', '+z', '-z'].includes(voxel.facing))) throw new PortableFileError(`${label}.facing无效`)
+  if (voxel.rotation !== undefined && (typeof voxel.rotation !== 'number' || ![0, 1, 2, 3].includes(voxel.rotation))) throw new PortableFileError(`${label}.rotation无效`)
 }
 
 function validateAsset(value: unknown, label: string): asserts value is VoxelAsset {
@@ -164,35 +168,57 @@ function partMatchesMemberKey(part: SceneEntityPart, storedKey: string): boolean
   return part.memberKey === storedKey || (storedKey.startsWith('asset:') && part.memberKey.startsWith(`${storedKey}:`))
 }
 
-export function createEntityFile(project: ProjectState, parts: SceneEntityPart[], name = '莫测造境实体'): MoceEntityFile {
+export function createEntityFile(project: ProjectState, parts: SceneEntityPart[], name = '莫测造境实体', voxelColorResolver?: (voxel: Voxel, part: SceneEntityPart) => string) : MoceEntityFile {
   const groups = new Map<string, SceneEntityPart[]>()
   parts.forEach((part) => {
-    // A selected plain instance is exported as one entity. Once its parts take
-    // part in an assembly, keep each member separate so the assembly tree can
-    // be rebuilt on import.
-    const key = part.assemblyIds?.length ? `part:${part.id}` : (part.instanceId ? `instance:${part.instanceId}` : `part:${part.id}`)
+    // Each scene file-tree part is a portable entity. Do not collapse parts by
+    // instanceId: an instance may contain several independent scene entities,
+    // and collapsing them loses both their names and their spatial relation.
+    const key = `part:${part.id}`
     groups.set(key, [...(groups.get(key) ?? []), part])
   })
   const entities: PortableEntity[] = []
   const groupMemberKeys = new Map<string, string[]>()
   for (const [groupKey, groupParts] of groups) {
-    const sourceVoxels = groupParts.flatMap((part) => part.voxels)
+    // A portable entity must carry the final displayed color, not only the
+    // material key used by the source scene. Material keys can resolve to a
+    // different palette after import, while paintMaterialId also supports
+    // per-voxel colors. Keep the original materialId for compatibility and
+    // write the resolved display color into paintMaterialId when a caller
+    // provides the scene renderer's color resolver.
+    const exportParts = voxelColorResolver
+      ? groupParts.map((part) => ({
+        ...part,
+        sceneOffset: undefined,
+        voxels: scenePartVoxels(part).map((voxel) => {
+          const color = voxelColorResolver(voxel, part)
+          return /^#[0-9a-f]{6}$/i.test(color)
+            ? { ...voxel, paintMaterialId: color }
+            : voxel
+        }),
+      }))
+      : groupParts
+    const sourceVoxels = exportParts.flatMap((part) => scenePartVoxels(part))
     if (!sourceVoxels.length) continue
-    const minX = Math.min(...sourceVoxels.map((voxel) => voxel.x))
-    const minY = Math.min(...sourceVoxels.map((voxel) => voxel.y))
-    const minZ = Math.min(...sourceVoxels.map((voxel) => voxel.z))
+    const bounds = voxelBounds(sourceVoxels)!
+    const minX = bounds.min.x
+    const minY = bounds.min.y
+    const minZ = bounds.min.z
     const entityId = `entity-${entities.length + 1}`
     const first = groupParts[0]
     const entityName = first ? (first.displayLabel ?? first.label ?? (first.kind === 'custom' ? '手动体素实体' : '场景实体')) : '场景实体'
-    const sourceAsset = first?.instanceId
-      ? project.assets.find((asset) => asset.id === project.instances.find((instance) => instance.id === first.instanceId)?.assetId)
+    const sourceAssetId = first?.instanceId
+      ? project.instances.find((instance) => instance.id === first.instanceId)?.assetId
+      : first?.partId ? project.customEntitySources?.[first.partId]?.assetId : undefined
+    const sourceAsset = sourceAssetId
+      ? project.assets.find((asset) => asset.id === sourceAssetId)
       : undefined
     const entityColor = first?.colorOverride ?? project.customColors?.[first?.partId ?? ''] ?? sourceAsset?.templateColor ?? sourceAsset?.color ?? '#6c827d'
-    const asset = makeAssetFromSceneParts(entityId, entityName, groupParts, entityColor, sourceAsset?.accent ?? '#d2a354')
+    const asset = makeAssetFromSceneParts(entityId, entityName, exportParts, entityColor, sourceAsset?.accent ?? '#d2a354')
     asset.templateColor = entityColor
     const partVoxels: Record<string, Voxel[]> = {}
-    groupParts.forEach((part, index) => {
-      partVoxels[`part-${index + 1}`] = part.voxels.map((voxel) => ({ x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ, materialId: voxel.materialId }))
+    exportParts.forEach((part, index) => {
+      partVoxels[`part-${index + 1}`] = scenePartVoxels(part).map((voxel) => ({ ...voxel, x: voxel.x - minX, y: voxel.y - minY, z: voxel.z - minZ }))
     })
     asset.parts = Object.keys(partVoxels)
     asset.partVoxels = partVoxels
@@ -218,9 +244,10 @@ export function createEntityFile(project: ProjectState, parts: SceneEntityPart[]
     if (memberKeys.length < 2) continue
     assemblies.push({ id: source.id, name: source.name, nameMode: source.nameMode, parentAssemblyId: source.parentAssemblyId, memberKeys })
   }
-  // A multi-selection is deliberately flattened into ordinary entities. The
-  // source assembly relationship must not leak into a portable selection.
-  return { format: MOCE_ENTITY_FORMAT, formatVersion: MOCE_PORTABLE_FORMAT_VERSION, name, entities, assemblies: entities.length > 1 ? [] : assemblies }
+  // Keep the complete selected assembly graph even when several entities are
+  // exported. Import uses this graph to reconstruct nested and sibling
+  // assemblies instead of turning the batch into one synthetic entity.
+  return { format: MOCE_ENTITY_FORMAT, formatVersion: MOCE_PORTABLE_FORMAT_VERSION, name, entities, assemblies }
 }
 
 export function parseAssetFile(value: unknown): MoceAssetFile {

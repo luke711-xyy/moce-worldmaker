@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { importModelAsVoxelAsset, importModelAsVoxelAssetWithDiagnostics } from './model-import'
+import * as THREE from 'three'
+import { importModelAsVoxelAsset, importModelAsVoxelAssetWithDiagnostics, vertexColorAt } from './model-import'
 
 const cubeObj = `
 v 0 0 0
@@ -18,9 +19,21 @@ f 3 7 8 4
 f 5 1 4 8
 `
 
+const zUpStl = ((): string => {
+  const triangles = [
+    [[0, 0, 0], [2, 0, 0], [2, 2, 0]], [[0, 0, 0], [2, 2, 0], [0, 2, 0]],
+    [[0, 0, 4], [2, 2, 4], [2, 0, 4]], [[0, 0, 4], [0, 2, 4], [2, 2, 4]],
+    [[0, 0, 0], [0, 0, 4], [2, 0, 4]], [[0, 0, 0], [2, 0, 4], [2, 0, 0]],
+    [[2, 0, 0], [2, 0, 4], [2, 2, 4]], [[2, 0, 0], [2, 2, 4], [2, 2, 0]],
+    [[2, 2, 0], [2, 2, 4], [0, 2, 4]], [[2, 2, 0], [0, 2, 4], [0, 2, 0]],
+    [[0, 2, 0], [0, 2, 4], [0, 0, 4]], [[0, 2, 0], [0, 0, 4], [0, 0, 0]],
+  ]
+  return `solid z-up-box\n${triangles.map(([a, b, c]) => ` facet normal 0 0 0\n  outer loop\n   vertex ${a.join(' ')}\n   vertex ${b.join(' ')}\n   vertex ${c.join(' ')}\n  endloop\n endfacet`).join('\n')}\nendsolid z-up-box`
+})()
+
 describe('模型转体素', () => {
   it('turns a small OBJ mesh into editable voxels', async () => {
-    const asset = await importModelAsVoxelAsset(new File([cubeObj], 'sample.obj'), 'terracotta', { targetSizeMm: 8 })
+    const asset = await importModelAsVoxelAsset(new File([cubeObj], 'sample.obj'), 'terracotta', { targetSizeVoxels: 8 })
     expect(asset.source).toBe('sample.obj')
     expect(asset.voxels.length).toBeGreaterThan(0)
     expect(asset.width).toBeGreaterThan(0)
@@ -28,16 +41,22 @@ describe('模型转体素', () => {
   })
 
   it('uses the requested millimetre size instead of a fixed prototype size', async () => {
-    const result = await importModelAsVoxelAssetWithDiagnostics(new File([cubeObj], 'cube.obj'), { targetSizeMm: 8, mode: 'solid' })
+    const result = await importModelAsVoxelAssetWithDiagnostics(new File([cubeObj], 'cube.obj'), { targetSizeVoxels: 8, mode: 'solid' })
     expect(Math.max(result.asset.width, result.asset.height, result.asset.depth)).toBe(8)
     expect(result.diagnostics.closedMesh).toBe(true)
   })
 
   it('supports surface-only and solid voxelization modes', async () => {
     const file = new File([cubeObj], 'cube.obj')
-    const surface = await importModelAsVoxelAssetWithDiagnostics(file, { targetSizeMm: 8, mode: 'surface' })
-    const solid = await importModelAsVoxelAssetWithDiagnostics(file, { targetSizeMm: 8, mode: 'solid' })
+    const surface = await importModelAsVoxelAssetWithDiagnostics(file, { targetSizeVoxels: 8, mode: 'surface' })
+    const solid = await importModelAsVoxelAssetWithDiagnostics(file, { targetSizeVoxels: 8, mode: 'solid' })
     expect(solid.asset.voxels.length).toBeGreaterThan(surface.asset.voxels.length)
+  })
+
+  it('uses neutral gray for OBJ voxels instead of the active brush material', async () => {
+    const result = await importModelAsVoxelAssetWithDiagnostics(new File([cubeObj], 'gray-default.obj'), { targetSizeVoxels: 8, mode: 'solid', materialId: 'terracotta' })
+    expect(result.asset.color).toBe('#a5a6a2')
+    expect(new Set(result.asset.voxels.map((voxel) => voxel.materialId))).toEqual(new Set(['#a5a6a2']))
   })
 
   it('warns when solid mode receives an open mesh', async () => {
@@ -45,5 +64,18 @@ describe('模型转体素', () => {
     const result = await importModelAsVoxelAssetWithDiagnostics(new File([openObj], 'open.obj'), { mode: 'solid' })
     expect(result.diagnostics.closedMesh).toBe(false)
     expect(result.diagnostics.warnings.some((warning) => warning.includes('封闭网格'))).toBe(true)
+  })
+
+  it('maps the conventional STL Z-up axis to the editor vertical Y axis', async () => {
+    const result = await importModelAsVoxelAssetWithDiagnostics(new File([zUpStl], 'standing-robot.stl'), { targetSizeVoxels: 8, mode: 'surface' })
+    expect(result.asset.height).toBe(8)
+    expect(result.asset.width).toBe(4)
+    expect(result.asset.depth).toBe(4)
+  })
+
+  it('reads normalized GLTF vertex colors as RGB values', () => {
+    const attribute = new THREE.BufferAttribute(new Uint8Array([255, 128, 0, 0, 64, 255]), 3, true)
+    expect(vertexColorAt(attribute, 0)?.getHexString()).toBe('ff8000')
+    expect(vertexColorAt(attribute, 1)?.getHexString()).toBe('0040ff')
   })
 })

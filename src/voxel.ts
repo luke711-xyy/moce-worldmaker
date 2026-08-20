@@ -1,3 +1,7 @@
+import { buildVoxelSurfaceMesh } from './voxel-surface'
+import { buildVariantGeometry } from './voxel-variant-geometry'
+import { voxelFacing, voxelRotation, voxelShape } from './voxel-variants'
+
 export type Material = {
   id: string
   name: string
@@ -9,19 +13,37 @@ export type Voxel = {
   y: number
   z: number
   materialId: string
+  paintMaterialId?: string
   entityId?: string
+  /**
+   * Keep this voxel entity rendered as individual cells instead of allowing
+   * the large-entity greedy surface path to merge adjacent cells into a
+   * visually larger block. The flag is used by discrete geometry operations
+   * such as enlargement; it does not change the voxel's physical size.
+   */
+  preserveVoxelCells?: boolean
+  /** Render-only voxel variant; logical occupancy remains one full cube cell. */
+  shape?: import('./voxel-variants').VoxelShape
+  facing?: import('./voxel-variants').VoxelFacing
+  rotation?: import('./voxel-variants').VoxelRotation
 }
 
 export type VoxelNormal = Pick<Voxel, 'x' | 'y' | 'z'>
 
 export type VoxelOverride = Voxel & {
   // Missing mode is treated as an additive override for older project files.
-  mode?: 'add' | 'remove'
+  mode?: 'add' | 'remove' | 'paint'
 }
 
 export type VoxelAsset = {
   id: string
   name: string
+  /**
+   * The scene-facing name captured when this asset was saved. `name` is the
+   * asset-library label and may be renamed independently; this field is never
+   * changed by asset-library rename operations.
+   */
+  sceneName?: string
   /** Hierarchical asset-library category, from root to leaf. */
   categoryPath?: string[]
   style: string
@@ -42,12 +64,58 @@ export type VoxelAsset = {
   isTemplate?: boolean
   /** Stable link back to the template used to create a scene snapshot. */
   templateSourceId?: string
+  /** Persisted, bounded preview payload used by asset-library cards. */
+  thumbnail?: AssetThumbnail
+}
+
+export type AssetThumbnail = {
+  version: 1
+  sourceSignature: string
+  sourceVoxelCount: number
+  voxels: Voxel[]
 }
 
 export type AssetAssembly = {
   name: string
+  /** Name of the root assembly in the scene when this asset was captured. */
+  sceneName?: string
   rootId: string
-  nodes: Array<{ id: string; name: string; memberKeys: string[] }>
+  /** Multiple top-level assemblies can be carried by one portable placement. */
+  rootIds?: string[]
+  /** Stable display names for ordinary parts inside a portable placement. */
+  partNames?: Record<string, string>
+  nodes: Array<{ id: string; name: string; memberKeys: string[]; parentAssemblyId?: string }>
+}
+
+/**
+ * Resolve the name written into the scene tree when an asset is placed.
+ *
+ * The asset-library label is the user's explicit name for the thing they are
+ * dragging. It therefore has priority over the historical sceneName snapshot.
+ * The snapshot remains as a fallback for old/incomplete records, but changing
+ * the display name in the library must be reflected the next time the asset is
+ * placed. Callers still run the result through uniqueSceneName so an existing
+ * scene object is never renamed or overwritten.
+ */
+export function sceneNameForAsset(asset: Pick<VoxelAsset, 'name' | 'sceneName' | 'assembly'>, fallback = '实体'): string {
+  const rootNodeName = asset.assembly?.rootId
+    ? asset.assembly.nodes.find((node) => node.id === asset.assembly?.rootId)?.name
+    : undefined
+  return asset.name?.trim()
+    || asset.assembly?.sceneName?.trim()
+    || asset.sceneName?.trim()
+    || rootNodeName?.trim()
+    || fallback
+}
+
+/** Resolve the scene-facing label for one assembly node. */
+export function sceneAssemblyNodeNameForAsset(
+  asset: Pick<VoxelAsset, 'name' | 'sceneName' | 'assembly'>,
+  node: Pick<NonNullable<VoxelAsset['assembly']>['nodes'][number], 'id' | 'name'>,
+  fallback = '装配体',
+): string {
+  if (node.id === asset.assembly?.rootId) return sceneNameForAsset(asset, fallback)
+  return node.name?.trim() || fallback
 }
 
 export type SceneInstance = {
@@ -66,12 +134,16 @@ export type SceneInstance = {
   rotationX?: number
   rotationY?: number
   rotationZ?: number
+  /** Local project-space pivot used for discrete instance rotations. */
+  rotationPivot?: { x: number; y: number; z: number }
 }
 
 export type ProjectState = {
   version: 1
   name: string
-  voxelSizeMm: 1
+  /** Revision of the bundled sample scene. Used only for one-time migration. */
+  sampleRevision?: number
+  voxelSizeMm: number
   sceneSizeCm: number
   /** Scene envelope in project voxels: X/Y are the ground plane, Z is height. */
   sceneBounds?: SceneBounds
@@ -79,7 +151,21 @@ export type ProjectState = {
   assets: VoxelAsset[]
   instances: SceneInstance[]
   customVoxels: Voxel[]
+  /** Per custom entity render policy. Enlargement keeps the source voxel cell size. */
+  customVoxelRenderModes?: Record<string, 'cells' | 'greedy'>
   customColors?: Record<string, string>
+  /**
+   * Provenance for scene-owned voxel entities created from a library template.
+   * This is metadata only: the scene geometry itself remains fully materialized
+   * in customVoxels and never reads the template at render or move time.
+   */
+  customEntitySources?: Record<string, { assetId: string; categoryPath?: string[] }>
+  /**
+   * Lazy scene-space translation for manually authored entities. The voxel
+   * arrays remain canonical and are only translated when a consumer needs
+   * effective scene coordinates.
+   */
+  customEntityOffsets?: Record<string, { x: number; y: number; z: number }>
   entityNames?: Record<string, string>
   entityNameModes?: Record<string, 'auto' | 'custom'>
   entityNameSequences?: Record<string, number>
@@ -94,6 +180,7 @@ export type ProjectState = {
 }
 
 export const DEFAULT_ASSET_CATEGORY = '未命名类别'
+export const DEFAULT_SAMPLE_REVISION = 2
 
 export function normalizeAssetCategoryPath(path: unknown): string[] {
   if (!Array.isArray(path)) return [DEFAULT_ASSET_CATEGORY]
@@ -133,7 +220,96 @@ export type SceneEntityPart = {
   label?: string
   displayLabel?: string
   colorOverride?: string
+  /** Original voxel count when a read-only preview keeps only a sampled LOD. */
+  sourceVoxelCount?: number
+  /**
+   * Scene-space translation in voxel units for cached asset topology.
+   * Asset parts keep their canonical voxel array so a pure instance move does
+   * not allocate/map the whole model again. Use scenePartVoxels() whenever
+   * actual scene coordinates are required.
+   */
+  sceneOffset?: { x: number; y: number; z: number }
+  /** Scene-grid translation for a moved asset sub-part, kept out of voxels. */
+  partSceneOffset?: { x: number; y: number; z: number }
+  /** Rendering policy for generated voxel entities. Enlargement must keep the
+   * unit-cell path even when the entity is large enough for greedy meshing. */
+  renderMode?: 'cells' | 'greedy'
   voxels: Voxel[]
+}
+
+// Keep only the latest scene-coordinate variant for each canonical voxel
+// array. A per-offset Map looks convenient, but a large entity dragged across
+// many cells would retain one full mapped array per historical position and
+// create a steadily growing GC backlog.
+const scenePartVoxelCache = new WeakMap<ReadonlyArray<Voxel>, { key: string; voxels: Voxel[] }>()
+// Coordinate lookup is intentionally separate from the mapped-array cache. A
+// DDA hit on a large imported/custom part used to call Array.find(), turning a
+// single click into an O(n) scan of the whole model. Keep one lazy lookup per
+// effective voxel array so repeated clicks stay O(1), while WeakMap ownership
+// lets old arrays be collected after a geometry edit or move.
+const scenePartVoxelIndexCache = new WeakMap<ReadonlyArray<Voxel>, Map<string, Voxel>>()
+
+const sceneVoxelCoordinateKey = (x: number, y: number, z: number) => `${x},${y},${z}`
+
+export function customEntityOffset(project: Pick<ProjectState, 'customEntityOffsets'>, entityId: string): { x: number; y: number; z: number } {
+  return project.customEntityOffsets?.[entityId] ?? { x: 0, y: 0, z: 0 }
+}
+
+export function sceneToStoredCustomVoxel(project: Pick<ProjectState, 'customEntityOffsets'>, voxel: Voxel, entityId: string): Voxel {
+  const offset = customEntityOffset(project, entityId)
+  if (!offset.x && !offset.y && !offset.z) return voxel
+  return { ...voxel, x: voxel.x - offset.x, y: voxel.y - offset.y, z: voxel.z - offset.z }
+}
+
+export function scenePartVoxels(part: SceneEntityPart): Voxel[] {
+  const rootOffset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
+  const partOffset = part.partSceneOffset ?? { x: 0, y: 0, z: 0 }
+  const offset = {
+    x: rootOffset.x + partOffset.x,
+    y: rootOffset.y + partOffset.y,
+    z: rootOffset.z + partOffset.z,
+  }
+  if (!offset.x && !offset.y && !offset.z) return part.voxels
+  const key = `${offset.x},${offset.y},${offset.z}`
+  const cacheKey = `${key}:${part.voxels.length}`
+  const cached = scenePartVoxelCache.get(part.voxels)
+  if (cached?.key === cacheKey) return cached.voxels
+  const voxels = part.voxels.map((voxel) => ({
+    ...voxel,
+    x: voxel.x + offset.x,
+    y: voxel.y + offset.y,
+    z: voxel.z + offset.z,
+  }))
+  scenePartVoxelCache.set(part.voxels, { key: cacheKey, voxels })
+  return voxels
+}
+
+/** Read one effective scene-space voxel without materializing the whole part. */
+export function scenePartVoxelAt(part: SceneEntityPart, index: number): Voxel | undefined {
+  const voxel = part.voxels[index]
+  if (!voxel) return undefined
+  const rootOffset = part.sceneOffset ?? { x: 0, y: 0, z: 0 }
+  const partOffset = part.partSceneOffset ?? { x: 0, y: 0, z: 0 }
+  const offset = {
+    x: rootOffset.x + partOffset.x,
+    y: rootOffset.y + partOffset.y,
+    z: rootOffset.z + partOffset.z,
+  }
+  if (!offset.x && !offset.y && !offset.z) return voxel
+  return { ...voxel, x: voxel.x + offset.x, y: voxel.y + offset.y, z: voxel.z + offset.z }
+}
+
+/** Read one effective scene-space voxel by coordinate without scanning a part. */
+export function scenePartVoxelAtCoordinate(part: SceneEntityPart, x: number, y: number, z: number): Voxel | undefined {
+  const voxels = scenePartVoxels(part)
+  // Tiny parts are faster without allocating a Map for a one-off lookup.
+  if (voxels.length < 256) return voxels.find((voxel) => voxel.x === x && voxel.y === y && voxel.z === z)
+  let index = scenePartVoxelIndexCache.get(voxels)
+  if (!index) {
+    index = new Map(voxels.map((voxel) => [sceneVoxelCoordinateKey(voxel.x, voxel.y, voxel.z), voxel]))
+    scenePartVoxelIndexCache.set(voxels, index)
+  }
+  return index.get(sceneVoxelCoordinateKey(x, y, z))
 }
 
 export function uniqueAssetName(assets: VoxelAsset[], requestedName: string): string {
@@ -147,30 +323,66 @@ export function uniqueAssetName(assets: VoxelAsset[], requestedName: string): st
 
 export function uniqueTemplateAssetName(assets: VoxelAsset[], requestedName: string, excludedAssetId?: string): string {
   const baseName = requestedName.trim() || '未命名实体'
-  const existing = new Set(assets.filter((asset) => asset.id !== excludedAssetId).map((asset) => asset.name.trim()))
+  // Scene snapshots intentionally reuse the source asset name, but they are
+  // not visible in the template library and must not reserve a template name.
+  const existing = new Set(assets.filter((asset) => asset.id !== excludedAssetId && asset.isTemplate !== false).map((asset) => asset.name.trim()))
   if (!existing.has(baseName)) return baseName
   let index = 1
   while (existing.has(`${baseName} (${index})`)) index += 1
   return `${baseName} (${index})`
 }
 
-export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEntityPart[], color = '#6c827d', accent = '#d2a354'): VoxelAsset {
-  const sourceVoxels = parts.flatMap((part) => part.voxels)
-  const minX = Math.min(...sourceVoxels.map((voxel) => voxel.x), 0)
-  const minY = Math.min(...sourceVoxels.map((voxel) => voxel.y), 0)
-  const minZ = Math.min(...sourceVoxels.map((voxel) => voxel.z), 0)
-  const maxX = Math.max(...sourceVoxels.map((voxel) => voxel.x), 0)
-  const maxY = Math.max(...sourceVoxels.map((voxel) => voxel.y), 0)
-  const maxZ = Math.max(...sourceVoxels.map((voxel) => voxel.z), 0)
+/**
+ * Allocate a scene-tree display name without renaming any existing object.
+ * Asset-library labels are not part of this namespace; callers pass the
+ * captured scene name here when materializing an asset into a scene.
+ */
+export function uniqueSceneName(existingNames: Iterable<string>, requestedName: string, fallback = '实体'): string {
+  const used = new Set([...existingNames].map((name) => name.trim()).filter(Boolean))
+  const base = requestedName.trim() || fallback
+  if (!used.has(base)) return base
+  let suffix = 2
+  let candidate = `${base} ${suffix}`
+  while (used.has(candidate)) candidate = `${base} ${++suffix}`
+  return candidate
+}
+
+export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEntityPart[], color = '#6c827d', accent = '#d2a354', materialIdResolver?: (voxel: Voxel, part: SceneEntityPart) => string): VoxelAsset {
+  const sourceVoxels = parts.flatMap((part) => scenePartVoxels(part).map((voxel) => ({
+    ...voxel,
+    materialId: materialIdResolver ? materialIdResolver(voxel, part) : voxel.materialId,
+  })))
+  // Avoid spreading a large voxel array into Math.min/Math.max. Imported
+  // scenes can contain tens of thousands of voxels, which otherwise exceeds
+  // the browser call stack while building a scene-library preview.
+  // The source parts may already be positioned above the ground or away
+  // from the origin. Starting the reduction at zero incorrectly leaves a
+  // positive minimum at zero, so the exported asset keeps the old world
+  // offset and the portable importer adds the entity grid position again.
+  // Seed from the first real voxel so every asset snapshot is normalized to
+  // its true local bounding-box origin.
+  const firstVoxel = sourceVoxels[0]
+  const bounds = sourceVoxels.slice(1).reduce((result, voxel) => ({
+    minX: Math.min(result.minX, voxel.x),
+    minY: Math.min(result.minY, voxel.y),
+    minZ: Math.min(result.minZ, voxel.z),
+    maxX: Math.max(result.maxX, voxel.x),
+    maxY: Math.max(result.maxY, voxel.y),
+    maxZ: Math.max(result.maxZ, voxel.z),
+  }), { minX: firstVoxel.x, minY: firstVoxel.y, minZ: firstVoxel.z, maxX: firstVoxel.x, maxY: firstVoxel.y, maxZ: firstVoxel.z })
+  const { minX, minY, minZ, maxX, maxY, maxZ } = bounds
   const voxels = deduplicateVoxels(sourceVoxels.map((voxel) => ({
+    ...voxel,
     x: voxel.x - minX,
     y: voxel.y - minY,
     z: voxel.z - minZ,
     materialId: voxel.materialId,
+    ...(voxel.paintMaterialId ? { paintMaterialId: voxel.paintMaterialId } : {}),
   })))
   return {
     id,
     name,
+    sceneName: name,
     style: '自定义实体',
     kind: 'imported',
     color,
@@ -185,17 +397,161 @@ export function makeAssetFromSceneParts(id: string, name: string, parts: SceneEn
   }
 }
 
+/**
+ * Snapshot an authored scene assembly as a reusable asset.
+ *
+ * Asset-library placement is deliberately materialized into ordinary custom
+ * voxels, but the file-tree topology must travel with the snapshot. Keeping
+ * this conversion here (instead of maintaining separate copies in the
+ * inspector and scene-library code paths) makes assembly, nested assembly,
+ * part IDs, offsets, and colors use exactly the same coordinate frame.
+ */
+export function makeAssemblyAssetFromSceneParts(
+  id: string,
+  name: string,
+  project: Pick<ProjectState, 'assemblies' | 'entityNames'>,
+  sourceParts: SceneEntityPart[],
+  rootAssemblyId: string,
+  color = '#6c827d',
+  accent = '#d2a354',
+  source = '装配体模板保存',
+  materialIdResolver?: (voxel: Voxel, part: SceneEntityPart) => string,
+): VoxelAsset | null {
+  const sourceAssemblies = project.assemblies ?? []
+  const assemblyMap = new Map(sourceAssemblies.map((assembly) => [assembly.id, assembly]))
+  const rootAssembly = assemblyMap.get(rootAssemblyId)
+  if (!rootAssembly) return null
+
+  const assemblyIds = new Set<string>()
+  const collectAssemblyIds = (assemblyId: string) => {
+    if (assemblyIds.has(assemblyId)) return
+    assemblyIds.add(assemblyId)
+    assemblyMap.get(assemblyId)?.memberKeys
+      .filter((memberKey) => memberKey.startsWith('assembly:'))
+      .forEach((memberKey) => collectAssemblyIds(memberKey.slice('assembly:'.length)))
+  }
+  collectAssemblyIds(rootAssemblyId)
+
+  const includedParts = sourceParts.filter((part) =>
+    (part.assemblyIds ?? (part.assemblyId ? [part.assemblyId] : [])).some((assemblyId) => assemblyIds.has(assemblyId)),
+  )
+  if (includedParts.length < 2) return null
+  const allVoxels = includedParts.flatMap((part) => scenePartVoxels(part))
+  const bounds = voxelBounds(allVoxels)
+  if (!bounds) return null
+
+  const partIdMap = new Map<string, string>()
+  const partVoxels: Record<string, Voxel[]> = {}
+  const partNames: Record<string, string> = {}
+  includedParts.forEach((part, index) => {
+    const localPartId = `part-${index + 1}`
+    partIdMap.set(part.id, localPartId)
+    const sourceVoxels = scenePartVoxels(part)
+    partVoxels[localPartId] = sourceVoxels.map((voxel) => ({
+      ...voxel,
+      x: voxel.x - bounds.min.x,
+      y: voxel.y - bounds.min.y,
+      z: voxel.z - bounds.min.z,
+      materialId: materialIdResolver ? materialIdResolver(voxel, part) : voxel.materialId,
+      entityId: undefined,
+    }))
+    const partName = project.entityNames?.[part.memberKey]?.trim() || part.displayLabel?.trim() || part.label?.trim()
+    if (partName) partNames[localPartId] = partName
+  })
+
+  const uniqueVoxels = new Map<string, Voxel>()
+  Object.values(partVoxels).flat().forEach((voxel) => {
+    const { entityId: _entityId, ...assetVoxel } = voxel
+    uniqueVoxels.set(`${assetVoxel.x},${assetVoxel.y},${assetVoxel.z}`, assetVoxel)
+  })
+
+  const mapStoredMemberKey = (storedKey: string): string[] => {
+    if (storedKey.startsWith('assembly:')) {
+      const sourceAssemblyId = storedKey.slice('assembly:'.length)
+      return assemblyIds.has(sourceAssemblyId) ? [`assembly:assembly-node-${sourceAssemblyId}`] : []
+    }
+    const matchingParts = includedParts.filter((part) =>
+      part.memberKey === storedKey
+      || (storedKey.startsWith('asset:') && part.memberKey.startsWith(`${storedKey}:`)),
+    )
+    return matchingParts
+      .map((part) => partIdMap.get(part.id))
+      .filter((partId): partId is string => Boolean(partId))
+      .map((partId) => `part:${partId}`)
+  }
+
+  // parentAssemblyId was historically omitted by both asset-save paths. If
+  // an old project has no explicit parent field, infer it from assembly
+  // membership so nested assemblies are still captured correctly.
+  const inferredParents = new Map<string, string>()
+  sourceAssemblies.forEach((assembly) => {
+    assembly.memberKeys.filter((key) => key.startsWith('assembly:')).forEach((key) => {
+      inferredParents.set(key.slice('assembly:'.length), assembly.id)
+    })
+  })
+  const nodes = [...assemblyIds].map((assemblyId) => {
+    const assembly = assemblyMap.get(assemblyId)!
+    const parentSourceId = assembly.parentAssemblyId ?? inferredParents.get(assemblyId)
+    const parentAssemblyId = parentSourceId && assemblyIds.has(parentSourceId)
+      ? `assembly-node-${parentSourceId}`
+      : undefined
+    return {
+      id: `assembly-node-${assemblyId}`,
+      name: assembly.name?.trim() || '装配体',
+      memberKeys: [...new Set(assembly.memberKeys.flatMap(mapStoredMemberKey))],
+      ...(parentAssemblyId ? { parentAssemblyId } : {}),
+    }
+  })
+
+  return {
+    id,
+    name,
+    sceneName: rootAssembly.name?.trim() || name,
+    style: '自定义实体',
+    kind: 'imported',
+    color,
+    accent,
+    width: bounds.max.x - bounds.min.x + 1,
+    depth: bounds.max.z - bounds.min.z + 1,
+    height: bounds.max.y - bounds.min.y + 1,
+    parts: Object.keys(partVoxels),
+    partVoxels,
+    voxels: [...uniqueVoxels.values()],
+    source,
+    assembly: {
+      name: rootAssembly.name?.trim() || name,
+      sceneName: rootAssembly.name?.trim() || name,
+      rootId: `assembly-node-${rootAssemblyId}`,
+      rootIds: [`assembly-node-${rootAssemblyId}`],
+      partNames,
+      nodes,
+    },
+    isTemplate: true,
+  }
+}
+
 // The viewport uses centimeters as its scene-scale unit: 1 scene unit = 1 cm.
 // Therefore one project voxel (1 mm) occupies 0.1 viewport units everywhere.
 export const WORLD_UNITS_PER_MM = 0.1
 export const VOXEL_WORLD_SIZE = WORLD_UNITS_PER_MM
+export const DEFAULT_VOXEL_SIZE_MM = 1
+export const MIN_VOXEL_SIZE_MM = 0.1
+export const MAX_VOXEL_SIZE_MM = 100
+export const MIN_SCENE_BOUND_VOXELS = 10
+export const MAX_SCENE_BOUND_VOXELS = 1000
+
+export function normalizeVoxelSizeMm(value: unknown): number {
+  const numeric = typeof value === 'number' && Number.isFinite(value) ? value : DEFAULT_VOXEL_SIZE_MM
+  const clamped = Math.max(MIN_VOXEL_SIZE_MM, Math.min(MAX_VOXEL_SIZE_MM, numeric))
+  return Number(clamped.toFixed(2))
+}
 
 export function sceneBoundsForProject(project: Pick<ProjectState, 'sceneSizeCm' | 'sceneBounds'>): SceneBounds {
-  const fallback = Math.max(1, Math.round((project.sceneSizeCm ?? 20) / VOXEL_WORLD_SIZE))
+  const fallback = Math.max(MIN_SCENE_BOUND_VOXELS, Math.round((project.sceneSizeCm ?? 20) / VOXEL_WORLD_SIZE))
   return {
-    x: Math.max(1, Math.round(project.sceneBounds?.x ?? fallback)),
-    y: Math.max(1, Math.round(project.sceneBounds?.y ?? fallback)),
-    z: Math.max(1, Math.round(project.sceneBounds?.z ?? fallback)),
+    x: Math.max(MIN_SCENE_BOUND_VOXELS, Math.min(MAX_SCENE_BOUND_VOXELS, Math.round(project.sceneBounds?.x ?? fallback))),
+    y: Math.max(MIN_SCENE_BOUND_VOXELS, Math.min(MAX_SCENE_BOUND_VOXELS, Math.round(project.sceneBounds?.y ?? fallback))),
+    z: Math.max(MIN_SCENE_BOUND_VOXELS, Math.min(MAX_SCENE_BOUND_VOXELS, Math.round(project.sceneBounds?.z ?? fallback))),
   }
 }
 
@@ -205,6 +561,11 @@ function roundWorld(value: number): number {
 
 export function voxelToWorld(value: number): number {
   return roundWorld(value * VOXEL_WORLD_SIZE)
+}
+
+/** Translate a stored world-space transform by an integer voxel delta. */
+export function translateWorldByVoxels(value: number, deltaVoxels: number): number {
+  return roundWorld(value + voxelToWorld(deltaVoxels))
 }
 
 export function voxelCenterToWorld(value: number): number {
@@ -270,6 +631,67 @@ function voxelKey(voxel: Pick<Voxel, 'x' | 'y' | 'z'>): string {
   return `${voxel.x},${voxel.y},${voxel.z}`
 }
 
+export type VoxelBounds = {
+  min: { x: number; y: number; z: number }
+  max: { x: number; y: number; z: number }
+}
+
+/** Calculate voxel bounds without spreading a large voxel array on the stack. */
+export function voxelBounds(voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>): VoxelBounds | null {
+  if (!voxels.length) return null
+  const first = voxels[0]
+  const min = { x: first.x, y: first.y, z: first.z }
+  const max = { x: first.x, y: first.y, z: first.z }
+  for (let index = 1; index < voxels.length; index += 1) {
+    const voxel = voxels[index]
+    if (voxel.x < min.x) min.x = voxel.x
+    if (voxel.y < min.y) min.y = voxel.y
+    if (voxel.z < min.z) min.z = voxel.z
+    if (voxel.x > max.x) max.x = voxel.x
+    if (voxel.y > max.y) max.y = voxel.y
+    if (voxel.z > max.z) max.z = voxel.z
+  }
+  return { min, max }
+}
+
+/**
+ * Return the centre of the occupied voxel-cell bounds in voxel-index space.
+ *
+ * Voxel coordinates identify cells, not their corner coordinates.  Therefore
+ * the centre of cells `min..max` is `(min + max) / 2`.  It is intentionally
+ * allowed to be a half integer: rotating an even-sized footprint around its
+ * true centre still maps cell centres back onto the integer voxel lattice.
+ */
+export function voxelBoundsPivot(voxels: ReadonlyArray<Pick<Voxel, 'x' | 'y' | 'z'>>): { x: number; y: number; z: number } | null {
+  const bounds = voxelBounds(voxels)
+  if (!bounds) return null
+  return {
+    x: (bounds.min.x + bounds.max.x) / 2,
+    y: (bounds.min.y + bounds.max.y) / 2,
+    z: (bounds.min.z + bounds.max.z) / 2,
+  }
+}
+
+/**
+ * A quarter turn can only preserve both the exact geometric centre and the
+ * voxel lattice when the two dimensions perpendicular to the turn have the
+ * same parity.  For example, a 2 x 3 footprint has a half-cell centre on one
+ * axis and a whole-cell centre on the other.  Rotating that footprint around
+ * the exact centre necessarily produces half-integer cell coordinates.
+ *
+ * Keep this decision in one place so callers do not silently round transformed
+ * coordinates after the fact (rounding can collapse two voxels into one).
+ */
+function rotationPlaneHasCompatibleParity(
+  bounds: VoxelBounds,
+  axis: VoxelTransformAxis,
+): boolean {
+  const spanParity = (min: number, max: number) => Math.abs(max - min) % 2
+  if (axis === 'x') return spanParity(bounds.min.y, bounds.max.y) === spanParity(bounds.min.z, bounds.max.z)
+  if (axis === 'y') return spanParity(bounds.min.x, bounds.max.x) === spanParity(bounds.min.z, bounds.max.z)
+  return spanParity(bounds.min.x, bounds.max.x) === spanParity(bounds.min.y, bounds.max.y)
+}
+
 export function voxelEntityId(voxel: Voxel): string {
   return voxel.entityId ?? `legacy:${voxelKey(voxel)}`
 }
@@ -324,14 +746,35 @@ export function voxelComponentId(component: Voxel[]): string {
   return voxelKey(first)
 }
 
+function isOrdinaryImportedModel(asset: VoxelAsset): boolean {
+  return asset.kind === 'imported'
+    && !asset.assembly
+    && (/\.(?:glb|gltf|obj|stl)$/i.test(asset.source ?? '') || !asset.partVoxels)
+}
+
 export function resolveInstanceVoxels(asset: VoxelAsset, overrides: VoxelOverride[] = []): Voxel[] {
   const resolved = new Map<string, Voxel>(asset.voxels.map((voxel) => [voxelKey(voxel), { ...voxel }]))
   for (const override of overrides) {
     const key = voxelKey(override)
     if (override.mode === 'remove') {
       resolved.delete(key)
+    } else if (override.mode === 'paint') {
+      const existing = resolved.get(key)
+      if (existing) resolved.set(key, { ...existing, paintMaterialId: override.materialId })
     } else {
-      resolved.set(key, { x: override.x, y: override.y, z: override.z, materialId: override.materialId })
+      resolved.set(key, {
+        x: override.x,
+        y: override.y,
+        z: override.z,
+        materialId: override.materialId,
+        ...(override.paintMaterialId ? { paintMaterialId: override.paintMaterialId } : {}),
+        ...(override.preserveVoxelCells ? { preserveVoxelCells: override.preserveVoxelCells } : {}),
+        ...(override.shape ? {
+          shape: override.shape,
+          facing: override.facing,
+          rotation: override.rotation,
+        } : {}),
+      })
     }
   }
   return [...resolved.values()]
@@ -339,12 +782,28 @@ export function resolveInstanceVoxels(asset: VoxelAsset, overrides: VoxelOverrid
 
 export function resolveInstanceComponents(asset: VoxelAsset, overrides: VoxelOverride[] = []): Array<{ partId: string; voxels: Voxel[] }> {
   const resolved = resolveInstanceVoxels(asset, overrides)
+  // Mesh imports are one editable scene entity even when the source GLB/OBJ
+  // contains several disconnected meshes or voxel islands. Explicitly saved
+  // assembly templates keep their authored parts; ordinary model imports do
+  // not expose source-mesh parts in the scene tree.
+  if (isOrdinaryImportedModel(asset)) {
+    return [{ partId: asset.parts[0] ?? '导入模型', voxels: resolved }]
+  }
   if (!asset.partVoxels || !Object.keys(asset.partVoxels).length) return voxelComponents(resolved).map((voxels) => ({ partId: voxelComponentId(voxels), voxels }))
   const resolvedByKey = new Map(resolved.map((voxel) => [voxelKey(voxel), voxel]))
   const claimed = new Set<string>()
   const components = Object.entries(asset.partVoxels).flatMap(([partId, sourceVoxels]) => {
     const voxels = sourceVoxels.map((voxel) => resolvedByKey.get(voxelKey(voxel))).filter((voxel): voxel is Voxel => Boolean(voxel))
     voxels.forEach((voxel) => claimed.add(voxelKey(voxel)))
+    // An authored part in an assembly is a structural/file-tree boundary,
+    // not a connectivity hint. It may legitimately contain disconnected
+    // islands (for example, a frame, trim, or a model-derived sub-part), but
+    // all of those voxels must remain under the same assembly member key.
+    // Splitting here creates synthetic `part#2` ids that the assembly mapping
+    // does not know about, leaving those islands as random top-level entities
+    // after an assembly template is placed back into a scene. Non-assembly
+    // assets retain the older connectivity-based behavior.
+    if (asset.assembly) return voxels.length ? [{ partId, voxels }] : []
     return voxelComponents(voxels).map((component, index) => ({ partId: index === 0 ? partId : `${partId}#${index + 1}`, voxels: component }))
   }).filter((component) => component.voxels.length > 0)
   const additions = resolved.filter((voxel) => !claimed.has(voxelKey(voxel)))
@@ -352,43 +811,189 @@ export function resolveInstanceComponents(asset: VoxelAsset, overrides: VoxelOve
   return components
 }
 
+/**
+ * Return the effective geometry bounding-box center in the instance's local
+ * project coordinates. The instance origin is still the asset's historical
+ * placement origin (centered X/Y ground axes, floor at Z=0); this pivot is
+ * persisted separately so old scenes remain compatible while rotations use
+ * the actual visible entity center.
+ */
+export function instanceRotationPivot(instance: SceneInstance, asset: VoxelAsset): { x: number; y: number; z: number } {
+  const mirror = instance.mirror ?? { x: false, y: false, z: false }
+  const components = resolveInstanceComponents(asset, instance.overrides ?? [])
+  let minX = Number.POSITIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let minZ = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let maxY = Number.NEGATIVE_INFINITY
+  let maxZ = Number.NEGATIVE_INFINITY
+  components.forEach(({ partId, voxels }) => {
+    const offset = instance.partOffsets?.[partId] ?? { x: 0, y: 0, z: 0 }
+    voxels.forEach((voxel) => {
+      const localXIndex = mirror.x ? asset.width - 1 - voxel.x : voxel.x
+      const localYIndex = mirror.z ? asset.height - 1 - voxel.y : voxel.y
+      const localZIndex = mirror.y ? asset.depth - 1 - voxel.z : voxel.z
+      const x = (localXIndex + 0.5 - asset.width / 2) * VOXEL_WORLD_SIZE + (mirror.x ? -offset.x : offset.x)
+      const z = (localZIndex + 0.5 - asset.depth / 2) * VOXEL_WORLD_SIZE + (mirror.y ? -offset.z : offset.z)
+      const y = (localYIndex + 0.5) * VOXEL_WORLD_SIZE + (mirror.z ? -offset.y : offset.y)
+      minX = Math.min(minX, x)
+      minY = Math.min(minY, y)
+      minZ = Math.min(minZ, z)
+      maxX = Math.max(maxX, x)
+      maxY = Math.max(maxY, y)
+      maxZ = Math.max(maxZ, z)
+    })
+  })
+  if (!Number.isFinite(minX)) return { x: 0, y: asset.height * VOXEL_WORLD_SIZE / 2, z: 0 }
+  const center = { x: (minX + maxX) / 2, y: (minY + maxY) / 2, z: (minZ + maxZ) / 2 }
+  // The pivot is stored in the asset's local frame, while the voxel centres
+  // live on the scene grid. Therefore the local components cannot simply be
+  // forced to one common parity: an odd-sized asset has a half-cell origin
+  // on one axis and an even-sized asset has an integer origin on another.
+  // What must be common is the parity of the *world-space* pivot. Otherwise a
+  // quarter turn maps one centre lattice onto a half-cell lattice and the
+  // resolver's final Math.round merges distinct source voxels.
+  const origins = { x: instance.x, y: instance.y ?? 0, z: instance.z }
+  const centerWorld = {
+    x: center.x + origins.x,
+    y: center.y + origins.y,
+    z: center.z + origins.z,
+  }
+  const normalizeParity = (value: number) => ((value % 1) + 1) % 1
+  const snapToParity = (value: number, parity: number) => (Math.round(value / VOXEL_WORLD_SIZE - parity) + parity) * VOXEL_WORLD_SIZE
+  const candidates = [0, 0.5].map((worldParity) => {
+    const localParity = {
+      x: normalizeParity(worldParity - normalizeParity(origins.x / VOXEL_WORLD_SIZE)),
+      y: normalizeParity(worldParity - normalizeParity(origins.y / VOXEL_WORLD_SIZE)),
+      z: normalizeParity(worldParity - normalizeParity(origins.z / VOXEL_WORLD_SIZE)),
+    }
+    const candidate = {
+      x: snapToParity(center.x, localParity.x),
+      y: snapToParity(center.y, localParity.y),
+      z: snapToParity(center.z, localParity.z),
+    }
+    return { candidate, world: { x: candidate.x + origins.x, y: candidate.y + origins.y, z: candidate.z + origins.z } }
+  })
+  const score = (world: { x: number; y: number; z: number }) =>
+    (world.x - centerWorld.x) ** 2 + (world.y - centerWorld.y) ** 2 + (world.z - centerWorld.z) ** 2
+  return score(candidates[0].world) <= score(candidates[1].world) ? candidates[0].candidate : candidates[1].candidate
+}
+
+/**
+ * Repair a persisted rotation pivot without inspecting the asset geometry.
+ *
+ * A pivot is stored in the instance-local project frame, but the quarter-turn
+ * resolver operates on scene-grid voxel centres.  Consequently the three
+ * world-space pivot components must share one lattice parity (integer-cell or
+ * half-cell).  Older transform paths could persist a pivot whose components
+ * used different parities; Math.round then merged distinct cells after a
+ * rotation.  Keep the nearest valid common-parity pivot so old instances are
+ * repaired consistently by rendering, hit testing, and export.
+ */
+export function normalizeInstanceRotationPivot(instance: SceneInstance): { x: number; y: number; z: number } {
+  const pivot = instance.rotationPivot
+  if (!pivot) return { x: 0, y: 0, z: 0 }
+  const origin = { x: instance.x, y: instance.y ?? 0, z: instance.z }
+  const currentWorld = {
+    x: pivot.x + origin.x,
+    y: pivot.y + origin.y,
+    z: pivot.z + origin.z,
+  }
+  const normalizeParity = (value: number) => ((value % 1) + 1) % 1
+  const snapToParity = (value: number, parity: number) => (Math.round(value / VOXEL_WORLD_SIZE - parity) + parity) * VOXEL_WORLD_SIZE
+  const candidates = [0, 0.5].map((parity) => ({
+    x: snapToParity(currentWorld.x, parity),
+    y: snapToParity(currentWorld.y, parity),
+    z: snapToParity(currentWorld.z, parity),
+  }))
+  const score = (candidate: { x: number; y: number; z: number }) =>
+    (candidate.x - currentWorld.x) ** 2
+    + (candidate.y - currentWorld.y) ** 2
+    + (candidate.z - currentWorld.z) ** 2
+  const world = score(candidates[0]) <= score(candidates[1]) ? candidates[0] : candidates[1]
+  return {
+    x: world.x - origin.x,
+    y: world.y - origin.y,
+    z: world.z - origin.z,
+  }
+}
+
 export type VoxelTransformAxis = 'x' | 'y' | 'z'
 
 export function mirrorVoxels(voxels: Voxel[], axis: VoxelTransformAxis): Voxel[] {
   if (!voxels.length) return []
-  const values = voxels.map((voxel) => voxel[axis])
-  const min = Math.min(...values)
-  const max = Math.max(...values)
+  const bounds = voxelBounds(voxels)!
+  const min = bounds.min[axis]
+  const max = bounds.max[axis]
   return voxels.map((voxel) => ({ ...voxel, [axis]: min + max - voxel[axis] }))
 }
 
-export function rotateVoxels(voxels: Voxel[], axis: VoxelTransformAxis, degrees: 90 | 180 | 270): Voxel[] {
-  if (!voxels.length) return []
-  const minX = Math.min(...voxels.map((voxel) => voxel.x))
-  const maxX = Math.max(...voxels.map((voxel) => voxel.x))
-  const minY = Math.min(...voxels.map((voxel) => voxel.y))
-  const maxY = Math.max(...voxels.map((voxel) => voxel.y))
-  const minZ = Math.min(...voxels.map((voxel) => voxel.z))
-  const maxZ = Math.max(...voxels.map((voxel) => voxel.z))
+/** Rotate around an explicit voxel-cell centre, preserving the entity's place. */
+export function rotateVoxelsAroundPivot(
+  voxels: Voxel[],
+  axis: VoxelTransformAxis,
+  degrees: 90 | 180 | 270,
+  pivot: { x: number; y: number; z: number },
+): Voxel[] {
   return voxels.map((voxel) => {
+    const dx = voxel.x - pivot.x
+    const dy = voxel.y - pivot.y
+    const dz = voxel.z - pivot.z
     if (degrees === 180) {
-      if (axis === 'x') return { ...voxel, y: minY + maxY - voxel.y, z: minZ + maxZ - voxel.z }
-      if (axis === 'y') return { ...voxel, x: minX + maxX - voxel.x, z: minZ + maxZ - voxel.z }
-      return { ...voxel, x: minX + maxX - voxel.x, y: minY + maxY - voxel.y }
+      if (axis === 'x') return { ...voxel, y: pivot.y - dy, z: pivot.z - dz }
+      if (axis === 'y') return { ...voxel, x: pivot.x - dx, z: pivot.z - dz }
+      return { ...voxel, x: pivot.x - dx, y: pivot.y - dy }
     }
     if (axis === 'x') {
       return degrees === 90
-        ? { ...voxel, y: minY + maxZ - voxel.z, z: minZ + voxel.y - minY }
-        : { ...voxel, y: minY + voxel.z - minZ, z: minZ + maxY - voxel.y }
+        ? { ...voxel, y: pivot.y - dz, z: pivot.z + dy }
+        : { ...voxel, y: pivot.y + dz, z: pivot.z - dy }
     }
     if (axis === 'y') {
       return degrees === 90
-        ? { ...voxel, x: minX + voxel.z - minZ, z: minZ + maxX - voxel.x }
-        : { ...voxel, x: minX + maxZ - voxel.z, z: minZ + voxel.x - minX }
+        ? { ...voxel, x: pivot.x + dz, z: pivot.z - dx }
+        : { ...voxel, x: pivot.x - dz, z: pivot.z + dx }
     }
     return degrees === 90
-      ? { ...voxel, x: minX + maxY - voxel.y, y: minY + voxel.x - minX }
-      : { ...voxel, x: minX + voxel.y - minY, y: minY + maxX - voxel.x }
+      ? { ...voxel, x: pivot.x - dy, y: pivot.y + dx }
+      : { ...voxel, x: pivot.x + dy, y: pivot.y - dx }
+  })
+}
+
+/**
+ * Rotate around the selected voxels' geometric centre while keeping the
+ * result on the discrete voxel lattice.
+ *
+ * When the perpendicular dimensions have compatible parity, the exact centre
+ * is safe and is used.  With mixed parity, an exact quarter-turn centre lies
+ * between cells.  In that case use the canonical integer-grid quarter turn
+ * around the occupied bounding rectangle.  It differs from the mathematical
+ * centre by at most half a cell, but never creates half-cell coordinates,
+ * never needs a lossy post-transform round, and four quarter turns are stable.
+ */
+export function rotateVoxels(voxels: Voxel[], axis: VoxelTransformAxis, degrees: 90 | 180 | 270): Voxel[] {
+  if (!voxels.length) return []
+  const bounds = voxelBounds(voxels)
+  const pivot = voxelBoundsPivot(voxels)
+  if (!bounds || !pivot) return []
+  if (degrees === 180 || rotationPlaneHasCompatibleParity(bounds, axis)) {
+    return rotateVoxelsAroundPivot(voxels, axis, degrees, pivot)
+  }
+
+  return voxels.map((voxel) => {
+    if (axis === 'x') {
+      return degrees === 90
+        ? { ...voxel, y: bounds.min.y + bounds.max.z - voxel.z, z: bounds.min.z + voxel.y - bounds.min.y }
+        : { ...voxel, y: bounds.min.y + voxel.z - bounds.min.z, z: bounds.min.z + bounds.max.y - voxel.y }
+    }
+    if (axis === 'y') {
+      return degrees === 90
+        ? { ...voxel, x: bounds.min.x + voxel.z - bounds.min.z, z: bounds.min.z + bounds.max.x - voxel.x }
+        : { ...voxel, x: bounds.min.x + bounds.max.z - voxel.z, z: bounds.min.z + voxel.x - bounds.min.x }
+    }
+    return degrees === 90
+      ? { ...voxel, x: bounds.min.x + bounds.max.y - voxel.y, y: bounds.min.y + voxel.x - bounds.min.x }
+      : { ...voxel, x: bounds.min.x + voxel.y - bounds.min.y, y: bounds.min.y + bounds.max.x - voxel.x }
   })
 }
 
@@ -402,51 +1007,225 @@ export function findInstanceVoxelAtSceneVoxel(instance: SceneInstance, asset: Vo
   })[0]
 }
 
+/**
+ * Resolve an instance once and retain the local/scene coordinate relationship.
+ *
+ * Color editing used to call findInstanceVoxelAtSceneVoxel for every selected
+ * voxel. That helper intentionally favors a simple one-shot lookup, but it
+ * rebuilds all resolved components on each call. Bulk operations should use
+ * this pair list to build a local spatial map once instead.
+ */
+export function instanceVoxelPairs(instance: SceneInstance, asset: VoxelAsset): Array<{ partId: string; local: Voxel; scene: Voxel }> {
+  return resolveInstanceComponents(asset, instance.overrides ?? []).flatMap(({ partId, voxels }) => {
+    const resolvedSceneVoxels = resolveInstanceComponentSceneVoxels(instance, asset, voxels, partId)
+    return voxels.map((local, index) => ({ partId, local, scene: resolvedSceneVoxels[index] }))
+  })
+}
+
+function sinCosForAngle(angle: number): { sin: number; cos: number } {
+  const quarterTurns = Math.round(angle / (Math.PI / 2))
+  const snapped = quarterTurns * Math.PI / 2
+  // All editor rotations are quarter turns. Avoid Math.sin/cos residuals such
+  // as cos(270°) = -1.8e-16: after converting back to voxel indices those
+  // residuals can round two distinct cells onto one coordinate.
+  if (Math.abs(angle - snapped) < 1e-10) {
+    const phase = ((quarterTurns % 4) + 4) % 4
+    return [
+      { sin: 0, cos: 1 },
+      { sin: 1, cos: 0 },
+      { sin: 0, cos: -1 },
+      { sin: -1, cos: 0 },
+    ][phase]
+  }
+  return { sin: Math.sin(angle), cos: Math.cos(angle) }
+}
+
 function rotateSceneVector(vector: { x: number; y: number; z: number }, rotationX: number, rotationY: number, rotationZ: number): { x: number; y: number; z: number } {
-  const cx = Math.cos(rotationX)
-  const sx = Math.sin(rotationX)
-  const cy = Math.cos(rotationY)
-  const sy = Math.sin(rotationY)
-  const cz = Math.cos(rotationZ)
-  const sz = Math.sin(rotationZ)
+  const { cos: cx, sin: sx } = sinCosForAngle(rotationX)
+  const { cos: cy, sin: sy } = sinCosForAngle(rotationY)
+  const { cos: cz, sin: sz } = sinCosForAngle(rotationZ)
   const afterX = { x: vector.x, y: cx * vector.y - sx * vector.z, z: sx * vector.y + cx * vector.z }
   const afterY = { x: cy * afterX.x + sy * afterX.z, y: afterX.y, z: -sy * afterX.x + cy * afterX.z }
   return { x: cz * afterY.x - sz * afterY.y, y: sz * afterY.x + cz * afterY.y, z: afterY.z }
 }
 
-function resolveInstanceComponentSceneVoxels(instance: SceneInstance, asset: VoxelAsset, component: Voxel[], componentId = voxelComponentId(component), x = instance.x, z = instance.z, y = instance.y ?? 0): Voxel[] {
+function resolveInstanceComponentSceneVoxel(instance: SceneInstance, asset: VoxelAsset, voxel: Voxel, componentId: string, x = instance.x, z = instance.z, y = instance.y ?? 0): Voxel {
   const offset = instance.partOffsets?.[componentId] ?? { x: 0, y: 0, z: 0 }
   const mirror = instance.mirror ?? { x: false, y: false, z: false }
   const rotationX = (instance.rotationX ?? 0) * Math.PI / 180
   const rotationY = (instance.rotationY ?? 0) * Math.PI / 180
   const rotationZ = -(instance.rotation + (instance.rotationZ ?? 0)) * Math.PI / 180
-  return component.map((voxel) => {
-    const localXIndex = mirror.x ? asset.width - 1 - voxel.x : voxel.x
-    const localYIndex = mirror.z ? asset.height - 1 - voxel.y : voxel.y
-    const localZIndex = mirror.y ? asset.depth - 1 - voxel.z : voxel.z
-    const local = rotateSceneVector({
-      x: (localXIndex + 0.5 - asset.width / 2) * VOXEL_WORLD_SIZE + (mirror.x ? -offset.x : offset.x),
-      y: (localZIndex + 0.5 - asset.depth / 2) * VOXEL_WORLD_SIZE + (mirror.y ? -offset.z : offset.z),
-      z: (localYIndex + 0.5) * VOXEL_WORLD_SIZE + (mirror.z ? -offset.y : offset.y),
-    }, rotationX, rotationY, rotationZ)
-    return {
-      ...voxel,
-      x: worldToVoxelCenter(x + local.x),
-      y: Math.round((local.z + y) / VOXEL_WORLD_SIZE - 0.5),
-      z: worldToVoxelCenter(z + local.y),
-    }
-  })
+  const localXIndex = mirror.x ? asset.width - 1 - voxel.x : voxel.x
+  const localYIndex = mirror.z ? asset.height - 1 - voxel.y : voxel.y
+  const localZIndex = mirror.y ? asset.depth - 1 - voxel.z : voxel.z
+  const pivot = normalizeInstanceRotationPivot(instance)
+  const local = rotateSceneVector({
+    x: (localXIndex + 0.5 - asset.width / 2) * VOXEL_WORLD_SIZE + (mirror.x ? -offset.x : offset.x) - pivot.x,
+    y: (localZIndex + 0.5 - asset.depth / 2) * VOXEL_WORLD_SIZE + (mirror.y ? -offset.z : offset.z) - pivot.z,
+    z: (localYIndex + 0.5) * VOXEL_WORLD_SIZE + (mirror.z ? -offset.y : offset.y) - pivot.y,
+  }, rotationX, rotationY, rotationZ)
+  // The transform is performed in world units, where a quarter turn is
+  // mathematically exact on the voxel lattice. IEEE-754 arithmetic can leave
+  // a boundary at 18.499999999999996, though, and the ordinary centre helper
+  // then rounds it down. Keep this tolerance local to transformed instance
+  // coordinates so ray-hit conversion elsewhere keeps its existing behavior.
+  const transformedVoxelCenter = (value: number) => Math.round(value / VOXEL_WORLD_SIZE - 0.5 + 1e-8)
+  return {
+    ...voxel,
+    x: transformedVoxelCenter(x + local.x + pivot.x),
+    y: transformedVoxelCenter(local.z + pivot.y + y),
+    z: transformedVoxelCenter(z + local.y + pivot.z),
+  }
+}
+
+function resolveInstanceComponentSceneVoxels(instance: SceneInstance, asset: VoxelAsset, component: Voxel[], componentId = voxelComponentId(component), x = instance.x, z = instance.z, y = instance.y ?? 0): Voxel[] {
+  return component.map((voxel) => resolveInstanceComponentSceneVoxel(instance, asset, voxel, componentId, x, z, y))
 }
 
 export function resolveInstanceSceneVoxels(instance: SceneInstance, asset: VoxelAsset, x = instance.x, z = instance.z, y = instance.y ?? 0): Voxel[] {
   return resolveInstanceComponents(asset, instance.overrides ?? []).flatMap(({ partId, voxels }) => resolveInstanceComponentSceneVoxels(instance, asset, voxels, partId, x, z, y))
 }
 
-export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
-  const assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
-  const assemblies = project.assemblies ?? []
-  const memberKeyMatches = (storedKey: string, candidateKey: string) => storedKey === candidateKey || (storedKey.startsWith('asset:') && (candidateKey.startsWith(`${storedKey}:`) || candidateKey.startsWith(`${storedKey}#`)))
-  const assemblyPathForMemberKey = (memberKey: string): string[] => {
+/** Convert a voxel returned by an asset mesh raycast from asset-local space to scene space. */
+export function instanceLocalVoxelToSceneVoxel(instance: SceneInstance, asset: VoxelAsset, localVoxel: Pick<Voxel, 'x' | 'y' | 'z'>): Voxel | undefined {
+  for (const { partId, voxels } of resolveInstanceComponents(asset, instance.overrides ?? [])) {
+    const localIndex = voxels.findIndex((voxel) => voxel.x === localVoxel.x && voxel.y === localVoxel.y && voxel.z === localVoxel.z)
+    if (localIndex < 0) continue
+    return resolveInstanceComponentSceneVoxels(instance, asset, voxels, partId)[localIndex]
+  }
+  return undefined
+}
+
+/**
+ * Convert a raycast voxel using the part ID already attached to the rendered
+ * mesh. Unlike instanceLocalVoxelToSceneVoxel(), this does not resolve or
+ * scan the complete asset; it is intended for pointer hits on large imported
+ * models and is therefore O(1) with respect to the model voxel count.
+ */
+export function instanceLocalVoxelToSceneVoxelFast(instance: SceneInstance, asset: VoxelAsset, localVoxel: Voxel, componentId: string): Voxel {
+  return resolveInstanceComponentSceneVoxel(instance, asset, localVoxel, componentId)
+}
+
+type CachedAssetSceneParts = {
+  asset: VoxelAsset
+  signature: string
+  parts: SceneEntityPart[]
+  /** Geometry signature without overrides, used by incremental model edits. */
+  baseSignature?: string
+  /** Number of immutable base cells in each effective part array. */
+  baseVoxelLengths?: number[]
+  /** Previous append-only override array, retained for tail detection. */
+  addOnlyOverrides?: VoxelOverride[]
+}
+
+type SceneEntityPartsCache = {
+  assetsRef: VoxelAsset[] | null
+  assembliesRef: SceneAssembly[] | null
+  assemblySignature: string
+  assetParts: Map<string, CachedAssetSceneParts>
+  customVoxelsRef: Voxel[] | null
+  customVoxelLength: number
+  customGroups: Map<string, Voxel[]>
+  customVoxelOwnerCache: WeakMap<object, string>
+}
+
+export type SceneEntityPartsOptions = {
+  /**
+   * Build the result with a private cache. Preview/candidate projects use this
+   * so they can never mutate or reuse the live scene's lazy part topology.
+   */
+  isolated?: boolean
+}
+
+function createSceneEntityPartsCache(): SceneEntityPartsCache {
+  return {
+    assetsRef: null,
+    assembliesRef: null,
+    assemblySignature: '',
+    assetParts: new Map(),
+    customVoxelsRef: null,
+    customVoxelLength: 0,
+    customGroups: new Map(),
+    customVoxelOwnerCache: new WeakMap(),
+  }
+}
+
+type AssemblyPathResolver = {
+  signature: string
+  paths: Map<string, string[]>
+  resolve: (memberKey: string) => string[]
+}
+
+// sceneEntityParts() is used by rendering, hit testing, selection and the
+// occupancy index. Keep the cache independent from the project root and the
+// instances array: a transform-only commit creates a new instances array, but
+// all unaffected instance resolutions remain valid and can be reused.
+const sceneEntityPartsCache = createSceneEntityPartsCache()
+
+// Transform-only scene updates replace the project root and instances array,
+// but the asset catalog and assembly tree remain referentially stable. Keep
+// their lookup structures outside sceneEntityParts() so a pointer release does
+// not rebuild the same maps once per render/selection consumer.
+const assetMapCache = new WeakMap<ReadonlyArray<VoxelAsset>, Map<string, VoxelAsset>>()
+const assemblyPathResolverCache = new WeakMap<ReadonlyArray<SceneAssembly>, AssemblyPathResolver>()
+const assetVoxelKeyCache = new WeakMap<VoxelAsset, Set<string>>()
+
+function assetVoxelKeys(asset: VoxelAsset): Set<string> {
+  const cached = assetVoxelKeyCache.get(asset)
+  if (cached) return cached
+  const next = new Set(asset.voxels.map(voxelKey))
+  assetVoxelKeyCache.set(asset, next)
+  return next
+}
+
+// Geometry signatures are requested by every render/selection pass. Large
+// edited entities can carry thousands of overrides, so serializing the same
+// array on every transform-only update becomes an avoidable O(n) pause.
+// Project updates replace the overrides array when its contents change;
+// unchanged instances keep the same array reference and can reuse its token.
+const instanceOverridesSignatureCache = new WeakMap<ReadonlyArray<VoxelOverride>, number>()
+const instancePartOffsetsSignatureCache = new WeakMap<NonNullable<SceneInstance['partOffsets']>, string>()
+let nextInstanceOverridesSignatureToken = 1
+
+function instanceOverridesSignature(overrides: ReadonlyArray<VoxelOverride> | undefined): string {
+  if (!overrides?.length) return ''
+  const cached = instanceOverridesSignatureCache.get(overrides)
+  if (cached !== undefined) return `@${cached}`
+  // The override array is replaced whenever its contents change. A stable
+  // identity token is therefore a complete invalidation key and avoids
+  // serializing thousands of imported-model edits on every render pass.
+  const token = nextInstanceOverridesSignatureToken++
+  instanceOverridesSignatureCache.set(overrides, token)
+  return `@${token}`
+}
+
+function instancePartOffsetsSignature(partOffsets: SceneInstance['partOffsets']): string {
+  if (!partOffsets) return ''
+  const cached = instancePartOffsetsSignatureCache.get(partOffsets)
+  if (cached !== undefined) return cached
+  const signature = Object.entries(partOffsets)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}:${value.x},${value.y},${value.z}`)
+    .join(';')
+  instancePartOffsetsSignatureCache.set(partOffsets, signature)
+  return signature
+}
+
+function sceneAssemblySignature(assemblies: ReadonlyArray<SceneAssembly>): string {
+  return assemblies.map((assembly) => `${assembly.id}:${assembly.memberKeys.join(',')}`).join('|')
+}
+
+function assemblyPathResolver(assemblies: ReadonlyArray<SceneAssembly>): AssemblyPathResolver {
+  const signature = sceneAssemblySignature(assemblies)
+  const cached = assemblyPathResolverCache.get(assemblies)
+  if (cached?.signature === signature) return cached
+
+  const paths = new Map<string, string[]>()
+  const memberKeyMatches = (storedKey: string, candidateKey: string) => storedKey === candidateKey
+    || (storedKey.startsWith('asset:') && (candidateKey.startsWith(`${storedKey}:`) || candidateKey.startsWith(`${storedKey}#`)))
+  const resolve = (memberKey: string): string[] => {
+    const existing = paths.get(memberKey)
+    if (existing) return existing
     let bestPath: string[] = []
     const visit = (key: string, path: string[], seen: Set<string>) => {
       assemblies.forEach((assembly) => {
@@ -457,31 +1236,319 @@ export function sceneEntityParts(project: ProjectState): SceneEntityPart[] {
       })
     }
     visit(memberKey, [], new Set())
+    paths.set(memberKey, bestPath)
     return bestPath
   }
+  const next = { signature, paths, resolve }
+  assemblyPathResolverCache.set(assemblies, next)
+  return next
+}
+
+/**
+ * Signature for render geometry only. Instance position is applied to the
+ * Three.js group and must not invalidate the voxel mesh cache.
+ */
+export function sceneInstanceRenderSignature(instance: SceneInstance): string {
+  return `${sceneInstanceGeometrySignature(instance)}|${instancePartOffsetsSignature(instance.partOffsets)}`
+}
+
+/**
+ * Signature for the asset geometry and materials, excluding per-part offsets.
+ * A partial asset move changes only these offsets and can therefore be
+ * applied to the existing Three.js part groups without rebuilding every voxel.
+ */
+export function sceneInstanceGeometrySignature(instance: SceneInstance): string {
+  const overrides = instanceOverridesSignature(instance.overrides)
+  const mirror = instance.mirror ? `${instance.mirror.x ? 1 : 0}${instance.mirror.y ? 1 : 0}${instance.mirror.z ? 1 : 0}` : ''
+  return [
+    instance.assetId,
+    instance.visible ? '1' : '0',
+    instance.rotation,
+    instance.rotationX ?? 0,
+    instance.rotationY ?? 0,
+    instance.rotationZ ?? 0,
+    instance.rotationPivot ? `${instance.rotationPivot.x},${instance.rotationPivot.y},${instance.rotationPivot.z}` : '',
+    instance.style,
+    instance.colorOverride ?? '',
+    mirror,
+    overrides,
+  ].join('|')
+}
+
+function sceneInstanceVoxelOffset(instance: SceneInstance, asset: VoxelAsset): { x: number; y: number; z: number } {
+  const canonicalX = snapAssetOrigin(0, asset.width)
+  const canonicalZ = snapAssetOrigin(0, asset.depth)
+  return {
+    x: assetOriginGridCoordinate(instance.x, asset.width) - assetOriginGridCoordinate(canonicalX, asset.width),
+    y: worldToVoxel(instance.y ?? 0),
+    z: assetOriginGridCoordinate(instance.z, asset.depth) - assetOriginGridCoordinate(canonicalZ, asset.depth),
+  }
+}
+
+/**
+ * Resolve a part-level transform into an integer scene-grid delta. Asset
+ * partOffsets are stored in local asset axes and are affected by the same
+ * mirror/rotation as the part voxels. One probe voxel is enough because this
+ * transform is translational; the whole component never needs remapping.
+ */
+function sceneInstancePartVoxelOffset(instance: SceneInstance, asset: VoxelAsset, partId: string): { x: number; y: number; z: number } {
+  const partOffset = instance.partOffsets?.[partId]
+  if (!partOffset || (!partOffset.x && !partOffset.y && !partOffset.z)) return { x: 0, y: 0, z: 0 }
+  const canonicalInstance = {
+    ...instance,
+    x: snapAssetOrigin(0, asset.width),
+    y: 0,
+    z: snapAssetOrigin(0, asset.depth),
+  }
+  const withoutPartOffset = { ...canonicalInstance, partOffsets: undefined }
+  const probe: Voxel = { x: 0, y: 0, z: 0, materialId: 'primary' }
+  const translated = resolveInstanceComponentSceneVoxels(canonicalInstance, asset, [probe], partId)[0]
+  const canonical = resolveInstanceComponentSceneVoxels(withoutPartOffset, asset, [probe], partId)[0]
+  return {
+    x: translated.x - canonical.x,
+    y: translated.y - canonical.y,
+    z: translated.z - canonical.z,
+  }
+}
+
+function sameSceneOffset(left: { x: number; y: number; z: number } | undefined, right: { x: number; y: number; z: number }): boolean {
+  return (left?.x ?? 0) === right.x && (left?.y ?? 0) === right.y && (left?.z ?? 0) === right.z
+}
+
+export function sceneEntityParts(project: ProjectState, options: SceneEntityPartsOptions = {}): SceneEntityPart[] {
+  const instances = project.instances
+  const cache = options.isolated ? createSceneEntityPartsCache() : sceneEntityPartsCache
+
+  let assetMap = assetMapCache.get(project.assets)
+  if (!assetMap) {
+    assetMap = new Map(project.assets.map((asset) => [asset.id, asset]))
+    assetMapCache.set(project.assets, assetMap)
+  }
+  const assemblies = project.assemblies ?? []
+  const nextAssemblySignature = sceneAssemblySignature(assemblies)
+  const assemblyPathForMemberKey = assemblyPathResolver(assemblies).resolve
+
+  if (cache.assetsRef !== project.assets) {
+    cache.assetsRef = project.assets
+    // Do not clear every resolved instance when the asset catalog changes.
+    // Adding an unrelated asset is common during placement and should not
+    // force large imported models already in the scene through another full
+    // component resolution. Each instance below already checks both its
+    // asset object and geometry signature, so only affected entries rebuild.
+  }
+  if (cache.assembliesRef !== project.assemblies || cache.assemblySignature !== nextAssemblySignature) {
+    cache.assembliesRef = project.assemblies ?? null
+    cache.assemblySignature = nextAssemblySignature
+    // Assembly membership affects metadata only; keep the expensive resolved
+    // voxel arrays and refresh their tree paths below.
+    cache.assetParts.forEach((entry) => {
+      entry.parts = entry.parts.map((part) => {
+        const assemblyIds = assemblyPathForMemberKey(part.memberKey)
+        return { ...part, assemblyId: assemblyIds[0], assemblyIds }
+      })
+    })
+  }
+
   const parts: SceneEntityPart[] = []
-  for (const instance of project.instances) {
+  const retainedInstanceIds = new Set<string>()
+  for (const instance of instances) {
     if (!instance.visible) continue
     const asset = assetMap.get(instance.assetId)
     if (!asset) continue
-    for (const { partId, voxels: component } of resolveInstanceComponents(asset, instance.overrides ?? [])) {
-      const sceneVoxels = resolveInstanceComponentSceneVoxels(instance, asset, component, partId)
-      const label = partId.split('#')[0]
-      const memberKey = `asset:${instance.id}:${partId}`
-      const assemblyIds = assemblyPathForMemberKey(memberKey)
-      parts.push({ id: `asset:${instance.id}:${partId}`, kind: 'asset', instanceId: instance.id, partId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label, colorOverride: instance.colorOverride, voxels: sceneVoxels })
+    retainedInstanceIds.add(instance.id)
+    // Root and part transforms are applied lazily by scenePartVoxels(). The
+    // cached topology only needs invalidation when geometry/material content
+    // changes, not when a user moves an instance or sub-part.
+    const signature = sceneInstanceGeometrySignature(instance)
+    const cached = cache.assetParts.get(instance.id)
+    const sceneOffset = sceneInstanceVoxelOffset(instance, asset)
+    const overrides = instance.overrides ?? []
+    const baseSignature = sceneInstanceGeometrySignature({ ...instance, overrides: [] })
+    const isAddOnlyImported = isOrdinaryImportedModel(asset)
+      && overrides.length > 0
+      && overrides.every((override) => (override.mode ?? 'add') === 'add')
+    const addOnlyFastPath = isAddOnlyImported && !overrides.some((override) => assetVoxelKeys(asset).has(voxelKey(override)))
+    const refreshAssetPartMetadata = (entry: CachedAssetSceneParts) => {
+      entry.parts = entry.parts.map((part) => {
+        const partSceneOffset = sceneInstancePartVoxelOffset(instance, asset, part.partId)
+        return sameSceneOffset(part.sceneOffset, sceneOffset)
+          && sameSceneOffset(part.partSceneOffset, partSceneOffset)
+          && part.colorOverride === instance.colorOverride
+          ? part
+          : { ...part, sceneOffset, partSceneOffset, colorOverride: instance.colorOverride }
+      })
     }
+
+    // Imported models are represented by one editable component. During an
+    // add-only brush stroke the base mesh never changes; rebuilding a Map and
+    // remapping every source voxel for each animation frame was the main
+    // reason editing a converted model lagged while an empty hand-drawn
+    // entity stayed responsive. Keep one canonical scene-space base array and
+    // append only the new override tail.
+    if (isOrdinaryImportedModel(asset) && (addOnlyFastPath || overrides.length === 0)
+      && cached?.asset === asset && cached.baseSignature === baseSignature && cached.baseVoxelLengths) {
+      cached.baseVoxelLengths.forEach((length, index) => {
+        const part = cached.parts[index]
+        if (part) part.voxels.length = length
+      })
+      const previousOverrides = cached.addOnlyOverrides
+      const prefixUnchanged = Boolean(addOnlyFastPath && previousOverrides
+        && overrides.length >= previousOverrides.length
+        && previousOverrides.every((override, index) => override === overrides[index]))
+      const firstPart = cached.parts[0]
+      const canonicalX = snapAssetOrigin(0, asset.width)
+      const canonicalZ = snapAssetOrigin(0, asset.depth)
+      const canonicalInstance = { ...instance, x: canonicalX, y: 0, z: canonicalZ, partOffsets: undefined, overrides: [] }
+      if (firstPart && addOnlyFastPath) {
+        const start = prefixUnchanged ? (previousOverrides?.length ?? 0) : 0
+        if (!prefixUnchanged) firstPart.voxels.length = cached.baseVoxelLengths[0] ?? firstPart.voxels.length
+        for (let index = start; index < overrides.length; index += 1) {
+          const override = overrides[index]
+          firstPart.voxels.push(resolveInstanceComponentSceneVoxel(canonicalInstance, asset, override, firstPart.partId))
+        }
+      }
+      cached.signature = signature
+      cached.addOnlyOverrides = addOnlyFastPath ? overrides : undefined
+      refreshAssetPartMetadata(cached)
+    } else if (!cached || cached.asset !== asset || cached.signature !== signature) {
+      const nextParts: SceneEntityPart[] = []
+      const canonicalX = snapAssetOrigin(0, asset.width)
+      const canonicalZ = snapAssetOrigin(0, asset.depth)
+      const canonicalInstance = {
+        ...instance,
+        x: canonicalX,
+        y: 0,
+        z: canonicalZ,
+        partOffsets: undefined,
+        overrides: addOnlyFastPath ? [] : overrides,
+      }
+      for (const { partId, voxels: component } of resolveInstanceComponents(asset, canonicalInstance.overrides ?? [])) {
+        const sceneVoxels = resolveInstanceComponentSceneVoxels(canonicalInstance, asset, component, partId)
+        const partSceneOffset = sceneInstancePartVoxelOffset(instance, asset, partId)
+        const label = partId.split('#')[0]
+        const memberKey = `asset:${instance.id}:${partId}`
+        const assemblyIds = assemblyPathForMemberKey(memberKey)
+        nextParts.push({ id: `asset:${instance.id}:${partId}`, kind: 'asset', instanceId: instance.id, partId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label, colorOverride: instance.colorOverride, sceneOffset, partSceneOffset, voxels: sceneVoxels })
+      }
+      const entry: CachedAssetSceneParts = { asset, signature, parts: nextParts }
+      if (isOrdinaryImportedModel(asset) && addOnlyFastPath) {
+        // The base is intentionally created without overrides above. Append
+        // the complete initial tail once; later frames only append its tail.
+        const firstPart = nextParts[0]
+        const baseLengths = nextParts.map((part) => part.voxels.length)
+        if (firstPart) overrides.forEach((override) => firstPart.voxels.push(resolveInstanceComponentSceneVoxel(canonicalInstance, asset, override, firstPart.partId)))
+        entry.baseSignature = baseSignature
+        entry.baseVoxelLengths = baseLengths
+        entry.addOnlyOverrides = overrides
+      } else if (isOrdinaryImportedModel(asset) && overrides.length === 0) {
+        entry.baseSignature = baseSignature
+        entry.baseVoxelLengths = nextParts.map((part) => part.voxels.length)
+      }
+      cache.assetParts.set(instance.id, entry)
+    } else {
+      // Keep the canonical voxel topology and refresh only small transform
+      // objects when the instance root or one of its parts moves.
+      cached.parts = cached.parts.map((part) => {
+        const partSceneOffset = sceneInstancePartVoxelOffset(instance, asset, part.partId)
+        if (sameSceneOffset(part.sceneOffset, sceneOffset) && sameSceneOffset(part.partSceneOffset, partSceneOffset)) return part
+        return { ...part, sceneOffset, partSceneOffset }
+      })
+    }
+    parts.push(...(cache.assetParts.get(instance.id)?.parts ?? []))
   }
-  const customGroups = new Map<string, Voxel[]>()
-  for (const voxel of project.customVoxels) {
+  cache.assetParts.forEach((_, instanceId) => {
+    if (!retainedInstanceIds.has(instanceId)) cache.assetParts.delete(instanceId)
+  })
+
+  if (cache.customVoxelsRef !== project.customVoxels || project.customVoxels.length < cache.customVoxelLength) {
+    const previousGroups = cache.customGroups
+    const previousOwnerCache = cache.customVoxelOwnerCache
+    const nextGroups = new Map<string, Voxel[]>()
+    const changedGroups = new Map<string, Voxel[]>()
+    const presentEntityIds = new Set<string>()
+    const reusedCounts = new Map<string, number>()
+    const changedEntityIds = new Set<string>()
+
+    // A geometry replacement creates a new flat array but keeps every
+    // unaffected voxel object immutable and reusable. Identify changed
+    // entities by object identity first, instead of allocating a new group
+    // array for every entity in the scene.
+    project.customVoxels.forEach((voxel) => {
+      const entityId = voxelEntityId(voxel)
+      presentEntityIds.add(entityId)
+      if (previousOwnerCache.get(voxel as object) === entityId) {
+        reusedCounts.set(entityId, (reusedCounts.get(entityId) ?? 0) + 1)
+      } else {
+        changedEntityIds.add(entityId)
+        const group = changedGroups.get(entityId)
+        if (group) group.push(voxel)
+        else changedGroups.set(entityId, [voxel])
+      }
+    })
+
+    previousGroups.forEach((group, entityId) => {
+      if (!presentEntityIds.has(entityId)) return
+      if (changedEntityIds.has(entityId) || (reusedCounts.get(entityId) ?? 0) !== group.length) changedEntityIds.add(entityId)
+      else nextGroups.set(entityId, group)
+    })
+
+    // If an entity lost old voxels but gained no new object, the first pass
+    // only knows the count changed. Reconstruct just those affected groups;
+    // the common replacement case still touches one entity rather than the
+    // entire scene's group map.
+    const needsRebuildFromFullPass = new Set<string>([...changedEntityIds].filter((entityId) => {
+      // A pure replacement supplies the complete new group as unknown voxel
+      // objects in changedGroups. Only scan the flat array again when an
+      // entity mixes reused and new objects, or when old voxels disappeared
+      // without any replacement objects to collect.
+      return previousGroups.size > 0 && ((reusedCounts.get(entityId) ?? 0) > 0 || !changedGroups.has(entityId))
+    }))
+    if (needsRebuildFromFullPass.size) {
+      needsRebuildFromFullPass.forEach((entityId) => changedGroups.delete(entityId))
+      project.customVoxels.forEach((voxel) => {
+        const entityId = voxelEntityId(voxel)
+        if (!needsRebuildFromFullPass.has(entityId)) return
+        const group = changedGroups.get(entityId)
+        if (group) group.push(voxel)
+        else changedGroups.set(entityId, [voxel])
+      })
+    }
+    changedGroups.forEach((group, entityId) => {
+      group.forEach((voxel) => cache.customVoxelOwnerCache.set(voxel as object, entityId))
+      nextGroups.set(entityId, group)
+    })
+    cache.customVoxelsRef = project.customVoxels
+    cache.customVoxelLength = project.customVoxels.length
+    cache.customGroups = nextGroups
+  }
+  // Add-only strokes append to the same array. Copy only the new tail and
+  // replace the affected group array so the occupancy index can detect it by
+  // reference without sorting all scene voxels again.
+  for (let index = cache.customVoxelLength; index < project.customVoxels.length; index += 1) {
+    const voxel = project.customVoxels[index]
     const entityId = voxelEntityId(voxel)
-    customGroups.set(entityId, [...(customGroups.get(entityId) ?? []), { ...voxel, entityId }])
+    const group = cache.customGroups.get(entityId)
+    // Voxel objects are immutable after they enter ProjectState. Reuse the
+    // object and append in place; spreading the previous group for every
+    // voxel made large generated entities quadratic to assemble.
+    if (group) group.push(voxel)
+    else cache.customGroups.set(entityId, [voxel])
+    cache.customVoxelOwnerCache.set(voxel as object, entityId)
   }
-  for (const [entityId, voxels] of customGroups) {
+  cache.customVoxelLength = project.customVoxels.length
+  cache.customGroups.forEach((voxels, entityId) => {
     const memberKey = `voxel:${entityId}`
     const assemblyIds = assemblyPathForMemberKey(memberKey)
-    parts.push({ id: `custom:${entityId}`, kind: 'custom', partId: entityId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label: '手动体素实体', colorOverride: project.customColors?.[entityId], voxels })
-  }
+    const sceneOffset = project.customEntityOffsets?.[entityId]
+    // Expanded geometry is stored as ordinary unit voxels. Keep the render
+    // mode explicit in the project map, but also infer it from the voxel
+    // marker so older scenes created before customVoxelRenderModes was
+    // persisted cannot silently fall back to greedy meshing and appear as
+    // oversized blocks after reload.
+    const renderMode = project.customVoxelRenderModes?.[entityId]
+      ?? (voxels.some((voxel) => voxel.preserveVoxelCells) ? 'cells' : 'greedy')
+    parts.push({ id: `custom:${entityId}`, kind: 'custom', partId: entityId, memberKey, assemblyId: assemblyIds[0], assemblyIds, label: '手动体素实体', colorOverride: project.customColors?.[entityId], renderMode, sceneOffset, voxels })
+  })
   return parts
 }
 
@@ -513,8 +1580,11 @@ function rootAssemblyNumber(name: string | undefined): number | undefined {
  * sibling number. Sibling numbers live in persistent counters so deleting a
  * node never causes a later node to be renumbered.
  */
-export function normalizeProjectNaming(project: ProjectState): ProjectState {
-  const next = structuredClone(project)
+export function normalizeProjectNaming(project: ProjectState, options: { clone?: boolean } = {}): ProjectState {
+  // Geometry operations already create a new project root and copy only the
+  // mutable scene collections. Allow that hot path to reuse the immutable
+  // asset/material catalogs instead of cloning every voxel twice.
+  const next = options.clone === false ? project : structuredClone(project)
   const assemblies = next.assemblies ?? []
   const assemblyMap = new Map(assemblies.map((assembly) => [assembly.id, assembly]))
   const parentByAssembly = new Map<string, string | undefined>()
@@ -602,6 +1672,18 @@ export function normalizeProjectNaming(project: ProjectState): ProjectState {
   const entityCounters = { ...childCounters, ...(next.entitySequenceCounters ?? {}) }
   const usedEntitySequences = new Map<string, Set<number>>()
   const usedStandaloneNames = new Set<string>()
+  const directParentOf = (part: SceneEntityPart) => part.assemblyIds?.[0] ?? part.assemblyId
+  // Parts are emitted in instance order followed by custom voxel entities;
+  // that is not necessarily their creation order. Reserve every persisted
+  // root name before assigning names to newly added parts, otherwise a newly
+  // dragged template instance can claim a name that belongs to a custom part
+  // visited later in the traversal.
+  const persistedStandaloneNames = new Set(
+    parts
+      .filter((part) => !directParentOf(part))
+      .map((part) => names[part.memberKey]?.trim())
+      .filter((name): name is string => Boolean(name)),
+  )
   const assetMap = new Map(next.assets.map((asset) => [asset.id, asset]))
   const scopeForParent = (parentId?: string) => parentId ? `assembly:${parentId}` : 'root'
   const partBaseName = (part: SceneEntityPart) => {
@@ -611,20 +1693,22 @@ export function normalizeProjectNaming(project: ProjectState): ProjectState {
     const sourceName = asset?.name?.trim() ?? ''
     return /^装配体\s+\d+$/.test(sourceName) || /^子装配体\s+\d+(?:-\d+)*$/.test(sourceName) ? '子实体' : (sourceName || '子实体')
   }
-  const directParentOf = (part: SceneEntityPart) => part.assemblyIds?.[0] ?? part.assemblyId
   parts.forEach((part) => {
     const parentId = directParentOf(part)
     const scope = scopeForParent(parentId)
     if (!parentId) {
-      const current = names[part.memberKey]
-      if (!current) {
-        const base = partBaseName(part)
-        let candidate = base
+      const current = names[part.memberKey]?.trim()
+      let candidate = current
+      if (!candidate || usedStandaloneNames.has(candidate)) {
+        const base = candidate || partBaseName(part)
         let suffix = 2
-        while (usedStandaloneNames.has(candidate)) candidate = `${base} ${suffix++}`
+        candidate = base
+        while (usedStandaloneNames.has(candidate) || persistedStandaloneNames.has(candidate)) {
+          candidate = `${base} ${suffix++}`
+        }
         names[part.memberKey] = candidate
       }
-      usedStandaloneNames.add(names[part.memberKey])
+      usedStandaloneNames.add(candidate)
       parents[part.memberKey] = ''
       if (!modes[part.memberKey]) modes[part.memberKey] = 'auto'
       return
@@ -678,7 +1762,7 @@ export function sceneAssemblies(parts: SceneEntityPart[], options: { includeCont
     }
   })
   const occupied = new Map<string, number[]>()
-  if (options.includeContacts !== false) parts.forEach((part, partIndex) => part.voxels.forEach((voxel) => {
+  if (options.includeContacts !== false) parts.forEach((part, partIndex) => scenePartVoxels(part).forEach((voxel) => {
     const key = voxelKey(voxel)
     occupied.set(key, [...(occupied.get(key) ?? []), partIndex])
   }))
@@ -687,7 +1771,7 @@ export function sceneAssemblies(parts: SceneEntityPart[], options: { includeCont
     [voxel.x, voxel.y + 1, voxel.z], [voxel.x, voxel.y - 1, voxel.z],
     [voxel.x, voxel.y, voxel.z + 1], [voxel.x, voxel.y, voxel.z - 1],
   ]
-  parts.forEach((part, partIndex) => part.voxels.forEach((voxel) => {
+  parts.forEach((part, partIndex) => scenePartVoxels(part).forEach((voxel) => {
     for (const key of [voxelKey(voxel), ...neighbors(voxel).map(([x, y, z]) => `${x},${y},${z}`)]) {
       for (const otherIndex of occupied.get(key) ?? []) join(partIndex, otherIndex)
     }
@@ -787,7 +1871,7 @@ export function makeTree(id: string): VoxelAsset {
 }
 
 export function makeDefaultProject(): ProjectState {
-  const assets = [
+  const templateAssets = [
     makeHouse('house-greek', '希腊建筑·主屋', '希腊风格', '#5f83bd', '#e9e1d1'),
     makeHouse('house-indian', '印度建筑·主屋', '印度风格', '#d2a354', '#c96043'),
     makeHouse('house-chinese', '中式建筑·主屋', '中式风格', '#2e6f70', '#c96043'),
@@ -796,42 +1880,419 @@ export function makeDefaultProject(): ProjectState {
     makePlaza('plaza-center'),
     makeTree('tree-basic'),
   ].map((asset) => ({ ...asset, isTemplate: true }))
+  const sceneAssets = templateAssets.map((asset) => ({
+    ...structuredClone(asset),
+    id: `scene-sample-${asset.id}`,
+    source: '初始样例场景',
+    isTemplate: false,
+    templateSourceId: asset.id,
+  }))
+  const sceneAssetId = (templateId: string) => `scene-sample-${templateId}`
   const instances: SceneInstance[] = [
-    { id: 'inst-greek', assetId: 'house-greek', x: -6, y: 0, z: -6, rotation: 0, style: '希腊风格', visible: true, overrides: [] },
-    { id: 'inst-indian', assetId: 'house-indian', x: 3, y: 0, z: -6, rotation: 0, style: '印度风格', visible: true, overrides: [] },
-    { id: 'inst-chinese', assetId: 'house-chinese', x: -6, y: 0, z: 3, rotation: 0, style: '中式风格', visible: true, overrides: [] },
-    { id: 'inst-japanese', assetId: 'house-japanese', x: 3, y: 0, z: 3, rotation: 0, style: '日式风格', visible: true, overrides: [] },
-    { id: 'inst-plaza', assetId: 'plaza-center', x: -1, y: 0, z: -1, rotation: 0, style: '基础件', visible: true, overrides: [] },
-    { id: 'inst-tree-a', assetId: 'tree-basic', x: -9, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
-    { id: 'inst-tree-b', assetId: 'tree-basic', x: 8, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
+    { id: 'inst-greek', assetId: sceneAssetId('house-greek'), x: -6, y: 0, z: -6, rotation: 0, style: '希腊风格', visible: true, overrides: [] },
+    { id: 'inst-indian', assetId: sceneAssetId('house-indian'), x: 3, y: 0, z: -6, rotation: 0, style: '印度风格', visible: true, overrides: [] },
+    { id: 'inst-chinese', assetId: sceneAssetId('house-chinese'), x: -6, y: 0, z: 3, rotation: 0, style: '中式风格', visible: true, overrides: [] },
+    { id: 'inst-japanese', assetId: sceneAssetId('house-japanese'), x: 3, y: 0, z: 3, rotation: 0, style: '日式风格', visible: true, overrides: [] },
+    { id: 'inst-plaza', assetId: sceneAssetId('plaza-center'), x: -1, y: 0, z: -1, rotation: 0, style: '基础件', visible: true, overrides: [] },
+    { id: 'inst-tree-a', assetId: sceneAssetId('tree-basic'), x: -9, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
+    { id: 'inst-tree-b', assetId: sceneAssetId('tree-basic'), x: 8, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
   ]
-  return { version: 1, name: '莫测里·第一街区', voxelSizeMm: 1, sceneSizeCm: 20, sceneBounds: { x: 200, y: 200, z: 200 }, materials: MATERIALS, assets, instances, customVoxels: [], customColors: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
+  return { version: 1, sampleRevision: DEFAULT_SAMPLE_REVISION, name: '莫测里·第一街区', voxelSizeMm: DEFAULT_VOXEL_SIZE_MM, sceneSizeCm: 20, sceneBounds: { x: 200, y: 200, z: 200 }, materials: MATERIALS, assets: [...templateAssets, ...sceneAssets], instances, customVoxels: [], customVoxelRenderModes: {}, customColors: {}, customEntityOffsets: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
 }
 
-export function makeStl(asset: VoxelAsset): string {
-  const lines: string[] = [`solid ${asset.id}`]
-  const face = (a: [number, number, number], b: [number, number, number], c: [number, number, number], d: [number, number, number]) => {
-    const normal = '0 0 0'
-    lines.push(`facet normal ${normal}`, ' outer loop', `  vertex ${a.join(' ')}`, `  vertex ${b.join(' ')}`, `  vertex ${c.join(' ')}`, ' endloop', 'endfacet')
-    lines.push(`facet normal ${normal}`, ' outer loop', `  vertex ${a.join(' ')}`, `  vertex ${c.join(' ')}`, `  vertex ${d.join(' ')}`, ' endloop', 'endfacet')
+/**
+ * Create the empty project shown to a first-time user.
+ *
+ * `makeDefaultProject` intentionally remains the bundled sample fixture used
+ * by import/export tests and by the legacy-sample migration. User-facing
+ * initialization must not use that fixture, otherwise the sample templates
+ * and instances silently reappear after a fresh session or when creating a
+ * new scene.
+ */
+export function makeEmptyProject(): ProjectState {
+  const sample = makeDefaultProject()
+  return {
+    ...sample,
+    sampleRevision: undefined,
+    name: '未命名场景',
+    assets: [],
+    instances: [],
+    customVoxels: [],
+    customVoxelRenderModes: {},
+    customColors: {},
+    customEntitySources: {},
+    customEntityOffsets: {},
+    entityNames: {},
+    entityNameModes: {},
+    entityNameSequences: {},
+    entityNameParents: {},
+    entitySequenceCounters: {},
+    assemblySequence: 1,
+    assemblyChildSequence: {},
+    childSequenceCounters: {},
+    assemblies: [],
+    lockedMemberKeys: [],
   }
-  const voxels = deduplicateVoxels(asset.voxels)
-  const occupied = new Set(voxels.map((v) => `${v.x},${v.y},${v.z}`))
-  const faces: Array<{ dx: number; dy: number; dz: number; corners: Array<[number, number, number]> }> = [
-    { dx: 1, dy: 0, dz: 0, corners: [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]] },
-    { dx: -1, dy: 0, dz: 0, corners: [[0, 0, 1], [0, 1, 1], [0, 1, 0], [0, 0, 0]] },
-    { dx: 0, dy: 1, dz: 0, corners: [[0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0]] },
-    { dx: 0, dy: -1, dz: 0, corners: [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]] },
-    { dx: 0, dy: 0, dz: 1, corners: [[1, 0, 1], [1, 1, 1], [0, 1, 1], [0, 0, 1]] },
-    { dx: 0, dy: 0, dz: -1, corners: [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]] },
-  ]
+}
+
+function defaultSampleInstanceIds(project: ProjectState): boolean {
+  const expected = new Set(['inst-greek', 'inst-indian', 'inst-chinese', 'inst-japanese', 'inst-plaza', 'inst-tree-a', 'inst-tree-b'])
+  return project.instances.length === expected.size && project.instances.every((instance) => expected.has(instance.id))
+}
+
+/** Return true only for the old untouched bundled sample, not a user scene. */
+export function isLegacyDefaultSampleProject(project: ProjectState): boolean {
+  if (project.sampleRevision === DEFAULT_SAMPLE_REVISION || project.name !== '莫测里·第一街区') return false
+  if (project.customVoxels.length || (project.assemblies?.length ?? 0) || !defaultSampleInstanceIds(project)) return false
+  return project.instances.every((instance) => /^house-|^plaza-|^tree-/.test(instance.assetId))
+}
+
+/** Return true only for the untouched bundled sample created by this build. */
+export function isBundledDefaultSampleProject(project: ProjectState): boolean {
+  if (project.sampleRevision !== DEFAULT_SAMPLE_REVISION || project.name !== '莫测里·第一街区') return false
+  if (project.customVoxels.length || (project.assemblies?.length ?? 0) || !defaultSampleInstanceIds(project)) return false
+  const expectedAssetIds = new Set(makeDefaultProject().assets.map((asset) => asset.id))
+  if (project.assets.length !== expectedAssetIds.size || project.assets.some((asset) => !expectedAssetIds.has(asset.id))) return false
+  return project.instances.every((instance) => /^scene-sample-/.test(instance.assetId))
+}
+
+/** Rebuild the old sample from current asset definitions while preserving user templates. */
+export function migrateLegacyDefaultSampleProject(project: ProjectState): ProjectState {
+  if (!isLegacyDefaultSampleProject(project)) return project
+  const fresh = makeDefaultProject()
+  const freshIds = new Set(fresh.assets.map((asset) => asset.id))
+  const preservedTemplates = project.assets
+    .filter((asset) => asset.isTemplate !== false && !freshIds.has(asset.id))
+    .map((asset) => structuredClone(asset))
+  return { ...fresh, name: project.name, assets: [...fresh.assets, ...preservedTemplates] }
+}
+
+type StlPoint = [number, number, number]
+type StlTriangle = [number, number, number]
+
+export type StlExportDiagnostics = {
+  inputVoxelCount: number
+  unionVoxelCount: number
+  bridgeVoxelCount: number
+  weldedVertexCount: number
+  triangleCount: number
+  nonManifoldEdgesBefore: number
+  nonManifoldEdgesAfter: number
+}
+
+const stlFaceDefinitions: Array<{ dx: number; dy: number; dz: number; corners: StlPoint[] }> = [
+  { dx: 1, dy: 0, dz: 0, corners: [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]] },
+  { dx: -1, dy: 0, dz: 0, corners: [[0, 0, 1], [0, 1, 1], [0, 1, 0], [0, 0, 0]] },
+  { dx: 0, dy: 1, dz: 0, corners: [[0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0]] },
+  { dx: 0, dy: -1, dz: 0, corners: [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]] },
+  { dx: 0, dy: 0, dz: 1, corners: [[1, 0, 1], [1, 1, 1], [0, 1, 1], [0, 0, 1]] },
+  { dx: 0, dy: 0, dz: -1, corners: [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]] },
+]
+
+const stlDiagonalOffsets: StlPoint[] = []
+for (let dx = -1; dx <= 1; dx += 1) for (let dy = -1; dy <= 1; dy += 1) for (let dz = -1; dz <= 1; dz += 1) {
+  const distance = Math.abs(dx) + Math.abs(dy) + Math.abs(dz)
+  const canonical = dx > 0 || (dx === 0 && dy > 0) || (dx === 0 && dy === 0 && dz > 0)
+  if (distance > 1 && canonical) stlDiagonalOffsets.push([dx, dy, dz])
+}
+
+function stlVoxelKey(x: number, y: number, z: number): string {
+  return `${x},${y},${z}`
+}
+
+function voxelBooleanUnion(voxels: Voxel[]): Voxel[] {
+  // Voxel-cell union is the exact boolean union for the editor's 1 mm grid:
+  // duplicate cells disappear and the remaining cells form one occupancy set.
+  return deduplicateVoxels(voxels)
+}
+
+function stlPathCandidates(offset: StlPoint): StlPoint[][] {
+  const axes = (['x', 'y', 'z'] as const).filter((axis) => offset[axis === 'x' ? 0 : axis === 'y' ? 1 : 2] !== 0)
+  const paths: StlPoint[][] = []
+  const visit = (remaining: string[], current: StlPoint, path: StlPoint[]) => {
+    if (!remaining.length) {
+      paths.push(path)
+      return
+    }
+    remaining.forEach((axis, index) => {
+      const next = [...current] as StlPoint
+      const component = axis === 'x' ? 0 : axis === 'y' ? 1 : 2
+      next[component] += offset[component]
+      visit([...remaining.slice(0, index), ...remaining.slice(index + 1)], next, [...path, next])
+    })
+  }
+  visit(axes as string[], [0, 0, 0], [])
+  return paths
+}
+
+function repairDiagonalVoxelContacts(voxels: Voxel[]): { voxels: Voxel[]; bridgeVoxelCount: number } {
+  const union = voxelBooleanUnion(voxels)
+  const occupied = new Map(union.map((voxel) => [stlVoxelKey(voxel.x, voxel.y, voxel.z), voxel]))
+  let bridgeVoxelCount = 0
+
+  // A pair of cells that only touches at an edge or corner can create an STL
+  // edge shared by four surface faces. Add the shortest grid-aligned bridge so
+  // the resulting solid has a regular 6-connected voxel topology.
+  for (let pass = 0; pass < 4; pass += 1) {
+    let changed = false
+    const snapshot = [...occupied.values()]
+    for (const voxel of snapshot) {
+      for (const offset of stlDiagonalOffsets) {
+        const targetKey = stlVoxelKey(voxel.x + offset[0], voxel.y + offset[1], voxel.z + offset[2])
+        if (!occupied.has(targetKey)) continue
+        const paths = stlPathCandidates(offset).map((path) => path.map(([x, y, z]) => [x + voxel.x, y + voxel.y, z + voxel.z] as StlPoint))
+        const completePath = paths.find((path) => path.every(([x, y, z]) => occupied.has(stlVoxelKey(x, y, z))))
+        if (completePath) continue
+        const bestPath = paths.sort((left, right) => right.filter(([x, y, z]) => occupied.has(stlVoxelKey(x, y, z))).length - left.filter(([x, y, z]) => occupied.has(stlVoxelKey(x, y, z))).length)[0]
+        bestPath.forEach(([x, y, z]) => {
+          const key = stlVoxelKey(x, y, z)
+          if (occupied.has(key) || key === targetKey) return
+          occupied.set(key, { x, y, z, materialId: voxel.materialId })
+          bridgeVoxelCount += 1
+          changed = true
+        })
+      }
+    }
+    if (!changed) break
+  }
+  return { voxels: [...occupied.values()], bridgeVoxelCount }
+}
+
+function stlMeshFromVoxels(voxels: Voxel[]): { vertices: StlPoint[]; triangles: StlTriangle[] } {
+  const vertices: StlPoint[] = []
+  const vertexIds = new Map<string, number>()
+  const triangles: StlTriangle[] = []
+  const triangleIds = new Set<string>()
+  const vertex = (point: StlPoint) => {
+    const key = point.join(',')
+    const existing = vertexIds.get(key)
+    if (existing !== undefined) return existing
+    const id = vertices.length
+    vertices.push(point)
+    vertexIds.set(key, id)
+    return id
+  }
+  const triangle = (a: StlPoint, b: StlPoint, c: StlPoint) => {
+    const ids: StlTriangle = [vertex(a), vertex(b), vertex(c)]
+    if (new Set(ids).size < 3) return
+    const key = [...ids].sort((left, right) => left - right).join(':')
+    if (triangleIds.has(key)) return
+    triangleIds.add(key)
+    triangles.push(ids)
+  }
+  const occupied = new Set(voxels.map((voxel) => stlVoxelKey(voxel.x, voxel.y, voxel.z)))
   for (const voxel of voxels) {
-    for (const { dx, dy, dz, corners } of faces) {
-      if (occupied.has(`${voxel.x + dx},${voxel.y + dy},${voxel.z + dz}`)) continue
-      const points = corners.map(([x, y, z]) => [voxel.x + x, voxel.y + y, voxel.z + z] as [number, number, number])
-      face(points[0], points[1], points[2], points[3])
+    for (const { dx, dy, dz, corners } of stlFaceDefinitions) {
+      if (occupied.has(stlVoxelKey(voxel.x + dx, voxel.y + dy, voxel.z + dz))) continue
+      const points = corners.map(([x, y, z]) => [voxel.x + x, voxel.y + y, voxel.z + z] as StlPoint)
+      triangle(points[0], points[1], points[2])
+      triangle(points[0], points[2], points[3])
     }
   }
+  return { vertices, triangles }
+}
+
+/** Export render variants as real geometry while preserving cube occupancy. */
+function stlMeshFromVariants(voxels: Voxel[]): { vertices: StlPoint[]; triangles: StlTriangle[] } {
+  const surface = buildVoxelSurfaceMesh(voxels)
+  const vertices: StlPoint[] = []
+  const vertexIds = new Map<string, number>()
+  const remap: number[] = []
+  for (let index = 0; index < surface.positions.length; index += 3) {
+    const point: StlPoint = [surface.positions[index], surface.positions[index + 1], surface.positions[index + 2]]
+    // STL has no normals/vertex colors. Weld by exact voxel-grid position so
+    // hard-normal and multi-color splits used by the render mesh do not make
+    // a geometrically closed shell look non-manifold to slicers.
+    const key = point.map((value) => value.toFixed(6)).join(',')
+    const existing = vertexIds.get(key)
+    if (existing !== undefined) {
+      remap.push(existing)
+      continue
+    }
+    const id = vertices.length
+    vertices.push(point)
+    vertexIds.set(key, id)
+    remap.push(id)
+  }
+  const triangles: StlTriangle[] = []
+  for (let index = 0; index < surface.indices.length; index += 3) {
+    const triangle: StlTriangle = [
+      remap[surface.indices[index]],
+      remap[surface.indices[index + 1]],
+      remap[surface.indices[index + 2]],
+    ]
+    if (new Set(triangle).size === 3) triangles.push(triangle)
+  }
+  return { vertices, triangles }
+}
+
+function stlMeshFromVariantsLegacy(voxels: Voxel[]): { vertices: StlPoint[]; triangles: StlTriangle[] } {
+  const cubes = voxels.filter((voxel) => voxelShape(voxel) === 'cube')
+  const mesh = stlMeshFromVoxels(cubes)
+  const vertices = [...mesh.vertices]
+  const triangles = [...mesh.triangles]
+  for (const voxel of voxels) {
+    if (voxelShape(voxel) === 'cube') continue
+    const source = buildVariantGeometry(voxelShape(voxel) as Exclude<ReturnType<typeof voxelShape>, 'cube'>, voxelFacing(voxel), voxelRotation(voxel))
+    const start = vertices.length
+    for (let index = 0; index < source.positions.length; index += 3) {
+      // Runtime geometry is expressed as Three X/Z/Y. STL remains in the
+      // editor's storage X/Y/Z convention, so swap the last two axes back.
+      vertices.push([
+        voxel.x + source.positions[index],
+        voxel.y + source.positions[index + 2],
+        voxel.z + source.positions[index + 1],
+      ])
+    }
+    for (let index = 0; index < source.indices.length; index += 3) {
+      triangles.push([start + source.indices[index], start + source.indices[index + 1], start + source.indices[index + 2]])
+    }
+  }
+  return { vertices, triangles }
+}
+
+function stlEdgeKey(left: number, right: number): string {
+  return left < right ? `${left}:${right}` : `${right}:${left}`
+}
+
+function stlPointKey(point: StlPoint): string {
+  return point.map((value) => value.toFixed(6)).join(',')
+}
+
+function stlPointOnSegment(point: StlPoint, start: StlPoint, end: StlPoint): boolean {
+  const direction: StlPoint = [end[0] - start[0], end[1] - start[1], end[2] - start[2]]
+  const relative: StlPoint = [point[0] - start[0], point[1] - start[1], point[2] - start[2]]
+  const length = Math.hypot(...direction)
+  if (length < 1e-8) return false
+  const cross: StlPoint = [
+    direction[1] * relative[2] - direction[2] * relative[1],
+    direction[2] * relative[0] - direction[0] * relative[2],
+    direction[0] * relative[1] - direction[1] * relative[0],
+  ]
+  if (Math.hypot(...cross) > 1e-6 * length) return false
+  const projection = (relative[0] * direction[0] + relative[1] * direction[1] + relative[2] * direction[2]) / (length * length)
+  return projection > 1e-6 && projection < 1 - 1e-6
+}
+
+function stlPointInsideTriangle(point: StlPoint, triangle: StlPoint[]): boolean {
+  const [a, b, c] = triangle
+  const ab: StlPoint = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+  const ac: StlPoint = [c[0] - a[0], c[1] - a[1], c[2] - a[2]]
+  const ap: StlPoint = [point[0] - a[0], point[1] - a[1], point[2] - a[2]]
+  const normal: StlPoint = [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]]
+  const normalLength = Math.hypot(...normal)
+  if (normalLength < 1e-8 || Math.abs(normal[0] * ap[0] + normal[1] * ap[1] + normal[2] * ap[2]) > 1e-6 * normalLength) return false
+  const dot = (left: StlPoint, right: StlPoint) => left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+  const v0 = ac
+  const v1 = ab
+  const v2 = ap
+  const d00 = dot(v0, v0)
+  const d01 = dot(v0, v1)
+  const d11 = dot(v1, v1)
+  const d20 = dot(v2, v0)
+  const d21 = dot(v2, v1)
+  const denominator = d00 * d11 - d01 * d01
+  if (Math.abs(denominator) < 1e-8) return false
+  const v = (d11 * d20 - d01 * d21) / denominator
+  const w = (d00 * d21 - d01 * d20) / denominator
+  const u = 1 - v - w
+  return u >= -1e-6 && v >= -1e-6 && w >= -1e-6
+}
+
+function countNonManifoldEdges(mesh: { vertices: StlPoint[]; triangles: StlTriangle[] }): number {
+  const allPoints = new Map<string, StlPoint>()
+  mesh.vertices.forEach((point) => allPoints.set(stlPointKey(point), point))
+  const edges = new Map<string, { count: number; start: StlPoint; end: StlPoint }>()
+  mesh.triangles.forEach(([a, b, c]) => {
+    for (const [startId, endId] of [[a, b], [b, c], [c, a]]) {
+      const start = mesh.vertices[startId]
+      const end = mesh.vertices[endId]
+      const direction: StlPoint = [end[0] - start[0], end[1] - start[1], end[2] - start[2]]
+      const lengthSquared = direction[0] ** 2 + direction[1] ** 2 + direction[2] ** 2
+      const points = [start, end, ...[...allPoints.values()].filter((point) => stlPointOnSegment(point, start, end))]
+      points.sort((left, right) => {
+        const leftT = ((left[0] - start[0]) * direction[0] + (left[1] - start[1]) * direction[1] + (left[2] - start[2]) * direction[2]) / lengthSquared
+        const rightT = ((right[0] - start[0]) * direction[0] + (right[1] - start[1]) * direction[1] + (right[2] - start[2]) * direction[2]) / lengthSquared
+        return leftT - rightT
+      })
+      for (let index = 0; index < points.length - 1; index += 1) {
+        const left = stlPointKey(points[index])
+        const right = stlPointKey(points[index + 1])
+        if (left === right) continue
+        const key = left < right ? `${left}:${right}` : `${right}:${left}`
+        const existing = edges.get(key)
+        edges.set(key, existing ? { ...existing, count: existing.count + 1 } : { count: 1, start: points[index], end: points[index + 1] })
+      }
+    }
+  })
+  return [...edges.values()].filter(({ count, start, end }) => {
+    if (count === 2) return false
+    const midpoint: StlPoint = [(start[0] + end[0]) / 2, (start[1] + end[1]) / 2, (start[2] + end[2]) / 2]
+    if ((count === 1 || count === 3) && mesh.triangles.some(([a, b, c]) => stlPointInsideTriangle(midpoint, [mesh.vertices[a], mesh.vertices[b], mesh.vertices[c]]))) return false
+    return true
+  }).length
+}
+
+function stlNormal(vertices: StlPoint[], [a, b, c]: StlTriangle): StlPoint {
+  const ab = vertices[b].map((value, index) => value - vertices[a][index]) as StlPoint
+  const ac = vertices[c].map((value, index) => value - vertices[a][index]) as StlPoint
+  const normal: StlPoint = [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]]
+  const length = Math.hypot(...normal)
+  return length ? normal.map((value) => value / length) as StlPoint : [0, 0, 0]
+}
+
+export function makeStlWithDiagnostics(asset: VoxelAsset, voxelSizeMm = DEFAULT_VOXEL_SIZE_MM): { stl: string; diagnostics: StlExportDiagnostics } {
+  const union = voxelBooleanUnion(asset.voxels)
+  if (union.some((voxel) => voxelShape(voxel) !== 'cube')) {
+    const mesh = stlMeshFromVariants(union)
+    const outputVoxelSizeMm = normalizeVoxelSizeMm(voxelSizeMm)
+    const lines: string[] = [`solid ${asset.id}`]
+    mesh.triangles.forEach((triangle) => {
+      const normal = stlNormal(mesh.vertices, triangle).map((value) => value.toFixed(6)).join(' ')
+      lines.push(`facet normal ${normal}`, ' outer loop')
+      triangle.forEach((vertexId) => lines.push(`  vertex ${mesh.vertices[vertexId].map((value) => (value * outputVoxelSizeMm).toFixed(6)).join(' ')}`))
+      lines.push(' endloop', 'endfacet')
+    })
+    lines.push(`endsolid ${asset.id}`)
+    return {
+      stl: lines.join('\n'),
+      diagnostics: {
+        inputVoxelCount: asset.voxels.length,
+        unionVoxelCount: union.length,
+        bridgeVoxelCount: 0,
+        weldedVertexCount: mesh.vertices.length,
+        triangleCount: mesh.triangles.length,
+        nonManifoldEdgesBefore: countNonManifoldEdges(mesh),
+        nonManifoldEdgesAfter: countNonManifoldEdges(mesh),
+      },
+    }
+  }
+  const beforeRepair = stlMeshFromVoxels(union)
+  const repaired = repairDiagonalVoxelContacts(union)
+  const mesh = stlMeshFromVoxels(repaired.voxels)
+  const outputVoxelSizeMm = normalizeVoxelSizeMm(voxelSizeMm)
+  const lines: string[] = [`solid ${asset.id}`]
+  mesh.triangles.forEach((triangle) => {
+    const normal = stlNormal(mesh.vertices, triangle).map((value) => value.toFixed(6)).join(' ')
+    lines.push(`facet normal ${normal}`, ' outer loop')
+    triangle.forEach((vertexId) => lines.push(`  vertex ${mesh.vertices[vertexId].map((value) => (value * outputVoxelSizeMm).toFixed(6)).join(' ')}`))
+    lines.push(' endloop', 'endfacet')
+  })
   lines.push(`endsolid ${asset.id}`)
-  return lines.join('\n')
+  return {
+    stl: lines.join('\n'),
+    diagnostics: {
+      inputVoxelCount: asset.voxels.length,
+      unionVoxelCount: union.length,
+      bridgeVoxelCount: repaired.bridgeVoxelCount,
+      weldedVertexCount: mesh.vertices.length,
+      triangleCount: mesh.triangles.length,
+      nonManifoldEdgesBefore: countNonManifoldEdges(beforeRepair),
+      nonManifoldEdgesAfter: countNonManifoldEdges(mesh),
+    },
+  }
+}
+
+export function makeStl(asset: VoxelAsset, voxelSizeMm = DEFAULT_VOXEL_SIZE_MM): string {
+  return makeStlWithDiagnostics(asset, voxelSizeMm).stl
 }
