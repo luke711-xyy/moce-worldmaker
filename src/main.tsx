@@ -8627,6 +8627,11 @@ function VoxelViewport({ project, authoritativeProjectRef, liveEditEntityIdRef, 
   const toolPreviewGroupRef = useRef<THREE.Group | null>(null)
   const geometryPreviewGroupRef = useRef<THREE.Group | null>(null)
   const placementPreviewRef = useRef<PlacementPreview | null>(null)
+  // Keep the last valid ground projection during an asset-placement gesture.
+  // At very oblique/far perspective angles a pointer ray can briefly become
+  // parallel to, or point away from, the ground plane. Losing the projection
+  // in that frame should not make the preview jump underground or disappear.
+  const placementGroundPointRef = useRef<THREE.Vector3 | null>(null)
   const chunkMeshWorkerRef = useRef<ChunkMeshWorkerClient | null>(null)
   const voxelToolsWorkerRef = useRef<VoxelToolsWorkerClient | null>(null)
   const chunkMeshRevisionRef = useRef(0)
@@ -10292,6 +10297,7 @@ function VoxelViewport({ project, authoritativeProjectRef, liveEditEntityIdRef, 
     disposeThreeObject(placementRoot)
     placementRoot.clear()
     placementPreviewRef.current = null
+    placementGroundPointRef.current = null
     invalidateRenderRef.current()
     if (!placementAsset) return
     const variant = placementAsset.templateColor ? undefined : styleMaterialVariants[placementAsset.style]
@@ -10395,16 +10401,28 @@ function VoxelViewport({ project, authoritativeProjectRef, liveEditEntityIdRef, 
     return true
   }
 
+  const intersectForwardPlaneAtZ = (worldZ: number) => {
+    const ray = raycasterRef.current.ray
+    const directionZ = ray.direction.z
+    if (!Number.isFinite(directionZ) || Math.abs(directionZ) < 1e-7) return null
+    const distance = (worldZ - ray.origin.z) / directionZ
+    // THREE.Ray.intersectPlane returns an algebraic intersection even when it
+    // lies behind the ray origin. That is harmless for some camera poses, but
+    // at a distant perspective view it can turn a ground click into a point
+    // behind the camera, which then produces an apparently underground asset.
+    if (!Number.isFinite(distance) || distance < -1e-6) return null
+    const point = ray.origin.clone().addScaledVector(ray.direction, distance)
+    if (![point.x, point.y, point.z].every(Number.isFinite)) return null
+    return point
+  }
+
   const pointerFloorPoint = (event: { clientX: number; clientY: number }) => {
     if (!setPointerRay(event)) return null
     // The editing floor is the z=0 plane in Three.js world coordinates. A
     // selection drag only needs this projection; raycasting the voxel meshes
     // again on every pointermove makes a large InstancedMesh stall the main
     // thread even though the selected object was already known on pointerdown.
-    return raycasterRef.current.ray.intersectPlane(
-      new THREE.Plane(new THREE.Vector3(0, 0, 1), 0),
-      new THREE.Vector3(),
-    )
+    return intersectForwardPlaneAtZ(0)
   }
 
   const pointerHorizontalPoint = (event: { clientX: number; clientY: number }, worldZ: number) => {
@@ -10416,11 +10434,7 @@ function VoxelViewport({ project, authoritativeProjectRef, liveEditEntityIdRef, 
     // A nearly parallel ray has no stable intersection with this plane. Do
     // not fall back to the ground plane in that case: that changes coordinate
     // frames mid-gesture and is the source of the occasional release flash.
-    if (Math.abs(raycasterRef.current.ray.direction.z) < 1e-5) return null
-    return raycasterRef.current.ray.intersectPlane(
-      new THREE.Plane(new THREE.Vector3(0, 0, 1), -worldZ),
-      new THREE.Vector3(),
-    )
+    return intersectForwardPlaneAtZ(worldZ)
   }
 
   const getPointerContext = (event: { clientX: number; clientY: number }) => {
@@ -10437,11 +10451,24 @@ function VoxelViewport({ project, authoritativeProjectRef, liveEditEntityIdRef, 
     // can be hidden in edit mode and its finite rectangle can be missed after
     // panning, which made identical clicks randomly fail. Always resolve the
     // ground against the mathematical project ground plane instead.
-    const floorPoint = raycasterRef.current.ray.intersectPlane(
-      new THREE.Plane(new THREE.Vector3(0, 0, 1), 0),
-      new THREE.Vector3(),
-    )
+    const floorPoint = intersectForwardPlaneAtZ(0)
     return { voxelHit, floorPoint: floorPoint ?? null }
+  }
+
+  const placementFloorPoint = (event: { clientX: number; clientY: number }) => {
+    // Asset placement does not need voxel ownership or face normals. Keep it
+    // on the cheap, unbounded mathematical ground-plane path; running the
+    // scene DDA here made distant perspective rays traverse a large number of
+    // cells and could make the placement preview disappear or jump below the
+    // floor even though the same screen point worked when zoomed in.
+    if (setPointerRay(event)) {
+      const floorPoint = intersectForwardPlaneAtZ(0)
+      if (floorPoint) {
+        placementGroundPointRef.current = floorPoint.clone()
+        return floorPoint
+      }
+    }
+    return placementGroundPointRef.current?.clone() ?? null
   }
 
   const drawingToolIds = new Set<Tool>(['brush', 'erase', 'line', 'cuboid', 'sphere', 'extrude'])
@@ -11598,8 +11625,8 @@ function VoxelViewport({ project, authoritativeProjectRef, liveEditEntityIdRef, 
       return
     }
     if (placementAsset) {
-      const context = getPointerContext(event)
-      showPlacementPreview(context?.floorPoint ? onPreviewPlacement(placementAsset.id, context.floorPoint.x, context.floorPoint.y) : null)
+      const floorPoint = placementFloorPoint(event)
+      showPlacementPreview(floorPoint ? onPreviewPlacement(placementAsset.id, floorPoint.x, floorPoint.y) : null)
       return
     }
     const cameraGesture = cameraGestureRef.current
@@ -11671,8 +11698,8 @@ function VoxelViewport({ project, authoritativeProjectRef, liveEditEntityIdRef, 
     }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     if (placementAsset) {
-      const context = getPointerContext(event)
-      const preview = context?.floorPoint ? onPreviewPlacement(placementAsset.id, context.floorPoint.x, context.floorPoint.y) : placementPreviewRef.current
+      const floorPoint = placementFloorPoint(event)
+      const preview = floorPoint ? onPreviewPlacement(placementAsset.id, floorPoint.x, floorPoint.y) : placementPreviewRef.current
       if (preview) onPlaceAsset(placementAsset.id, preview.x, preview.z)
       else onNotice('请将资产放置在三维场地内')
       return
@@ -11874,8 +11901,8 @@ function VoxelViewport({ project, authoritativeProjectRef, liveEditEntityIdRef, 
     if (!assetId) return
     event.preventDefault()
     event.dataTransfer.dropEffect = 'copy'
-    const context = getPointerContext(event)
-    showPlacementPreview(context?.floorPoint ? onPreviewPlacement(assetId, context.floorPoint.x, context.floorPoint.y) : null)
+    const floorPoint = placementFloorPoint(event)
+    showPlacementPreview(floorPoint ? onPreviewPlacement(assetId, floorPoint.x, floorPoint.y) : null)
   }
 
   const handlePlacementDrop = (event: React.DragEvent<HTMLDivElement>) => {
@@ -11883,12 +11910,12 @@ function VoxelViewport({ project, authoritativeProjectRef, liveEditEntityIdRef, 
     const assetId = placementAsset?.id ?? event.dataTransfer.getData('application/x-moce-asset')
     if (!assetId) return
     event.preventDefault()
-    const context = getPointerContext(event)
-    if (!context?.floorPoint) {
+    const floorPoint = placementFloorPoint(event)
+    if (!floorPoint) {
       onNotice('请将资产放置在三维场地内')
       return
     }
-    const preview = onPreviewPlacement(assetId, context.floorPoint.x, context.floorPoint.y)
+    const preview = onPreviewPlacement(assetId, floorPoint.x, floorPoint.y)
     if (preview) onPlaceAsset(assetId, preview.x, preview.z)
   }
 
