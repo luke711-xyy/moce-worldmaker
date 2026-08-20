@@ -140,6 +140,8 @@ type PlacementPreview = {
   x: number
   y: number
   z: number
+  /** Project-world vertical lift that puts the asset's lowest voxel on the ground. */
+  groundLiftWorldY: number
   valid: boolean
 }
 
@@ -3221,7 +3223,11 @@ function App() {
     const geometry = placementGeometryFor(asset)
     return {
       x: assetOriginGridCoordinate(x, asset.width) - assetOriginGridCoordinate(geometry.originX, asset.width),
-      y: worldToVoxel(y),
+      // Imported/model assets are not guaranteed to have their lowest stored
+      // voxel at y=0.  Use the effective geometry bounds as the placement
+      // basis so preview, collision/boundary checks and materialization all
+      // agree that the lowest voxel sits on the project ground plane.
+      y: worldToVoxel(y) - (geometry.bounds?.minY ?? 0),
       z: assetOriginGridCoordinate(z, asset.depth) - assetOriginGridCoordinate(geometry.originZ, asset.depth),
     }
   }
@@ -3369,8 +3375,13 @@ function App() {
   const previewPlacementAt = (assetId: string, x: number, z: number): PlacementPreview | null => {
     const asset = projectRef.current.assets.find((item) => item.id === assetId) ?? (pendingEntityImport?.asset.id === assetId ? pendingEntityImport.asset : undefined)
     if (!asset) return null
+    const geometry = placementGeometryFor(asset)
     const position = { assetId, x: snapAssetOrigin(x, asset.width), y: 0, z: snapAssetOrigin(z, asset.depth) }
-    return { ...position, valid: placementAssetWithinSceneBoundary(asset, position.x, position.y, position.z) && !hasPlacementAssetCollisionAt(asset, position.x, position.y, position.z) }
+    return {
+      ...position,
+      groundLiftWorldY: -(geometry.bounds?.minY ?? 0) * VOXEL_WORLD_SIZE,
+      valid: placementAssetWithinSceneBoundary(asset, position.x, position.y, position.z) && !hasPlacementAssetCollisionAt(asset, position.x, position.y, position.z),
+    }
   }
 
   const sceneNameForPlacement = (asset: VoxelAsset): string => {
@@ -6347,7 +6358,7 @@ function App() {
         <MemoizedInspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} selectedTransformSignature={selectedEntityTransformSignature} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} transformPreview={transformPreview} geometryPreview={geometryPreview} shellThicknessOptions={geometryShellThicknessOptions} scaleOptions={geometryScaleOptions} exportBusy={exportBusy} onChangeColor={changeSelectedColor} onPreviewHsl={previewSelectedHsl} onCommitHsl={commitSelectedHsl} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onConfirmTransform={confirmDiscreteTransform} onCancelTransform={cancelTransformPreview} onExport={exportSelectedPart} onExportGlb={exportSelectedPartGlb} onExportVox={exportSelectedPartVox} onExportEntityFile={exportSelectedEntityFile} onOpenSlicer={() => setSliceDialogOpen(true)} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => { setCopyPreview(null); cancelTransformPreview() }} onStartShell={startShellPreview} onStartScale={startScalePreview} onChangeShellThickness={changeGeometryShellThickness} onChangeScale={changeGeometryScale} onConfirmGeometry={confirmGeometryPreview} onCancelGeometry={cancelGeometryPreview} onDelete={deleteSelected} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
       </main>
       {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} selectedSceneLoading={selectedLibrarySceneLoading} selectionRevision={selectedLibrarySceneRevision} error={libraryError} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} cloudAssets={cloudAssets} cloudScenes={cloudScenes} cloudUsage={cloudUsage} cloudError={cloudError} cloudTransfers={cloudTransfers} cloudTransferErrors={cloudTransferErrors} onBackupCurrentScene={() => backupCurrentSceneToCloud()} onDownloadCloudScene={downloadCloudSceneToLocal} onDeleteCloudScene={removeCloudScene} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null); setSelectedLibrarySceneLoading(false) }} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} onBackupScene={backupStoredSceneToCloud} />}
-      {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
+      {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} categoryPaths={assetCategoryPaths} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
       {modelImportDialog && <ModelImportDialog state={modelImportDialog} targetSizeVoxels={modelImportTargetVoxels} mode={modelImportMode} onTargetSizeChange={setModelImportTargetVoxels} onModeChange={setModelImportMode} onStart={runModelImport} onConfirm={confirmModelImport} onCancel={() => setModelImportDialog(null)} />}
       {sliceDialogOpen && selectedEntityParts.length > 0 && <SliceDialog parts={selectedEntityParts} project={project} name={selectedDisplayName || '选中实体'} onClose={() => setSliceDialogOpen(false)} onNotice={setNotice} />}
       {unsavedDialogOpen && <UnsavedChangesDialog onDecision={handleUnsavedDecision} />}
@@ -6645,15 +6656,20 @@ function AssetSidebar({ assets, categoryPaths, query, setQuery, selectedAssetIds
 
 const MemoizedAssetSidebar = React.memo(AssetSidebar)
 
-function AssetCategorySaveDialog({ asset, assets, onCancel, onSave }: { asset: VoxelAsset; assets: VoxelAsset[]; onCancel: () => void; onSave: (name: string, categoryPath: string[]) => void }) {
-  const existingPaths = collectAssetCategoryPaths(assets)
-  const categoryPaths = existingPaths.length ? existingPaths : [[DEFAULT_ASSET_CATEGORY]]
-  const initialPath = categoryPaths.find((path) => assetCategoryKey(path) === assetCategoryKey(normalizeAssetCategoryPath(asset.categoryPath))) ?? categoryPaths[0]
+function AssetCategorySaveDialog({ asset, assets, categoryPaths: storedCategoryPaths, onCancel, onSave }: { asset: VoxelAsset; assets: VoxelAsset[]; categoryPaths: string[][]; onCancel: () => void; onSave: (name: string, categoryPath: string[]) => void }) {
+  // Category records are independent from template assets. In particular, a
+  // newly-created empty category must remain selectable before its first
+  // template is saved into it. The previous implementation only collected
+  // paths from existing assets and therefore silently fell back to the
+  // default "未命名类别" category.
+  const categoryPaths = normalizeAssetCategoryPaths(storedCategoryPaths, assets)
+  const pickerPaths = categoryPaths.length ? categoryPaths : [[DEFAULT_ASSET_CATEGORY]]
+  const initialPath = pickerPaths.find((path) => assetCategoryKey(path) === assetCategoryKey(normalizeAssetCategoryPath(asset.categoryPath))) ?? pickerPaths[0]
   const [selectedPath, setSelectedPath] = useState(initialPath)
   const [draftName, setDraftName] = useState(asset.name)
   const [draftCategory, setDraftCategory] = useState('')
   const [customPaths, setCustomPaths] = useState<string[][]>([])
-  const allPaths = [...categoryPaths, ...customPaths.filter((path) => !categoryPaths.some((candidate) => assetCategoryKey(candidate) === assetCategoryKey(path)))]
+  const allPaths = [...pickerPaths, ...customPaths.filter((path) => !pickerPaths.some((candidate) => assetCategoryKey(candidate) === assetCategoryKey(path)))]
   const roots = assetCategoryTreeFromPaths(allPaths)
   const renderCategory = (node: AssetCategoryNode, depth = 0): React.ReactNode => <div className="asset-category-picker-node" key={node.key}>
     <button className={`asset-category-picker-row ${assetCategoryKey(selectedPath) === node.key ? 'active' : ''}`} style={{ paddingLeft: `${12 + depth * 16}px` }} onClick={() => setSelectedPath(node.path)}><ChevronRight size={12} /><span>{node.name}</span></button>
@@ -8180,26 +8196,20 @@ function createExposedVoxelEdgeGeometry(
 
 /**
  * Selection lines are deliberately rendered with depth testing enabled so
- * hidden edges do not show through the model.  Their vertices still sit on
- * the voxel surface, though, which makes them fight the solid mesh in the
- * depth buffer at oblique camera angles. A very small clip-space bias breaks
- * that tie without moving the outline in world space or disabling occlusion.
- * It must stay below the depth separation of a real voxel face in perspective
- * mode; a larger bias makes hidden edges jump in front of nearer solids.
+ * hidden edges do not show through the model. The outline geometry is built
+ * from the same voxel surface as the solid mesh, so it must remain at the
+ * exact surface depth: a clip-space bias that is harmless in orthographic
+ * projection can move hidden edges in front of nearer solids in perspective
+ * projection. LessEqualDepth resolves the equal-depth surface tie without
+ * disabling physical occlusion.
  */
 function configureSelectionOutlineMaterial(material: THREE.LineBasicMaterial, cacheKey: string) {
   material.depthTest = true
   material.depthWrite = false
   material.depthFunc = THREE.LessEqualDepth
-  material.onBeforeCompile = (shader) => {
-    shader.vertexShader = shader.vertexShader.replace(
-      '#include <project_vertex>',
-      '#include <project_vertex>\n      gl_Position.z -= 0.0000015 * gl_Position.w;'
-    )
-  }
-  // Bump this whenever the depth-bias shader changes. Three.js otherwise may
-  // reuse the previous compiled program during the same renderer lifetime.
-  material.customProgramCacheKey = () => `${cacheKey}-depth-v3`
+  // Keep a distinct cache key so renderers that previously compiled the old
+  // biased shader cannot reuse it for this material.
+  material.customProgramCacheKey = () => `${cacheKey}-depth-v4`
 }
 
 function isVisibleInObjectHierarchy(object: THREE.Object3D): boolean {
@@ -9222,14 +9232,16 @@ function VoxelViewport({ project, authoritativeProjectRef, liveEditEntityIdRef, 
     if (!mount) return
     const scene = new THREE.Scene()
     scene.background = new THREE.Color('#161b1e')
+    const initialBounds = sceneBoundsForProject(project)
+    const initialTarget = new THREE.Vector3(0, 0, initialBounds.z * VOXEL_WORLD_SIZE / 2)
     const orthographic = new THREE.OrthographicCamera(-13, 13, 9, -9, 0.1, 1000)
     orthographic.position.set(16, 18, 18)
     orthographic.up.set(0, 0, 1)
-    orthographic.lookAt(0, 0, 0)
+    orthographic.lookAt(initialTarget)
     const perspective = new THREE.PerspectiveCamera(38, 1, 0.1, 1000)
     perspective.position.set(16, 18, 18)
     perspective.up.set(0, 0, 1)
-    perspective.lookAt(0, 0, 0)
+    perspective.lookAt(initialTarget)
     const camera = orthographic
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
     renderer.outputColorSpace = THREE.SRGBColorSpace
@@ -9266,10 +9278,9 @@ function VoxelViewport({ project, authoritativeProjectRef, liveEditEntityIdRef, 
     controls.dampingFactor = 0.18
     controls.panSpeed = 0.8
     controls.zoomSpeed = 0.85
-    controls.target.set(0, 0, 0)
+    controls.target.copy(initialTarget)
     const studioLights = createStudioLights(scene)
     const key = studioLights.key
-    const initialBounds = sceneBoundsForProject(project)
     // The bottom of voxel row y=0 is the scene ground at z=0. Keep the floor
     // on that exact datum; depthWrite is disabled so the coplanar floor does
     // not prevent the voxel faces and grid from resolving their own depth.
@@ -9549,6 +9560,25 @@ function VoxelViewport({ project, authoritativeProjectRef, liveEditEntityIdRef, 
     const controls = controlsRef.current
     if (!cameras || !controls) return
     const nextCamera = viewMode === '透视' ? cameras.perspective : cameras.orthographic
+
+    // Switching camera types must preserve the live view, not revive the
+    // inactive camera's old origin-centered pose. In particular, the
+    // perspective camera must inherit the current pan target and direction;
+    // otherwise the ground datum and entity height appear to shift when the
+    // user changes from orthographic to perspective mode.
+    const currentCamera = cameraRef.current ?? nextCamera
+    const target = controls.target.clone()
+    const direction = currentCamera.position.clone().sub(target)
+    if (direction.lengthSq() < 1e-8) direction.set(16, 18, 18)
+    const distance = Math.max(1, direction.length())
+    nextCamera.position.copy(target).add(direction)
+    nextCamera.up.copy(currentCamera.up)
+    nextCamera.lookAt(target)
+    nextCamera.updateProjectionMatrix()
+    controls.target.copy(target)
+    if (nextCamera === cameras.perspective) {
+      perspectiveBaseDistanceRef.current = distance
+    }
     cameraRef.current = nextCamera
     controls.object = nextCamera
     // Re-apply the shared ruler value after changing camera type. The
@@ -10344,7 +10374,7 @@ function VoxelViewport({ project, authoritativeProjectRef, liveEditEntityIdRef, 
       return
     }
     preview.visible = true
-    preview.position.copy(toSceneWorld(previewState.x, previewState.y, previewState.z))
+    preview.position.copy(toSceneWorld(previewState.x, previewState.y + previewState.groundLiftWorldY, previewState.z))
     preview.traverse((object) => {
       if (!(object instanceof THREE.Mesh) || !(object.material instanceof THREE.MeshStandardMaterial)) return
       object.material.opacity = editEntityId ? (previewState.valid ? 0.86 : 0.66) : (previewState.valid ? 0.42 : 0.18)
