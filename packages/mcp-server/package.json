@@ -1,0 +1,9 @@
+{
+  "name": "@moce/worldmaker-mcp",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "bin": { "moce-worldmaker-mcp": "src/index.mjs" },
+  "scripts": { "start": "node src/index.mjs", "install-local-3d": "node scripts/install-local-3d.mjs" },
+  "dependencies": { "ws": "^8.18.0" }
+}

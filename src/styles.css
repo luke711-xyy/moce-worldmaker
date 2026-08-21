@@ -642,3 +642,19 @@ button { border: 0; cursor: pointer; color: inherit; }
 .auth-switch { min-height: 32px; color: #c98b76; background: transparent; border: 0; font-size: 11px; }
 .auth-message { margin: 2px 0 0; color: #cbd3cf; font-size: 11px; line-height: 1.55; }
 .auth-dev-link { color: #e2a18d; font-size: 11px; word-break: break-all; }
+
+.mcp-modal-backdrop { z-index: 2400; }
+.mcp-dialog { width: min(560px, calc(100vw - 32px)); }
+.mcp-dialog .dialog-header > div { display: grid; grid-template-columns: 24px 1fr; align-items: center; column-gap: 8px; }
+.mcp-dialog .dialog-header h2, .mcp-dialog .dialog-header p { grid-column: 2; }
+.mcp-dialog .dialog-header svg { grid-row: 1 / span 2; color: #d47b5e; }
+.mcp-status { display: flex; align-items: center; gap: 8px; padding: 10px 12px; margin-bottom: 14px; color: #cbd3cf; background: #151b1d; border: 1px solid #3d494b; font: 11px 'DM Mono', monospace; }
+.mcp-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #75817e; }
+.mcp-status-connected { border-color: #5f9e78; color: #b8e1c7; }.mcp-status-connected .mcp-status-dot { background: #62bd83; }
+.mcp-status-error { border-color: #9f5544; color: #f0b2a2; }.mcp-status-error .mcp-status-dot { background: #e27961; }
+.mcp-status-reconnecting { border-color: #a98654; color: #e4c18a; }.mcp-status-reconnecting .mcp-status-dot { background: #d6a65d; }
+.mcp-help, .mcp-security-note { color: #9aa6a3; font-size: 11px; line-height: 1.6; }
+.mcp-field-label { display: block; margin: 15px 0 6px; color: #aab5b2; font-size: 11px; }
+.mcp-code, .mcp-command { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; color: #f2e8d9; background: #101617; border: 1px solid #465355; }
+.mcp-code { font: 22px 'DM Mono', monospace; letter-spacing: .22em; }.mcp-command { font: 10px 'DM Mono', monospace; }.mcp-command code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-doc-link { display: inline-flex; align-items: center; gap: 5px; color: #d5907b; font-size: 11px; }

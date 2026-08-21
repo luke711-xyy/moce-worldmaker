@@ -1,0 +1,3 @@
+# Optional backend dependencies are intentionally not installed by the web app.
+# The installer pulls the official Point-E repository and its dependencies.
+# Runtime packages used by the adapter include Pillow, numpy, torch and point-e.

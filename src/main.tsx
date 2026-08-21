@@ -2,7 +2,7 @@ import React, { startTransition, useEffect, useLayoutEffect, useMemo, useRef, us
 import { createRoot } from 'react-dom/client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { Box, Brush, ChevronDown, ChevronLeft, ChevronRight, Cloud, Database, Download, Eraser, Eye, FilePlus2, Grid3X3, Image as ImageIcon, Layers3, Lock, LogIn, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, Repeat2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, UserRound, WandSparkles, X } from 'lucide-react'
+import { Box, Brush, Bot, ChevronDown, ChevronLeft, ChevronRight, Cloud, Database, Download, Eraser, Eye, FilePlus2, Grid3X3, Image as ImageIcon, Layers3, Lock, LogIn, Minus, Move3d, Paintbrush, Palette, Plus, Redo2, Repeat2, RotateCcw, RotateCw, Save, Search, Settings, SlidersHorizontal, Square, SquareDashedMousePointer, ToolCase, Trash2, Undo2, Upload, UserRound, WandSparkles, X } from 'lucide-react'
 import { AssetAssembly, DEFAULT_ASSET_CATEGORY, MATERIALS, Material, MAX_SCENE_BOUND_VOXELS, MIN_SCENE_BOUND_VOXELS, ProjectState, SceneAssembly, SceneBounds, SceneEntityPart, SceneInstance, Voxel, VoxelAsset, VoxelOverride, VOXEL_WORLD_SIZE, adjacentVoxel, assetOriginGridCoordinate, customEntityOffset, instanceRotationPivot, instanceVoxelPairs, isBundledDefaultSampleProject, isLegacyDefaultSampleProject, makeAssemblyAssetFromSceneParts, makeAssetFromSceneParts, makeDefaultProject, makeEmptyProject, makeStlWithDiagnostics, migrateLegacyDefaultSampleProject, mirrorVoxels, normalizeAssetCategoryPath, normalizeInstanceRotationPivot, normalizeProjectNaming, normalizeVoxelSizeMm, resolveInstanceComponents, resolveInstanceSceneVoxels, resolveInstanceVoxels, rotateVoxels, sceneAssemblyNodeNameForAsset, sceneAssemblies, sceneBoundsForProject, sceneEntityParts, sceneInstanceGeometrySignature, sceneInstanceRenderSignature, sceneNameForAsset, scenePartVoxelAt, scenePartVoxelAtCoordinate, scenePartVoxels, sceneToStoredCustomVoxel, snapAssetOrigin, snapWorld, translateWorldByVoxels, uniqueAssetName, uniqueSceneName, uniqueTemplateAssetName, voxelBounds, voxelCenterToWorld, voxelComponentAt, voxelComponentId, voxelComponents, voxelEntityId, voxelToWorld, worldToVoxel, worldToVoxelCell, worldToVoxelCenter } from './voxel'
 import { createSceneFile, MoceSceneFile, restoreProject, sceneContentSignature } from './scene-file'
 import { LibraryResponse, LibrarySceneSummary, validateEntityFile } from './persistence'
@@ -34,6 +34,11 @@ import { assetPreviewAsset, withAssetThumbnail } from './asset-thumbnail'
 import { CloudAssetSummary, CloudProgress, CloudSceneSummary, CloudUsage, deleteCloudAsset, deleteCloudScene, downloadCloudObject, loadCloudAssetPreview, loadCloudLibrary, loadCloudUsage, uploadCloudAsset, uploadCloudScene } from './cloud-backup'
 import { AuthUser, loadAuthUser, loginAuthUser, logoutAuthUser, registerAuthUser, requestPasswordReset, resendVerificationEmail, resetAuthPassword, setCloudAuthRequiredHandler, verifyAuthEmail } from './auth'
 import { STUDIO_RENDER_SETTINGS, createStudioLights, createStudioMaterial, studioShadeHex, studioShadeRgb } from './studio-lighting'
+import { McpBridgeClient, makeMcpPairCode } from './mcp-bridge-client'
+import type { McpConnectionState } from './mcp-bridge-client'
+import type { VoxelProgram } from './mcp-protocol'
+import { McpPairingDialog } from './mcp-ui'
+import { applyVoxelProgram, McpProgramError } from './mcp-voxel-program'
 import loginBackgroundUrl from './assets/moce-login-background.png'
 import brandLogoUrl from './assets/moce-brand-logo.png'
 import './styles.css'
@@ -1550,6 +1555,12 @@ function App() {
   const [selectedLibrarySceneProject, setSelectedLibrarySceneProject] = useState<ProjectState | null>(null)
   const [selectedLibrarySceneLoading, setSelectedLibrarySceneLoading] = useState(false)
   const [selectedLibrarySceneRevision, setSelectedLibrarySceneRevision] = useState(0)
+  const [mcpPairingOpen, setMcpPairingOpen] = useState(false)
+  const [mcpPairingCode, setMcpPairingCode] = useState('')
+  const [mcpConnectionState, setMcpConnectionState] = useState<McpConnectionState>('disconnected')
+  const [mcpConnectionMessage, setMcpConnectionMessage] = useState<string | undefined>()
+  const mcpClientRef = useRef<McpBridgeClient | null>(null)
+  const mcpHandlerRef = useRef<(method: string, params: unknown) => Promise<unknown>>(async () => ({}))
   const [assetSidebarCollapsed, setAssetSidebarCollapsed] = useState(false)
   const [expandedAssemblies, setExpandedAssemblies] = useState<Record<string, boolean>>({})
   const [checkedTreePartIds, setCheckedTreePartIds] = useState<string[]>([])
@@ -1564,6 +1575,29 @@ function App() {
   useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
   useEffect(() => { editEntityIdRef.current = editEntityId }, [editEntityId])
   useEffect(() => { checkedTreePartIdsRef.current = checkedTreePartIds }, [checkedTreePartIds])
+  useEffect(() => {
+    if (!mcpPairingOpen) {
+      mcpClientRef.current?.disconnect()
+      mcpClientRef.current = null
+      setMcpConnectionState('disconnected')
+      return
+    }
+    const pairCode = makeMcpPairCode()
+    setMcpPairingCode(pairCode)
+    setMcpConnectionMessage(undefined)
+    setMcpConnectionState('connecting')
+    const client = new McpBridgeClient({
+      pairCode,
+      onRequest: (method, params) => mcpHandlerRef.current(method, params),
+      onStateChange: (state, message) => { setMcpConnectionState(state); setMcpConnectionMessage(message) },
+    })
+    mcpClientRef.current = client
+    client.connect()
+    return () => {
+      client.disconnect()
+      if (mcpClientRef.current === client) mcpClientRef.current = null
+    }
+  }, [mcpPairingOpen])
   const persistenceReadyRef = useRef(false)
   const cloudInitialRefreshRef = useRef(false)
   const cloudInitialRefreshCompletedRef = useRef(false)
@@ -2789,6 +2823,104 @@ function App() {
       return
     }
     restoreHistoryEntry(next, '已重做')
+  }
+
+  // MCP writes use the same ProjectState and history publication path as the
+  // UI. The bridge can therefore automate editing without creating a second,
+  // incompatible scene mutation pipeline.
+  mcpHandlerRef.current = async (method, params) => {
+    const current = projectRef.current
+    const input = (params && typeof params === 'object' ? params : {}) as Record<string, unknown>
+    const parts = () => sceneEntityParts(projectRef.current, { isolated: true })
+    const getBounds = (voxels: Voxel[]) => {
+      if (!voxels.length) return null
+      const bounds = voxelBounds(voxels)
+      if (!bounds) return null
+      return { min: bounds.min, max: bounds.max, size: { x: bounds.max.x - bounds.min.x + 1, y: bounds.max.y - bounds.min.y + 1, z: bounds.max.z - bounds.min.z + 1 } }
+    }
+    const nameOf = (part: SceneEntityPart) => projectRef.current.entityNames?.[part.partId] ?? part.partId
+    switch (method) {
+      case 'moce_status':
+        return { name: current.name, voxelSizeMm: current.voxelSizeMm, entityCount: parts().length, selectedId: selectedIdRef.current, editEntityId: editEntityIdRef.current, bridge: 'local-only' }
+      case 'moce_get_scene':
+        return { name: current.name, voxelSizeMm: current.voxelSizeMm, sceneBounds: current.sceneBounds ?? sceneBoundsForProject(current), customVoxelCount: current.customVoxels.length, instanceCount: current.instances.length, assetCount: current.assets.length }
+      case 'moce_get_entities':
+        return parts().map((part) => ({ id: part.id, kind: part.kind, name: nameOf(part), partId: part.partId, memberKey: part.memberKey, assemblyIds: part.assemblyIds ?? [], voxelCount: scenePartVoxels(part).length, bounds: getBounds(scenePartVoxels(part)) }))
+      case 'moce_get_selection':
+        return { selectedId: selectedIdRef.current, editEntityId: editEntityIdRef.current, selectedPartIds: parts().filter((part) => part.id === selectedIdRef.current || part.partId === selectedIdRef.current).map((part) => part.id) }
+      case 'moce_render_views': {
+        const canvas = document.querySelector<HTMLCanvasElement>('.viewport-panel canvas') ?? document.querySelector<HTMLCanvasElement>('canvas')
+        if (!canvas) throw new McpProgramError('render_unavailable', '当前没有可用的场景画布')
+        return { views: [{ id: 'current', dataUrl: canvas.toDataURL('image/png') }] }
+      }
+      case 'moce_execute_voxel_program': {
+        const program = input as unknown as VoxelProgram
+        const applied = applyVoxelProgram(current, program)
+        commitProject(applied.project)
+        return { transactionId: program.transactionId, label: program.label, changedEntityIds: applied.changedEntityIds, createdEntityIds: applied.createdEntityIds, voxelCount: applied.voxelCount }
+      }
+      case 'moce_recolor_entities': {
+        const entityIds = Array.isArray(input.entityIds) ? input.entityIds.filter((value): value is string => typeof value === 'string') : []
+        const materialId = typeof input.materialId === 'string' ? input.materialId : ''
+        if (!entityIds.length || !materialId) throw new McpProgramError('invalid_request', '改色需要 entityIds 和 materialId')
+        const voxels = parts().filter((part) => entityIds.includes(part.id) || entityIds.includes(part.partId)).flatMap((part) => scenePartVoxels(part).map(({ x, y, z }) => ({ x, y, z })))
+        const program: VoxelProgram = { transactionId: `mcp-recolor-${Date.now()}`, label: 'MCP 改色', operations: [{ type: 'paint_voxels', entityIds: entityIds.map((id) => id.startsWith('custom:') ? id : `custom:${id}`), voxels, materialId }] }
+        const applied = applyVoxelProgram(current, program)
+        commitProject(applied.project)
+        return { changedEntityIds: applied.changedEntityIds, voxelCount: applied.voxelCount }
+      }
+      case 'moce_assemble_entities': {
+        const entityIds = Array.isArray(input.entityIds) ? input.entityIds.filter((value): value is string => typeof value === 'string') : []
+        if (entityIds.length < 2) throw new McpProgramError('invalid_request', '装配至少需要两个实体')
+        const program: VoxelProgram = { transactionId: `mcp-assemble-${Date.now()}`, label: 'MCP 装配', operations: [{ type: 'assemble_entities', entityIds, assemblyId: typeof input.assemblyId === 'string' ? input.assemblyId : undefined, name: typeof input.name === 'string' ? input.name : undefined }] }
+        const applied = applyVoxelProgram(current, program)
+        commitProject(applied.project)
+        return { changedEntityIds: applied.changedEntityIds, voxelCount: applied.voxelCount }
+      }
+      case 'moce_undo': undoProject(); return { ok: true }
+      case 'moce_redo': redoProject(); return { ok: true }
+      case 'moce_local3d_status': {
+        try { const response = await fetch('http://127.0.0.1:32124/health'); return await response.json() } catch { return { available: false, error: '本地 3D 服务未运行' } }
+      }
+      case 'moce_generate_from_image': {
+        try { const response = await fetch('http://127.0.0.1:32124/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }); return await response.json() } catch { return { available: false, error: '本地 3D 服务未运行' } }
+      }
+      case 'moce_cancel_generation':
+      case 'moce_confirm_generated_model': {
+        const jobId = typeof input.jobId === 'string' ? input.jobId : ''
+        if (!jobId) throw new McpProgramError('invalid_request', '缺少 jobId')
+        const suffix = method === 'moce_cancel_generation' ? '/cancel' : '/confirm'
+        const response = await fetch(`http://127.0.0.1:32124/jobs/${encodeURIComponent(jobId)}${suffix}`, { method: 'POST' })
+        const job = await response.json() as { status?: string; result?: { voxels?: Array<{ x: number; y: number; z: number; color?: [number, number, number] }>; voxelCount?: number; bounds?: unknown }; error?: string }
+        if (method === 'moce_cancel_generation' || job.status !== 'completed' || !job.result?.voxels?.length) return job
+        const requestedOrigin = input.origin
+        const bounds = sceneBoundsForProject(current)
+        const origin = requestedOrigin && typeof requestedOrigin === 'object'
+          ? { x: Number((requestedOrigin as Record<string, unknown>).x), y: Number((requestedOrigin as Record<string, unknown>).y), z: Number((requestedOrigin as Record<string, unknown>).z) }
+          : { x: -Math.floor(bounds.x / 2), y: 0, z: -Math.floor(bounds.y / 2) }
+        if (![origin.x, origin.y, origin.z].every(Number.isInteger)) throw new McpProgramError('invalid_origin', 'origin 的 x、y、z 必须是整数')
+        const rgbToMaterial = (color?: [number, number, number]) => {
+          const channels = color ?? [190, 96, 55]
+          return `#${channels.map((value) => Math.max(0, Math.min(255, Math.round(Number(value) || 0))).toString(16).padStart(2, '0')).join('')}`
+        }
+        const entityId = `mcp-generated-${jobId}`
+        const program: VoxelProgram = {
+          transactionId: `mcp-confirm-${jobId}`,
+          label: 'MCP 图片生成导入',
+          operations: [{
+            type: 'add_voxels',
+            entityId,
+            name: typeof input.name === 'string' && input.name.trim() ? input.name.trim() : `图片生成实体 ${jobId.slice(0, 6)}`,
+            voxels: job.result.voxels.map((voxel) => ({ x: origin.x + Math.round(voxel.x), y: origin.y + Math.round(voxel.y), z: origin.z + Math.round(voxel.z), materialId: rgbToMaterial(voxel.color) })),
+          }],
+        }
+        const applied = applyVoxelProgram(current, program)
+        commitProject(applied.project)
+        return { ...job, imported: { entityId, voxelCount: applied.voxelCount, origin } }
+      }
+      default:
+        throw new McpProgramError('method_not_found', `不支持的 MCP 方法：${method}`)
+    }
   }
 
   const addVoxel = (voxel: Voxel) => {
@@ -6295,6 +6427,7 @@ function App() {
               {authUser ? <UserRound size={17} /> : <LogIn size={17} />}
               <span>{authUser ? authUser.email : '登录/注册'}</span>
             </button>
+            <button className="icon-button" title="连接 AI / MCP" aria-label="连接 AI / MCP" onClick={() => setMcpPairingOpen(true)}><Bot size={17} /></button>
             <button className="icon-button" title="设置" aria-label="设置" onClick={() => setNotice('设置面板将在下一阶段接入')}><Settings size={17} /></button>
           </div>
         </div>
@@ -6362,6 +6495,7 @@ function App() {
       {modelImportDialog && <ModelImportDialog state={modelImportDialog} targetSizeVoxels={modelImportTargetVoxels} mode={modelImportMode} onTargetSizeChange={setModelImportTargetVoxels} onModeChange={setModelImportMode} onStart={runModelImport} onConfirm={confirmModelImport} onCancel={() => setModelImportDialog(null)} />}
       {sliceDialogOpen && selectedEntityParts.length > 0 && <SliceDialog parts={selectedEntityParts} project={project} name={selectedDisplayName || '选中实体'} onClose={() => setSliceDialogOpen(false)} onNotice={setNotice} />}
       {unsavedDialogOpen && <UnsavedChangesDialog onDecision={handleUnsavedDecision} />}
+      <McpPairingDialog open={mcpPairingOpen} pairCode={mcpPairingCode} state={mcpConnectionState} message={mcpConnectionMessage} onClose={() => setMcpPairingOpen(false)} />
       {(!authChecked || authDialogOpen || !authUser) && <AuthDialog required={!authChecked || !authUser} mode={authDialogMode} user={authUser} onModeChange={setAuthDialogMode} onClose={() => { if (authUser) setAuthDialogOpen(false) }} onAuthenticated={(user) => { setAuthUser(user); setAuthChecked(true); setAuthDialogOpen(false); void refreshCloudLibrary(); setNotice(`已登录 · ${user.email}`) }} onLogout={async () => { await logoutAuthUser(); setAuthUser(null); setAuthDialogOpen(false); setNotice('已退出登录') }} />}
     </div>
   )
