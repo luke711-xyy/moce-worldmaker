@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createSceneFile, parseSceneFile, parseSceneFileText, restoreProject, sceneContentSignature, SceneFileError } from './scene-file'
+import { paletteMaterialId } from './color-palettes'
 import { makeDefaultProject, makeEmptyProject } from './voxel'
 
 describe('莫测造境场景文件', () => {
@@ -50,7 +51,8 @@ describe('莫测造境场景文件', () => {
   it('round-trips scene entities, instances, assemblies and colors', () => {
     const project = makeDefaultProject()
     project.voxelSizeMm = 2.5
-    project.customVoxels = [{ x: 2, y: 3, z: 4, materialId: '#c96043', entityId: 'custom-1', preserveVoxelCells: true }]
+    project.colorPolicy = { paletteId: 'mard-221', maxColors: 2, allowedCodes: ['F3', 'H2'] }
+    project.customVoxels = [{ x: 2, y: 3, z: 4, materialId: paletteMaterialId('mard-221', 'F3'), sourceColor: '#c96043', entityId: 'custom-1', preserveVoxelCells: true }]
     project.customVoxelRenderModes = { 'custom-1': 'cells' }
     project.customColors = { 'custom-1': '#c96043' }
     project.customEntityOffsets = { 'custom-1': { x: 7, y: 2, z: -4 } }
@@ -58,6 +60,7 @@ describe('莫测造境场景文件', () => {
     project.instances[0].colorOverride = '#123456'
     const restored = restoreProject(parseSceneFile(createSceneFile(project)))
     expect(restored.customVoxels).toEqual(project.customVoxels)
+    expect(restored.colorPolicy).toEqual(project.colorPolicy)
     expect(restored.customVoxelRenderModes).toEqual(project.customVoxelRenderModes)
     expect(restored.customColors).toEqual(project.customColors)
     expect(restored.customEntityOffsets).toEqual(project.customEntityOffsets)

@@ -27,6 +27,7 @@ import { VoxelToolsGeometryResult, VoxelToolsWorkerClient, VoxelToolsShapeReques
 import { ExportWorkerClient } from './runtime/export-worker-client'
 import { adjustHexHsl, hexToHsl } from './color-utils'
 import { SliceLayer, SlicePlane, SliceVoxel, sliceEntityParts, sliceLayerToAsset, slicePlaneLabel } from './slicing'
+import { patternAxisLabels, sliceLayerForPatternPage, slicePatternPages, slicePatternStats } from './slice-pattern'
 import { computeScale, computeShell, GeometryScaleMode, GeometryVoxel, validScaleFactors, VoxelGeometryMesh, VoxelGeometryPreview } from './voxel-geometry'
 import { recordHistoryTransition, redoHistoryTransition, undoHistoryTransition } from './history'
 import { createZip } from './zip'
@@ -34,6 +35,9 @@ import { assetPreviewAsset, withAssetThumbnail } from './asset-thumbnail'
 import { CloudAssetSummary, CloudProgress, CloudSceneSummary, CloudUsage, deleteCloudAsset, deleteCloudScene, downloadCloudObject, loadCloudAssetPreview, loadCloudLibrary, loadCloudUsage, uploadCloudAsset, uploadCloudScene } from './cloud-backup'
 import { AuthUser, loadAuthUser, loginAuthUser, logoutAuthUser, registerAuthUser, requestPasswordReset, resendVerificationEmail, resetAuthPassword, setCloudAuthRequiredHandler, verifyAuthEmail } from './auth'
 import { STUDIO_RENDER_SETTINGS, createStudioLights, createStudioMaterial, studioShadeHex, studioShadeRgb } from './studio-lighting'
+import { MARD_221_ENTRIES, PaletteEntry, SceneColorPolicy, completeMardAllowedCodes, mardEntryByCode, nearestMardEntry, normalizeSceneColorPolicy, paletteColorForMaterialId, paletteEntryByMaterialId, paletteMaterialId, readableTextColor } from './color-palettes'
+import { collectSceneColorSamples, ensureProjectSceneColorPolicy, mapColorToScenePolicy, recolorVoxelsToPaletteEntry, remapAssetForScene, remapProjectToSceneColorPolicy, resolveProjectColorToken, sceneAllowedEntries, scenePaletteUsage } from './scene-colors'
+import { ColorMappingWorkerClient } from './runtime/color-mapping-client'
 import loginBackgroundUrl from './assets/moce-login-background.png'
 import brandLogoUrl from './assets/moce-brand-logo.png'
 import './styles.css'
@@ -348,6 +352,8 @@ function sceneEntityTreeName(project: ProjectState, part: SceneEntityPart): stri
 }
 
 function materialColorForVoxel(project: ProjectState, voxel: Voxel, asset?: VoxelAsset): string {
+  const paletteColor = paletteColorForMaterialId(voxel.materialId)
+  if (paletteColor) return paletteColor
   if (voxel.materialId.startsWith('#')) return voxel.materialId
   if (voxel.materialId === 'primary') return asset?.color ?? '#6c827d'
   if (voxel.materialId === 'accent') return asset?.accent ?? '#d2a354'
@@ -390,11 +396,13 @@ function createScenePartVoxelDisplayColorResolver(project: ProjectState): (voxel
     const renderColor = variant?.color ?? asset?.color
     const renderAccent = variant?.accent ?? asset?.accent
     const paintedColor = voxel.paintMaterialId
-      ? materialMap.get(voxel.paintMaterialId) ?? (voxel.paintMaterialId.startsWith('#') ? voxel.paintMaterialId : undefined)
+      ? paletteColorForMaterialId(voxel.paintMaterialId) ?? materialMap.get(voxel.paintMaterialId) ?? (voxel.paintMaterialId.startsWith('#') ? voxel.paintMaterialId : undefined)
       : undefined
     if (paintedColor) return typeof paintedColor === 'string' ? paintedColor : paintedColor
     if (part.colorOverride) return part.colorOverride
     if (asset?.templateColor) return asset.templateColor
+    const paletteColor = paletteColorForMaterialId(voxel.materialId)
+    if (paletteColor) return paletteColor
     if (voxel.materialId.startsWith('#')) return voxel.materialId
     if (voxel.materialId === 'primary') return renderColor ?? '#6c827d'
     if (voxel.materialId === 'accent') return renderAccent ?? '#d2a354'
@@ -741,10 +749,11 @@ function normalizeStoredProject(loaded: ProjectState, options: NormalizeStoredPr
     normalized.entityNameParents = materialized.entityNameParents
     normalized.lockedMemberKeys = materialized.lockedMemberKeys
   }
+  const colorNormalized = ensureProjectSceneColorPolicy(normalized)
   // Scene-library previews are read-only. Avoid the expensive deep clone and
   // full naming traversal there; the stored scene already contains its tree
   // names, while the editable project path still keeps the full normalization.
-  return options.normalizeNaming === false ? normalized : normalizeProjectNaming(normalized)
+  return options.normalizeNaming === false ? colorNormalized : normalizeProjectNaming(colorNormalized)
 }
 
 /**
@@ -787,6 +796,7 @@ function cloneProjectForMutation(source: ProjectState, options: { shareCatalogs?
   const shareCatalogs = options.shareCatalogs === true
   return {
     ...source,
+    colorPolicy: source.colorPolicy ? { ...source.colorPolicy, allowedCodes: [...source.colorPolicy.allowedCodes] } : undefined,
     assets: shareCatalogs ? source.assets : source.assets.map((asset) => ({ ...asset })),
     materials: shareCatalogs ? source.materials : source.materials.map((material) => ({ ...material })),
     instances: source.instances.map((instance) => ({
@@ -1329,6 +1339,11 @@ type ColorPreviewState = {
   saturationTarget: number
 }
 
+type SceneColorPolicyPreviewState = {
+  project: ProjectState
+  policy: SceneColorPolicy
+}
+
 type GeometryOperation = 'shell' | 'scale'
 type GeometryPreviewState = {
   operation: GeometryOperation
@@ -1442,8 +1457,8 @@ function App() {
   const [referenceImageOpen, setReferenceImageOpen] = useState(false)
   const [referenceImages, setReferenceImages] = useState<Array<{ name: string; url: string }>>([])
   const [referenceImageIndex, setReferenceImageIndex] = useState(0)
-  const [activeMaterial, setActiveMaterial] = useState('terracotta')
-  const [recentMaterialIds, setRecentMaterialIds] = useState(() => MATERIALS.slice(0, 8).map((material) => material.id))
+  const [activeMaterial, setActiveMaterial] = useState(() => paletteMaterialId('mard-221', 'F3'))
+  const [recentMaterialIds, setRecentMaterialIds] = useState(() => MARD_221_ENTRIES.slice(0, 8).map((entry) => entry.materialId))
   const [notice, setNotice] = useState('就绪 · 本地工程未保存')
   const [query, setQuery] = useState('')
   const [viewMode, setViewMode] = useState<'正交' | '透视'>('正交')
@@ -1453,6 +1468,12 @@ function App() {
   const [boundaryDraft, setBoundaryDraft] = useState<SceneBounds>(() => sceneBoundsForProject(makeEmptyProject()))
   const [voxelSizeOpen, setVoxelSizeOpen] = useState(false)
   const [voxelSizeDraft, setVoxelSizeDraft] = useState<number>(() => makeEmptyProject().voxelSizeMm)
+  const [sceneColorPolicyOpen, setSceneColorPolicyOpen] = useState(false)
+  const [sceneColorLimitDraft, setSceneColorLimitDraft] = useState(221)
+  const [sceneColorPolicyPreview, setSceneColorPolicyPreview] = useState<SceneColorPolicyPreviewState | null>(null)
+  const [sceneColorPolicyBusy, setSceneColorPolicyBusy] = useState(false)
+  const [sceneColorReplaceCode, setSceneColorReplaceCode] = useState<string | null>(null)
+  const [sceneColorSearch, setSceneColorSearch] = useState('')
   const [dragAxis, setDragAxis] = useState<'horizontal' | 'vertical'>('horizontal')
   const [editEntityId, setEditEntityId] = useState<string | null>(null)
   const editEntityIdRef = useRef<string | null>(null)
@@ -1495,6 +1516,7 @@ function App() {
   const geometryApplyRevisionRef = useRef(0)
   const geometryWorkerRef = useRef<VoxelToolsWorkerClient | null>(null)
   const exportWorkerRef = useRef<ExportWorkerClient | null>(null)
+  const colorMappingWorkerRef = useRef<ColorMappingWorkerClient | null>(null)
   const exportBusyRef = useRef(false)
   const geometryRequestRevisionRef = useRef(0)
   const colorPreviewPendingRef = useRef<ColorPreviewState | null>(null)
@@ -1524,6 +1546,11 @@ function App() {
     const client = new ExportWorkerClient()
     exportWorkerRef.current = client
     return () => { client.dispose(); exportWorkerRef.current = null }
+  }, [])
+  useEffect(() => {
+    const client = new ColorMappingWorkerClient()
+    colorMappingWorkerRef.current = client
+    return () => { client.dispose(); colorMappingWorkerRef.current = null }
   }, [])
   const [persistenceStatus, setPersistenceStatus] = useState<PersistenceStatus>('loading')
   const [libraryOpen, setLibraryOpen] = useState(false)
@@ -2001,9 +2028,25 @@ function App() {
   const canRedo = historyRevision >= 0 && historyRef.current.future.length > 0
   const recentMaterials = useMemo(() => {
     const materialsById = new Map(project.materials.map((material) => [material.id, material]))
-    const ids = [...recentMaterialIds, ...project.materials.map((material) => material.id)]
+    const ids = [activeMaterial, ...recentMaterialIds, ...project.materials.map((material) => material.id)]
     return [...new Set(ids)].map((id) => materialsById.get(id)).filter((material): material is Material => Boolean(material)).slice(0, 8)
-  }, [project.materials, recentMaterialIds])
+  }, [activeMaterial, project.materials, recentMaterialIds])
+  const activeSceneColorPolicy = useMemo(() => normalizeSceneColorPolicy(project.colorPolicy), [project.colorPolicy])
+  const activeScenePaletteEntries = useMemo(() => sceneAllowedEntries(project), [project.colorPolicy])
+  const displayedSceneColorPolicy = sceneColorPolicyPreview?.policy ?? activeSceneColorPolicy
+  const displayedScenePaletteEntries = useMemo(() => displayedSceneColorPolicy.allowedCodes.map((code) => mardEntryByCode(code)).filter((entry): entry is PaletteEntry => Boolean(entry)), [displayedSceneColorPolicy])
+  const displayedScenePaletteUsage = useMemo(() => scenePaletteUsage(sceneColorPolicyPreview?.project ?? project), [project, sceneColorPolicyPreview])
+  const sceneColorSearchResults = useMemo(() => {
+    const search = sceneColorSearch.trim().toLowerCase()
+    return MARD_221_ENTRIES.filter((entry) => !search || entry.code.toLowerCase().includes(search) || entry.hex.includes(search)).slice(0, 221)
+  }, [sceneColorSearch])
+
+  useEffect(() => {
+    if (project.materials.some((material) => material.id === activeMaterial)) return
+    const fallback = project.materials[0]?.id ?? paletteMaterialId('mard-221', 'H4')
+    setActiveMaterial(fallback)
+    setRecentMaterialIds((ids) => [fallback, ...ids.filter((id) => project.materials.some((material) => material.id === id) && id !== fallback)].slice(0, 8))
+  }, [activeMaterial, project.materials])
 
   const markVoxelStrokeOwners = (ownerIds: Iterable<string>) => {
     const transaction = voxelStrokeTransactionRef.current
@@ -2022,6 +2065,7 @@ function App() {
   }
 
   const useMaterial = (materialId: string) => {
+    if (!projectRef.current.materials.some((material) => material.id === materialId)) return
     setActiveMaterial(materialId)
     setRecentMaterialIds((ids) => {
       const next = [materialId, ...ids.filter((id) => id !== materialId)].slice(0, 8)
@@ -2340,6 +2384,58 @@ function App() {
   const replaceProject = (next: ProjectState, trackHistory = true) => {
     if (geometryApplyingRef.current) return
     commitProject(structuredClone(next), trackHistory)
+  }
+
+  const previewSceneColorPolicy = async (maxColors: number, fixedCodes?: string[]) => {
+    const client = colorMappingWorkerRef.current
+    if (!client || sceneColorPolicyBusy) return
+    const safeMax = Math.max(1, Math.min(MARD_221_ENTRIES.length, Math.round(maxColors)))
+    setSceneColorPolicyBusy(true)
+    try {
+      const source = projectRef.current
+      const samples = collectSceneColorSamples(source)
+      const usedCodes = [...new Set(samples.map((sample) => nearestMardEntry(sample.color).code))]
+      const sparseCodes = !fixedCodes && usedCodes.length < safeMax
+        ? completeMardAllowedCodes([...usedCodes, ...normalizeSceneColorPolicy(source.colorPolicy).allowedCodes], safeMax)
+        : fixedCodes
+      const result = await client.compute(samples, safeMax, sparseCodes)
+      const policy = normalizeSceneColorPolicy({ paletteId: 'mard-221', maxColors: safeMax, allowedCodes: result.allowedCodes })
+      setSceneColorPolicyPreview({ project: remapProjectToSceneColorPolicy(source, policy), policy })
+      setSceneColorLimitDraft(policy.maxColors)
+      setSceneColorReplaceCode(null)
+      setNotice(`色卡预览已生成 · MARD ${policy.maxColors} 色`)
+    } catch (error) {
+      setNotice(`色卡优化失败 · ${error instanceof Error ? error.message : '无法计算颜色映射'}`)
+    } finally {
+      setSceneColorPolicyBusy(false)
+    }
+  }
+
+  const replaceSceneAllowedCode = (replacementCode: string) => {
+    if (!sceneColorReplaceCode) return
+    const sourcePolicy = sceneColorPolicyPreview?.policy ?? activeSceneColorPolicy
+    if (sourcePolicy.allowedCodes.includes(replacementCode) && replacementCode !== sceneColorReplaceCode) {
+      setNotice(`MARD ${replacementCode} 已在当前允许色组中`)
+      return
+    }
+    const nextCodes = sourcePolicy.allowedCodes.map((code) => code === sceneColorReplaceCode ? replacementCode : code)
+    void previewSceneColorPolicy(sourcePolicy.maxColors, nextCodes)
+  }
+
+  const confirmSceneColorPolicy = () => {
+    if (!sceneColorPolicyPreview) return
+    replaceProject(sceneColorPolicyPreview.project, true)
+    const firstMaterial = sceneColorPolicyPreview.project.materials[0]
+    if (firstMaterial && !sceneColorPolicyPreview.project.materials.some((material) => material.id === activeMaterial)) useMaterial(firstMaterial.id)
+    setSceneColorPolicyPreview(null)
+    setSceneColorReplaceCode(null)
+    setNotice(`已应用 MARD 221 色卡 · 最多 ${sceneColorLimitDraft} 色`)
+  }
+
+  const cancelSceneColorPolicyPreview = () => {
+    setSceneColorPolicyPreview(null)
+    setSceneColorLimitDraft(activeSceneColorPolicy.maxColors)
+    setSceneColorReplaceCode(null)
   }
 
   const markSceneSaved = (savedProject: ProjectState, fileRef?: SceneFileRef | null) => {
@@ -2820,7 +2916,8 @@ function App() {
     const alreadyOccupied = currentParts.some((part) => scenePartVoxels(part).some((candidate) => sceneVoxelKey(candidate) === sceneVoxelKey(voxel)))
     updateProject((draft) => {
       if (alreadyOccupied) return
-      draft.customVoxels.push(sceneToStoredCustomVoxel(draft, { ...voxel, materialId: voxel.materialId }, entityId))
+      const sourceColor = resolveProjectColorToken(draft, voxel.materialId)
+      draft.customVoxels.push(sceneToStoredCustomVoxel(draft, { ...voxel, materialId: voxel.materialId, sourceColor }, entityId))
     })
     const customEntitySelectionId = `custom:${entityId}`
     setSelectedId(customEntitySelectionId)
@@ -3088,7 +3185,11 @@ function App() {
           // prevents two rows for one logical voxel from surviving in the
           // persisted project.
           const replacements = insertionPlan.map(({ voxel, entityId: targetEntityId }) =>
-            sceneToStoredCustomVoxel(draft, { ...voxel, entityId: targetEntityId }, targetEntityId))
+            sceneToStoredCustomVoxel(draft, {
+              ...voxel,
+              entityId: targetEntityId,
+              sourceColor: voxel.sourceColor ?? resolveProjectColorToken(draft, voxel.paintMaterialId ?? voxel.materialId),
+            }, targetEntityId))
           const replacementKeys = new Set(replacements.map((voxel) =>
             `${voxelEntityId(voxel)}:${sceneVoxelKey(voxel)}`))
           draft.customVoxels = draft.customVoxels.filter((voxel) =>
@@ -3153,9 +3254,9 @@ function App() {
         if (!currentCustomIds.has(voxelEntityId(voxel))) return voxel
         const offset = customEntityOffset(draft, voxelEntityId(voxel))
         const sceneKey = sceneVoxelKey({ x: voxel.x + offset.x, y: voxel.y + offset.y, z: voxel.z + offset.z })
-        return targetKeys.has(sceneKey)
-          ? { ...voxel, paintMaterialId: activeMaterial }
-          : voxel
+        if (!targetKeys.has(sceneKey)) return voxel
+        const { paintMaterialId: _paintMaterialId, ...rest } = voxel
+        return { ...rest, materialId: activeMaterial, sourceColor: resolveProjectColorToken(draft, activeMaterial) }
       })
     })
     notifyEditor(`已改色 ${targets.length} 个体素`)
@@ -3306,8 +3407,9 @@ function App() {
 
   const beginPlacement = (asset: VoxelAsset) => {
     interactionActiveRef.current = true
-    setPendingEntityImport(null)
-    setPlacementAssetId(asset.id)
+    const mappedAsset = remapAssetForScene(projectRef.current, asset)
+    setPendingEntityImport({ asset: mappedAsset, entityCount: asset.parts.length || 1 })
+    setPlacementAssetId(mappedAsset.id)
     setNotice(`正在拖动资产 · ${asset.name}`)
   }
 
@@ -3327,10 +3429,11 @@ function App() {
         ? await (async () => {
           setModelImportDialog((state) => state ? { ...state, progress: 0.35, progressLabel: '正在读取 VOX 体素数据' } : state)
           const imported = importVoxBufferAsVoxelAsset(current.file.name, await current.file.arrayBuffer())
-          const maxDimension = Math.max(imported.asset.width, imported.asset.depth, imported.asset.height)
+          const asset = remapAssetForScene(projectRef.current, imported.asset)
+          const maxDimension = Math.max(asset.width, asset.depth, asset.height)
           setModelImportTargetVoxels(maxDimension)
           return {
-            asset: imported.asset,
+            asset,
             diagnostics: {
               sourceFormat: 'vox' as const,
               mode: 'surface' as const,
@@ -3338,7 +3441,7 @@ function App() {
               triangleCount: 0,
               partCount: imported.modelCount,
               closedMesh: false,
-              voxelCount: imported.asset.voxels.length,
+              voxelCount: asset.voxels.length,
               warnings: ['VOX 已经是体素格式，未进行网格采样；每个 VOX 体素直接转换为莫测造境标准体素。', ...imported.warnings],
             },
           }
@@ -3359,7 +3462,7 @@ function App() {
   const confirmModelImport = () => {
     const result = modelImportDialog?.result
     if (!result) return
-    const asset = structuredClone(result.asset)
+    const asset = remapAssetForScene(projectRef.current, structuredClone(result.asset))
     updateProject((draft) => { draft.assets.push(asset) })
     setModelImportDialog(null)
     beginPlacement(asset)
@@ -3373,7 +3476,7 @@ function App() {
   }
 
   const previewPlacementAt = (assetId: string, x: number, z: number): PlacementPreview | null => {
-    const asset = projectRef.current.assets.find((item) => item.id === assetId) ?? (pendingEntityImport?.asset.id === assetId ? pendingEntityImport.asset : undefined)
+    const asset = (pendingEntityImport?.asset.id === assetId ? pendingEntityImport.asset : undefined) ?? projectRef.current.assets.find((item) => item.id === assetId)
     if (!asset) return null
     const geometry = placementGeometryFor(asset)
     const position = { assetId, x: snapAssetOrigin(x, asset.width), y: 0, z: snapAssetOrigin(z, asset.depth) }
@@ -3392,7 +3495,7 @@ function App() {
   }
 
   const placeAssetAt = (assetId: string, x: number, z: number) => {
-    const asset = projectRef.current.assets.find((item) => item.id === assetId) ?? (pendingEntityImport?.asset.id === assetId ? pendingEntityImport.asset : undefined)
+    const asset = (pendingEntityImport?.asset.id === assetId ? pendingEntityImport.asset : undefined) ?? projectRef.current.assets.find((item) => item.id === assetId)
     if (!asset) return
     const position = { x: snapAssetOrigin(x, asset.width), y: 0, z: snapAssetOrigin(z, asset.depth) }
     const outsideBoundary = !placementAssetWithinSceneBoundary(asset, position.x, position.y, position.z)
@@ -3432,11 +3535,15 @@ function App() {
           ? materialColorForVoxel(projectRef.current, { ...local, materialId: local.paintMaterialId }, renderAsset)
           : undefined
         const { paintMaterialId: _paintMaterialId, ...sceneVoxel } = scene
+        const sourceColor = local.sourceColor
+          ?? paintedColor
+          ?? asset.templateColor
+          ?? materialColorForVoxel(projectRef.current, local, renderAsset)
+        const paletteEntry = mapColorToScenePolicy(sourceColor, normalizeSceneColorPolicy(projectRef.current.colorPolicy))
         return {
           ...sceneVoxel,
-          materialId: paintedColor
-            ?? asset.templateColor
-            ?? materialColorForVoxel(projectRef.current, local, renderAsset),
+          materialId: paletteEntry.materialId,
+          sourceColor,
           entityId,
         }
       })
@@ -4167,8 +4274,9 @@ function App() {
         nodes: assemblyNodes,
       },
     }
-    setPendingEntityImport({ asset: previewAsset, entityCount: portable.entities.length })
-    setPlacementAssetId(previewAsset.id)
+    const mappedPreviewAsset = remapAssetForScene(projectRef.current, previewAsset)
+    setPendingEntityImport({ asset: mappedPreviewAsset, entityCount: portable.entities.length })
+    setPlacementAssetId(mappedPreviewAsset.id)
     interactionActiveRef.current = true
     setNotice(`已导入普通实体文件 · ${portable.entities.length} 个实体 · 请在场景中手动选择放置位置`)
   }
@@ -4353,12 +4461,9 @@ function App() {
     .filter((asset) => asset.name.toLowerCase().includes(query.toLowerCase()))
 
   const replaceMaterialColor = (materialId: string, color: string) => {
-    useMaterial(materialId)
-    updateProject((draft) => {
-      const material = draft.materials.find((item) => item.id === materialId)
-      if (material) material.color = color
-    })
-    setNotice(`已替换调色板颜色 · ${color.toUpperCase()}`)
+    const entry = mapColorToScenePolicy(color, normalizeSceneColorPolicy(projectRef.current.colorPolicy))
+    useMaterial(entry.materialId)
+    setNotice(`已吸附到 MARD ${entry.code} · ${entry.hex.toUpperCase()}`)
   }
 
   const refreshLibrary = async () => {
@@ -4927,7 +5032,8 @@ function App() {
   const changeTemplateAssetColor = (assetId: string, color: string) => {
     const asset = projectRef.current.assets.find((item) => item.id === assetId)
     if (!asset) return
-    const normalizedColor = /^#[0-9a-f]{6}$/i.test(color) ? color : '#6c827d'
+    const paletteEntry = nearestMardEntry(color)
+    const normalizedColor = paletteEntry.hex
     const nextAsset = { ...asset, color: normalizedColor, templateColor: normalizedColor }
     let detachedAssets: VoxelAsset[] = []
     updateProject((draft) => {
@@ -4940,7 +5046,7 @@ function App() {
     })
     void Promise.all([nextAsset, ...detachedAssets].map((item) => saveLocalAsset(item))).catch(() => setPersistenceStatus('offline'))
     setAssetContextMenu(null)
-    setNotice(`已更新模板实体颜色 · ${normalizedColor.toUpperCase()}`)
+    setNotice(`已更新模板实体颜色 · MARD ${paletteEntry.code}`)
   }
 
   const deleteTemplateAsset = (assetId: string, localOnly = false) => {
@@ -5716,12 +5822,13 @@ function App() {
   const changeSelectedColor = (color: string) => {
     cancelColorPreview()
     if (!selectedEntityParts.length) return
+    const entry = mapColorToScenePolicy(color, normalizeSceneColorPolicy(projectRef.current.colorPolicy))
     const instanceIds = new Set(selectedEntityParts.map((part) => part.instanceId).filter((id): id is string => Boolean(id)))
     const customIds = new Set(selectedEntityParts.filter((part) => part.kind === 'custom').map((part) => part.partId))
     updateProject((draft) => {
       draft.instances.forEach((instance) => {
         if (!instanceIds.has(instance.id)) return
-        instance.colorOverride = color
+        instance.colorOverride = entry.hex
         // A direct palette choice means "make the whole entity this color".
         // Remove any per-voxel paint overrides left by the HSL sliders first.
         instance.overrides = (instance.overrides ?? []).filter((override) => override.mode !== 'paint').map((override) => {
@@ -5730,16 +5837,15 @@ function App() {
         })
       })
       draft.customColors = { ...(draft.customColors ?? {}) }
-      customIds.forEach((entityId) => { draft.customColors![entityId] = color })
+      customIds.forEach((entityId) => { delete draft.customColors![entityId] })
       if (customIds.size) {
-        draft.customVoxels = draft.customVoxels.map((voxel) => {
-          if (!customIds.has(voxelEntityId(voxel))) return voxel
-          const { paintMaterialId: _paintMaterialId, ...withoutPaint } = voxel
-          return withoutPaint
-        })
+        draft.customVoxels = draft.customVoxels.map((voxel) => customIds.has(voxelEntityId(voxel))
+          ? recolorVoxelsToPaletteEntry([voxel], entry)[0]
+          : voxel)
       }
     })
-    setNotice(`已更新选中实体颜色 · ${color.toUpperCase()}`)
+    useMaterial(entry.materialId)
+    setNotice(`已更新选中实体颜色 · MARD ${entry.code}`)
   }
 
   const previewSelectedHsl = (hueDelta: number, saturationTarget: number) => {
@@ -5779,17 +5885,18 @@ function App() {
       const localBySceneKey = new Map<string, Voxel>()
       instanceVoxelPairs(sourceInstance, sourceAsset).forEach(({ scene, local }) => localBySceneKey.set(sceneVoxelKey(scene), local))
       const upsertPaint = (localVoxel: Voxel, color: string) => {
+        const entry = mapColorToScenePolicy(color, normalizeSceneColorPolicy(sourceProject.colorPolicy))
         const key = sceneVoxelKey(localVoxel)
         const index = overrideIndex.get(key)
         if (index === undefined) {
-          overrides.push({ ...localVoxel, materialId: color, mode: 'paint' })
+          overrides.push({ ...localVoxel, materialId: entry.materialId, sourceColor: color, mode: 'paint' })
           overrideIndex.set(key, overrides.length - 1)
           return
         }
         const existing = overrides[index]
         overrides[index] = existing.mode === 'add' || !existing.mode
-          ? { ...existing, paintMaterialId: color }
-          : { ...existing, materialId: color, mode: 'paint' }
+          ? { ...existing, paintMaterialId: entry.materialId, sourceColor: color }
+          : { ...existing, materialId: entry.materialId, sourceColor: color, mode: 'paint' }
       }
       parts.forEach((part) => scenePartVoxels(part).forEach((voxel) => {
         const localVoxel = localBySceneKey.get(sceneVoxelKey(voxel))
@@ -5804,7 +5911,7 @@ function App() {
       const coversInstance = allInstanceParts.length > 0 && allInstanceParts.every((part) => selectedPartsById.has(part.id))
       if (coversInstance) {
         const baseColor = sourceInstance.colorOverride ?? sourceAsset.templateColor
-        if (baseColor) nextInstance.colorOverride = adjustHexHsl(baseColor, hueDelta, saturationTarget)
+        if (baseColor) nextInstance.colorOverride = mapColorToScenePolicy(adjustHexHsl(baseColor, hueDelta, saturationTarget), normalizeSceneColorPolicy(sourceProject.colorPolicy)).hex
       }
       return nextInstance
     })
@@ -5821,13 +5928,16 @@ function App() {
         const sceneKey = sceneVoxelKey({ x: voxel.x + offset.x, y: voxel.y + offset.y, z: voxel.z + offset.z })
         const match = selectedCustomVoxelByKey.get(`${entityId}:${sceneKey}`)
         if (!match) return voxel
-        return { ...voxel, paintMaterialId: adjustHexHsl(scenePartVoxelDisplayColor(sourceProject, match.part, match.voxel), hueDelta, saturationTarget) }
+        const sourceColor = adjustHexHsl(voxel.sourceColor ?? scenePartVoxelDisplayColor(sourceProject, match.part, match.voxel), hueDelta, saturationTarget)
+        const entry = mapColorToScenePolicy(sourceColor, normalizeSceneColorPolicy(sourceProject.colorPolicy))
+        const { paintMaterialId: _paintMaterialId, ...rest } = voxel
+        return { ...rest, materialId: entry.materialId, sourceColor }
       })
       : sourceProject.customVoxels
     const nextCustomColors = { ...(sourceProject.customColors ?? {}) }
     selectedCustomParts.forEach((part, entityId) => {
       const baseColor = sourceProject.customColors?.[entityId]
-      if (baseColor) nextCustomColors[entityId] = adjustHexHsl(baseColor, hueDelta, saturationTarget)
+      if (baseColor) delete nextCustomColors[entityId]
     })
     const nextProject: ProjectState = { ...sourceProject, instances: nextInstances, customVoxels: nextCustomVoxels, customColors: nextCustomColors }
     recordHistoryBeforeChange(sourceProject, nextProject)
@@ -6303,14 +6413,40 @@ function App() {
         <input ref={referenceImageInputRef} className="hidden-input" type="file" accept="image/*" multiple onChange={handleReferenceImageChange} />
       </header>
 
-      <main className={`workspace ${assetSidebarCollapsed ? 'asset-sidebar-collapsed' : ''}`} onClick={() => { if (treeContextMenu) setTreeContextMenu(null); if (assetContextMenu) setAssetContextMenu(null); if (assetCategoryContextMenu) setAssetCategoryContextMenu(null); if (sceneLibraryContextMenu) setSceneLibraryContextMenu(null); if (voxelSizeOpen) setVoxelSizeOpen(false) }}>
+      <main className={`workspace ${assetSidebarCollapsed ? 'asset-sidebar-collapsed' : ''}`} onClick={() => { if (treeContextMenu) setTreeContextMenu(null); if (assetContextMenu) setAssetContextMenu(null); if (assetCategoryContextMenu) setAssetCategoryContextMenu(null); if (sceneLibraryContextMenu) setSceneLibraryContextMenu(null); if (voxelSizeOpen) setVoxelSizeOpen(false); if (sceneColorPolicyOpen) setSceneColorPolicyOpen(false) }}>
         <MemoizedAssetSidebar assets={filteredAssets} categoryPaths={assetCategoryPaths} query={query} setQuery={setQuery} selectedAssetIds={selectedAssetIds} onToggleAssetSelection={assetToggleSelection} onClearAssetSelection={assetClearSelection} onExportAssets={stableAssetExport} collapsed={assetSidebarCollapsed} onToggleCollapsed={assetToggleCollapsed} onNotice={stableAssetNotice} onBeginPlacement={stableAssetBeginPlacement} onEndPlacement={stableAssetEndPlacement} onContextMenu={assetContextMenuHandler} contextMenu={assetContextMenu} categoryContextMenu={assetCategoryContextMenu} onCategoryContextMenu={assetCategoryContextMenuHandler} onCreateCategory={stableAssetCreateCategory} onDeleteCategory={stableAssetDeleteCategory} onRenameAsset={stableAssetRename} onDuplicateAsset={stableAssetDuplicate} onDeleteAsset={stableAssetDelete} onChangeAssetColor={stableAssetChangeColor} onBackupAsset={backupAssetToCloud} cloudAssets={cloudAssets} cloudAssetPreviews={cloudAssetPreviews} cloudAssetPreviewErrors={cloudAssetPreviewErrors} cloudTransfers={cloudTransfers} cloudTransferErrors={cloudTransferErrors} onDownloadCloudAsset={downloadCloudAssetToLocal} onDeleteCloudAsset={removeCloudAsset} />
         <section className="viewport-panel">
           <div className="viewport-toolbar">
             <div className="view-toggle">{(['正交', '透视'] as const).map((mode) => <button key={mode} className={viewMode === mode ? 'active' : ''} onClick={() => { setViewMode(mode); setNotice(`已切换视图 · ${mode}`) }}>{mode}</button>)}</div>
             <div className="toolbar-spacer" />
+            <div className="scene-color-control-wrap" onClick={(event) => event.stopPropagation()}>
+              <button className={`micro-control ${sceneColorPolicyOpen ? 'active' : ''}`} onClick={() => {
+                setSceneColorLimitDraft(activeSceneColorPolicy.maxColors)
+                setSceneColorPolicyOpen((value) => !value)
+                setBoundaryOpen(false)
+                setVoxelSizeOpen(false)
+              }}><Palette size={14} /> MARD · {activeSceneColorPolicy.maxColors} 色 <ChevronDown size={13} /></button>
+              {sceneColorPolicyOpen && <div className="scene-color-popover" onClick={(event) => event.stopPropagation()}>
+                <div className="boundary-popover-title">场景色卡 · MARD 221</div>
+                <div className="boundary-popover-subtitle">全场景绘制、导入、改色与资产放置都只能使用下列允许色号</div>
+                <div className="scene-color-summary"><span>实际使用 {Object.keys(displayedScenePaletteUsage.countsByCode).length} 色</span><span>共 {displayedScenePaletteUsage.totalVoxels} 个体素</span></div>
+                <label className="boundary-field scene-color-limit"><span>颜色上限</span><NumericInput min={1} max={221} integer value={sceneColorLimitDraft} onCommit={setSceneColorLimitDraft} /><em>色</em></label>
+                <div className="scene-color-actions"><button disabled={sceneColorPolicyBusy} onClick={() => void previewSceneColorPolicy(sceneColorLimitDraft)}>{sceneColorPolicyBusy ? '计算中…' : '自动优化并预览'}</button></div>
+                <div className="scene-color-allowed-title">允许色号 · 点击一个色号后可手动替换</div>
+                <div className="scene-color-allowed-grid">
+                  {displayedScenePaletteEntries.map((entry) => <button key={entry.code} className={sceneColorReplaceCode === entry.code ? 'active' : ''} title={`${entry.code} · ${displayedScenePaletteUsage.countsByCode[entry.code] ?? 0} 个体素`} style={{ background: entry.hex, color: readableTextColor(entry.hex) }} onClick={() => { setSceneColorReplaceCode(entry.code); setSceneColorSearch('') }}>{entry.code}<small>{displayedScenePaletteUsage.countsByCode[entry.code] ?? 0}</small></button>)}
+                </div>
+                {sceneColorReplaceCode && <div className="scene-color-replace-panel">
+                  <div className="scene-color-replace-label">替换 MARD {sceneColorReplaceCode}</div>
+                  <input value={sceneColorSearch} onChange={(event) => setSceneColorSearch(event.target.value)} placeholder="搜索色号或 HEX" autoFocus />
+                  <div className="scene-color-catalog-grid">{sceneColorSearchResults.map((entry) => <button key={entry.code} title={`${entry.code} · ${entry.hex.toUpperCase()}`} style={{ background: entry.hex, color: readableTextColor(entry.hex) }} onClick={() => replaceSceneAllowedCode(entry.code)}>{entry.code}</button>)}</div>
+                </div>}
+                {sceneColorPolicyPreview && <div className="scene-color-preview-notice">预览尚未写入场景；确认后作为一条可撤销记录提交。</div>}
+                <div className="boundary-actions"><button onClick={() => { cancelSceneColorPolicyPreview(); setSceneColorPolicyOpen(false) }}>{sceneColorPolicyPreview ? '取消预览' : '关闭'}</button><button className="primary" disabled={!sceneColorPolicyPreview || sceneColorPolicyBusy} onClick={() => { confirmSceneColorPolicy(); setSceneColorPolicyOpen(false) }}>确认应用</button></div>
+              </div>}
+            </div>
             <div className="voxel-size-control-wrap" onClick={(event) => event.stopPropagation()}>
-              <button className={`micro-control ${voxelSizeOpen ? 'active' : ''}`} onClick={() => { setVoxelSizeDraft(project.voxelSizeMm); setVoxelSizeOpen((value) => !value); setBoundaryOpen(false) }}><Grid3X3 size={14} /> {formatVoxelSizeMm(project.voxelSizeMm)} mm体素 <ChevronDown size={13} /></button>
+              <button className={`micro-control ${voxelSizeOpen ? 'active' : ''}`} onClick={() => { setVoxelSizeDraft(project.voxelSizeMm); setVoxelSizeOpen((value) => !value); setBoundaryOpen(false); setSceneColorPolicyOpen(false) }}><Grid3X3 size={14} /> {formatVoxelSizeMm(project.voxelSizeMm)} mm体素 <ChevronDown size={13} /></button>
               {voxelSizeOpen && <div className="voxel-size-popover" onClick={(event) => event.stopPropagation()}>
                 <div className="boundary-popover-title">体素边长</div>
                 <div className="boundary-popover-subtitle">每个体素导出 STL / GLB 后代表的实际边长；标准 VOX 只保存逻辑体素网格</div>
@@ -6321,7 +6457,7 @@ function App() {
               </div>}
             </div>
             <div className="boundary-control-wrap">
-              <button className={`micro-control ${boundaryOpen ? 'active' : ''}`} onClick={() => { setBoundaryDraft(currentSceneBounds); setBoundaryOpen((value) => !value); setVoxelSizeOpen(false) }}><SlidersHorizontal size={14} /> 边界 <ChevronDown size={13} /></button>
+              <button className={`micro-control ${boundaryOpen ? 'active' : ''}`} onClick={() => { setBoundaryDraft(currentSceneBounds); setBoundaryOpen((value) => !value); setVoxelSizeOpen(false); setSceneColorPolicyOpen(false) }}><SlidersHorizontal size={14} /> 边界 <ChevronDown size={13} /></button>
               {boundaryOpen && <div className="boundary-popover" onClick={(event) => event.stopPropagation()}>
                 <div className="boundary-popover-title">场景边界</div>
                 <div className="boundary-popover-subtitle">按体素设置地面尺寸与 Z 轴限高</div>
@@ -6355,11 +6491,11 @@ function App() {
             <div className="zoom-control"><button className="zoom-step" title="缩小" onClick={() => { if (cameraControlApi) cameraControlApi.zoomOut(); else setZoomLevel((value) => stepZoomLevel(value, -1)); setNotice('已缩小视图') }}><Minus size={14} /></button><div className="zoom-track"><div className="zoom-value" style={{ width: `${zoomTrackProgress(zoomLevel)}%` }} /></div><button className="zoom-step" title="放大" onClick={() => { if (cameraControlApi) cameraControlApi.zoomIn(); else setZoomLevel((value) => stepZoomLevel(value, 1)); setNotice('已放大视图') }}><Plus size={14} /></button><span className="zoom-percent">{Math.round(zoomLevel)}%</span></div>
           </div>
         </section>
-        <MemoizedInspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} selectedTransformSignature={selectedEntityTransformSignature} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} selectedColor={selectedColor} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} transformPreview={transformPreview} geometryPreview={geometryPreview} shellThicknessOptions={geometryShellThicknessOptions} scaleOptions={geometryScaleOptions} exportBusy={exportBusy} onChangeColor={changeSelectedColor} onPreviewHsl={previewSelectedHsl} onCommitHsl={commitSelectedHsl} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onConfirmTransform={confirmDiscreteTransform} onCancelTransform={cancelTransformPreview} onExport={exportSelectedPart} onExportGlb={exportSelectedPartGlb} onExportVox={exportSelectedPartVox} onExportEntityFile={exportSelectedEntityFile} onOpenSlicer={() => setSliceDialogOpen(true)} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => { setCopyPreview(null); cancelTransformPreview() }} onStartShell={startShellPreview} onStartScale={startScalePreview} onChangeShellThickness={changeGeometryShellThickness} onChangeScale={changeGeometryScale} onConfirmGeometry={confirmGeometryPreview} onCancelGeometry={cancelGeometryPreview} onDelete={deleteSelected} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
+        <MemoizedInspector entityName={selectedDisplayName} source={selectedSource} selectedAsset={selectedAsset} selectedPart={selectedScenePart} selectedParts={selectedEntityParts} selectedTransformSignature={selectedEntityTransformSignature} editEntityId={editEntityId} canEnterEditMode={canEnterSelectedEditMode} editTargetId={selectedId} selectedColor={selectedColor} paletteEntries={activeScenePaletteEntries} previewColor={selectedEntityParts.length === 1 ? (selectedEntityParts[0]?.colorOverride ?? (selectedEntityParts[0]?.kind === 'custom' ? project.customColors?.[selectedEntityParts[0]?.partId] : undefined)) : undefined} previewVoxelColors={previewVoxelColors} previewMaterialColors={previewMaterialColors} copyPreview={copyPreview} transformPreview={transformPreview} geometryPreview={geometryPreview} shellThicknessOptions={geometryShellThicknessOptions} scaleOptions={geometryScaleOptions} exportBusy={exportBusy} onChangeColor={changeSelectedColor} onPreviewHsl={previewSelectedHsl} onCommitHsl={commitSelectedHsl} onMirror={mirrorSelectedEntities} onRotate={rotateSelectedEntities} onConfirmTransform={confirmDiscreteTransform} onCancelTransform={cancelTransformPreview} onExport={exportSelectedPart} onExportGlb={exportSelectedPartGlb} onExportVox={exportSelectedPartVox} onExportEntityFile={exportSelectedEntityFile} onOpenSlicer={() => setSliceDialogOpen(true)} onDuplicate={startDuplicatePreview} onChangeCopyDirection={changeCopyPreviewDirection} onChangeCopyGap={changeCopyPreviewGap} onConfirmDuplicate={confirmDuplicate} onCancelDuplicate={() => { setCopyPreview(null); cancelTransformPreview() }} onStartShell={startShellPreview} onStartScale={startScalePreview} onChangeShellThickness={changeGeometryShellThickness} onChangeScale={changeGeometryScale} onConfirmGeometry={confirmGeometryPreview} onCancelGeometry={cancelGeometryPreview} onDelete={deleteSelected} onSaveAsAsset={saveSelectedEntityAsAsset} onEnterEditMode={enterEditMode} />
       </main>
       {libraryOpen && <SceneLibraryDialog library={library} busy={libraryBusy} selectedSceneLoading={selectedLibrarySceneLoading} selectionRevision={selectedLibrarySceneRevision} error={libraryError} selectedSceneId={selectedLibrarySceneId} selectedSceneProject={selectedLibrarySceneProject} cloudAssets={cloudAssets} cloudScenes={cloudScenes} cloudUsage={cloudUsage} cloudError={cloudError} cloudTransfers={cloudTransfers} cloudTransferErrors={cloudTransferErrors} onBackupCurrentScene={() => backupCurrentSceneToCloud()} onDownloadCloudScene={downloadCloudSceneToLocal} onDeleteCloudScene={removeCloudScene} onClose={() => { setLibraryOpen(false); setSceneLibraryContextMenu(null); setSelectedLibrarySceneId(null); setSelectedLibrarySceneProject(null); setSelectedLibrarySceneLoading(false) }} onLoadScene={loadStoredScene} onSelectScene={selectLibraryScene} onSaveSceneEntity={requestSaveAssetToLibrary} onAddSceneEntityToCurrentScene={addLibrarySceneEntityToCurrentScene} onDeleteSceneEntity={deleteLibrarySceneEntity} contextMenu={sceneLibraryContextMenu} onContextMenu={(sceneId, x, y) => setSceneLibraryContextMenu({ sceneId, x, y })} onCloseContextMenu={() => setSceneLibraryContextMenu(null)} onDuplicateScene={duplicateStoredScene} onDeleteScene={deleteStoredScene} onBackupScene={backupStoredSceneToCloud} />}
       {assetCategorySave && <AssetCategorySaveDialog asset={assetCategorySave.asset} assets={project.assets.filter((item) => item.isTemplate !== false)} categoryPaths={assetCategoryPaths} onCancel={() => setAssetCategorySave(null)} onSave={saveAssetToLibrary} />}
-      {modelImportDialog && <ModelImportDialog state={modelImportDialog} targetSizeVoxels={modelImportTargetVoxels} mode={modelImportMode} onTargetSizeChange={setModelImportTargetVoxels} onModeChange={setModelImportMode} onStart={runModelImport} onConfirm={confirmModelImport} onCancel={() => setModelImportDialog(null)} />}
+      {modelImportDialog && <ModelImportDialog state={modelImportDialog} targetSizeVoxels={modelImportTargetVoxels} mode={modelImportMode} paletteLimit={activeSceneColorPolicy.maxColors} onTargetSizeChange={setModelImportTargetVoxels} onModeChange={setModelImportMode} onStart={runModelImport} onConfirm={confirmModelImport} onCancel={() => setModelImportDialog(null)} />}
       {sliceDialogOpen && selectedEntityParts.length > 0 && <SliceDialog parts={selectedEntityParts} project={project} name={selectedDisplayName || '选中实体'} onClose={() => setSliceDialogOpen(false)} onNotice={setNotice} />}
       {unsavedDialogOpen && <UnsavedChangesDialog onDecision={handleUnsavedDecision} />}
       {(!authChecked || authDialogOpen || !authUser) && <AuthDialog required={!authChecked || !authUser} mode={authDialogMode} user={authUser} onModeChange={setAuthDialogMode} onClose={() => { if (authUser) setAuthDialogOpen(false) }} onAuthenticated={(user) => { setAuthUser(user); setAuthChecked(true); setAuthDialogOpen(false); void refreshCloudLibrary(); setNotice(`已登录 · ${user.email}`) }} onLogout={async () => { await logoutAuthUser(); setAuthUser(null); setAuthDialogOpen(false); setNotice('已退出登录') }} />}
@@ -6642,12 +6778,13 @@ function AssetSidebar({ assets, categoryPaths, query, setQuery, selectedAssetIds
       const asset = assets.find((item) => item.id === contextMenu.assetId)
       if (!asset) return null
       const color = /^#[0-9a-f]{6}$/i.test(asset.templateColor ?? asset.color) ? (asset.templateColor ?? asset.color) : '#6c827d'
+      const selectedPaletteEntry = nearestMardEntry(color)
       return <div className="asset-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}>
         <button onClick={() => onRenameAsset(asset.id)}>重命名</button>
         <button onClick={() => onDuplicateAsset(asset.id)}>创建副本</button>
         <button onClick={() => onExportAssets([asset.id])}>导出实体文件</button>
         {(() => { const pairedCloudAsset = cloudById.get(asset.id); return <button onClick={() => pairedCloudAsset ? onDeleteCloudAsset(pairedCloudAsset) : onBackupAsset(asset.id)}>{pairedCloudAsset ? '从云端删除' : '备份到云端'}</button> })()}
-        <label className="asset-context-color"><span>修改颜色</span><input type="color" aria-label="选择资产颜色" value={color} onChange={(event) => onChangeAssetColor(asset.id, event.target.value)} /></label>
+        <label className="asset-context-color"><span>修改颜色</span><select aria-label="选择 MARD 资产颜色" value={selectedPaletteEntry.code} onChange={(event) => onChangeAssetColor(asset.id, mardEntryByCode(event.target.value)?.hex ?? color)}>{MARD_221_ENTRIES.map((entry) => <option key={entry.code} value={entry.code}>{entry.code} · {entry.hex.toUpperCase()}</option>)}</select></label>
         <button className="danger" onClick={() => onDeleteAsset(asset.id, Boolean(cloudById.get(asset.id)))}>删除资产</button>
       </div>
     })()}
@@ -6692,7 +6829,7 @@ function AssetCategorySaveDialog({ asset, assets, categoryPaths: storedCategoryP
   </div>
 }
 
-function ModelImportDialog({ state, targetSizeVoxels, mode, onTargetSizeChange, onModeChange, onStart, onConfirm, onCancel }: { state: ModelImportDialogState; targetSizeVoxels: number; mode: VoxelizeMode; onTargetSizeChange: (value: number) => void; onModeChange: (value: VoxelizeMode) => void; onStart: () => void; onConfirm: () => void; onCancel: () => void }) {
+function ModelImportDialog({ state, targetSizeVoxels, mode, paletteLimit, onTargetSizeChange, onModeChange, onStart, onConfirm, onCancel }: { state: ModelImportDialogState; targetSizeVoxels: number; mode: VoxelizeMode; paletteLimit: number; onTargetSizeChange: (value: number) => void; onModeChange: (value: VoxelizeMode) => void; onStart: () => void; onConfirm: () => void; onCancel: () => void }) {
   const result = state.result
   const diagnostics = result?.diagnostics
   const nativeVox = state.file.name.toLowerCase().endsWith('.vox')
@@ -6704,6 +6841,7 @@ function ModelImportDialog({ state, targetSizeVoxels, mode, onTargetSizeChange, 
         <div className="model-import-settings">
           <label className="model-import-field"><span>目标最大尺寸</span><div><NumericInput min={1} max={MAX_TARGET_SIZE_VOXELS} integer value={targetSizeVoxels} disabled={state.busy || nativeVox} onCommit={onTargetSizeChange} /><em>体素</em></div></label>
           <div className="model-import-field"><span>体素化方式</span><div className="model-import-mode"><button className={mode === 'solid' ? 'active' : ''} disabled={state.busy || nativeVox} onClick={() => onModeChange('solid')}>实体填充</button><button className={mode === 'surface' ? 'active' : ''} disabled={state.busy || nativeVox} onClick={() => onModeChange('surface')}>仅表面</button></div></div>
+          <div className="model-import-field"><span>场景色卡</span><div className="model-import-palette-policy">MARD 221 · 最多 {paletteLimit} 色</div></div>
           <p className="model-import-hint">{nativeVox ? 'VOX 已经是体素格式，将直接读取其体素坐标和颜色，不进行网格采样。' : '模型导入后会作为一个完整实体保存，内部保留全部体素与材质信息；目标最大尺寸指模型包围盒最长边的体素数量。实体填充适合封闭模型；开放模型会提示可能需要手工修补。'}</p>
         </div>
         <div className="model-import-preview"><div className="model-import-preview-title"><span>体素预览</span><span>{sizeLabel}</span></div>{result ? <VoxelMiniPreview voxels={result.asset.voxels} asset={result.asset} exteriorOnly /> : <div className="model-import-empty">设置参数后点击“开始体素化”</div>}</div>
@@ -7176,7 +7314,7 @@ function ToolButton({ icon, label, description, active, onClick }: { icon: React
   return <button className={`tool-button ${active ? 'active' : ''}`} data-tooltip={description} aria-label={label} onClick={onClick} title={description}>{icon}</button>
 }
 
-function Inspector({ entityName, source, selectedAsset, selectedPart, selectedParts, selectedTransformSignature, editEntityId, canEnterEditMode, editTargetId, selectedColor, previewColor, previewVoxelColors, previewMaterialColors, copyPreview, transformPreview, geometryPreview, shellThicknessOptions, scaleOptions, exportBusy, onChangeColor, onPreviewHsl, onCommitHsl, onMirror, onRotate, onConfirmTransform, onCancelTransform, onExport, onExportGlb, onExportVox, onExportEntityFile, onOpenSlicer, onDuplicate, onChangeCopyDirection, onChangeCopyGap, onConfirmDuplicate, onCancelDuplicate, onStartShell, onStartScale, onChangeShellThickness, onChangeScale, onConfirmGeometry, onCancelGeometry, onDelete, onSaveAsAsset, onEnterEditMode }: { entityName: string; source: string; selectedAsset?: VoxelAsset; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; selectedTransformSignature: string; editEntityId: string | null; canEnterEditMode: boolean; editTargetId: string; selectedColor: string; previewColor?: string; previewVoxelColors: Record<string, string>; previewMaterialColors: Record<string, string>; copyPreview: CopyPreviewState | null; transformPreview: DiscreteTransformPreviewState | null; geometryPreview: GeometryPreviewState | null; shellThicknessOptions: number[]; scaleOptions: { up: number[]; down: number[] }; exportBusy: boolean; onChangeColor: (color: string) => void; onPreviewHsl: (hueDelta: number, saturationTarget: number) => void; onCommitHsl: (hueDelta: number, saturationTarget: number) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onConfirmTransform: () => void; onCancelTransform: () => void; onExport: () => void; onExportGlb: () => void | Promise<void>; onExportVox: () => void; onExportEntityFile: () => void; onOpenSlicer: () => void; onDuplicate: (count: number) => void; onChangeCopyDirection: (axis: CopyDirectionAxis, sign: 1 | -1) => void; onChangeCopyGap: (gap: number) => void; onConfirmDuplicate: () => void; onCancelDuplicate: () => void; onStartShell: () => void; onStartScale: (mode: GeometryScaleMode) => void; onChangeShellThickness: (value: number) => void; onChangeScale: (mode: GeometryScaleMode, value: number) => void; onConfirmGeometry: () => void; onCancelGeometry: () => void; onDelete: () => void; onSaveAsAsset: () => void; onEnterEditMode: (entityId: string) => void }) {
+function Inspector({ entityName, source, selectedAsset, selectedPart, selectedParts, selectedTransformSignature, editEntityId, canEnterEditMode, editTargetId, selectedColor, paletteEntries, previewColor, previewVoxelColors, previewMaterialColors, copyPreview, transformPreview, geometryPreview, shellThicknessOptions, scaleOptions, exportBusy, onChangeColor, onPreviewHsl, onCommitHsl, onMirror, onRotate, onConfirmTransform, onCancelTransform, onExport, onExportGlb, onExportVox, onExportEntityFile, onOpenSlicer, onDuplicate, onChangeCopyDirection, onChangeCopyGap, onConfirmDuplicate, onCancelDuplicate, onStartShell, onStartScale, onChangeShellThickness, onChangeScale, onConfirmGeometry, onCancelGeometry, onDelete, onSaveAsAsset, onEnterEditMode }: { entityName: string; source: string; selectedAsset?: VoxelAsset; selectedPart?: SceneEntityPart; selectedParts: SceneEntityPart[]; selectedTransformSignature: string; editEntityId: string | null; canEnterEditMode: boolean; editTargetId: string; selectedColor: string; paletteEntries: PaletteEntry[]; previewColor?: string; previewVoxelColors: Record<string, string>; previewMaterialColors: Record<string, string>; copyPreview: CopyPreviewState | null; transformPreview: DiscreteTransformPreviewState | null; geometryPreview: GeometryPreviewState | null; shellThicknessOptions: number[]; scaleOptions: { up: number[]; down: number[] }; exportBusy: boolean; onChangeColor: (color: string) => void; onPreviewHsl: (hueDelta: number, saturationTarget: number) => void; onCommitHsl: (hueDelta: number, saturationTarget: number) => void; onMirror: (axis: 'x' | 'y' | 'z') => void; onRotate: (axis: 'x' | 'y' | 'z', degrees: 90 | 180 | 270) => void; onConfirmTransform: () => void; onCancelTransform: () => void; onExport: () => void; onExportGlb: () => void | Promise<void>; onExportVox: () => void; onExportEntityFile: () => void; onOpenSlicer: () => void; onDuplicate: (count: number) => void; onChangeCopyDirection: (axis: CopyDirectionAxis, sign: 1 | -1) => void; onChangeCopyGap: (gap: number) => void; onConfirmDuplicate: () => void; onCancelDuplicate: () => void; onStartShell: () => void; onStartScale: (mode: GeometryScaleMode) => void; onChangeShellThickness: (value: number) => void; onChangeScale: (mode: GeometryScaleMode, value: number) => void; onConfirmGeometry: () => void; onCancelGeometry: () => void; onDelete: () => void; onSaveAsAsset: () => void; onEnterEditMode: (entityId: string) => void }) {
   const [copyCount, setCopyCount] = useState(1)
   const [mirrorAxis, setMirrorAxis] = useState<'x' | 'y' | 'z'>('x')
   const [rotateAxis, setRotateAxis] = useState<'x' | 'y' | 'z'>('z')
@@ -7238,7 +7376,7 @@ function Inspector({ entityName, source, selectedAsset, selectedPart, selectedPa
     {selectedParts.length > 0 && <>
       <div className="inspector-section color-section">
         <div className="section-heading"><span>颜色</span><span className="instance-label">实体覆盖色</span></div>
-        <ColorEditor color={selectedColor} disabled={false} onChange={onChangeColor} onPreviewHsl={onPreviewHsl} onCommitHsl={onCommitHsl} />
+        <ColorEditor color={selectedColor} paletteEntries={paletteEntries} disabled={false} onChange={onChangeColor} onPreviewHsl={onPreviewHsl} onCommitHsl={onCommitHsl} />
       </div>
       <div className="inspector-section entity-actions-section">
       <div className="section-heading"><span>实体操作</span><span className="instance-label">{selectedParts.length} 个实体</span></div>
@@ -7327,17 +7465,23 @@ type SliceCanvasOptions = {
   maxPixels?: number
   cellSize?: number
   includeLabel?: boolean
+  includeLegend?: boolean
 }
 
 function drawSliceCanvas(layer: SliceLayer, options: SliceCanvasOptions = {}): HTMLCanvasElement {
-  const padding = 24
+  const stats = slicePatternStats(layer)
+  const axisPadding = options.includeLabel === false ? 8 : 42
+  const headerHeight = options.includeLabel === false ? 0 : 42
   const maxDimension = Math.max(layer.width, layer.height)
   const maxPixels = options.maxPixels ?? 1100
-  const cellSize = options.cellSize ?? Math.max(1, Math.min(16, Math.floor((maxPixels - padding * 2) / maxDimension)))
-  const labelHeight = options.includeLabel === false ? 0 : 24
+  const cellSize = options.cellSize ?? Math.max(1, Math.min(18, Math.floor((maxPixels - axisPadding * 2) / maxDimension)))
+  const includeLegend = options.includeLabel !== false && options.includeLegend !== false
+  const legendColumns = Math.max(1, Math.min(5, stats.legend.length))
+  const legendRows = includeLegend ? Math.ceil(stats.legend.length / legendColumns) : 0
+  const legendHeight = includeLegend ? 30 + legendRows * 24 : 0
   const canvas = document.createElement('canvas')
-  canvas.width = padding * 2 + layer.width * cellSize
-  canvas.height = padding * 2 + labelHeight + layer.height * cellSize
+  canvas.width = axisPadding * 2 + layer.width * cellSize
+  canvas.height = axisPadding * 2 + headerHeight + layer.height * cellSize + legendHeight
   const context = canvas.getContext('2d')
   if (!context) return canvas
   context.imageSmoothingEnabled = false
@@ -7350,27 +7494,74 @@ function drawSliceCanvas(layer: SliceLayer, options: SliceCanvasOptions = {}): H
   for (let row = 0; row < layer.height; row += 1) {
     for (let column = 0; column < layer.width; column += 1) {
       const voxel = pixels.get(`${layer.minU + column},${layer.maxV - row}`)
-      const x = padding + column * cellSize
-      const y = padding + labelHeight + row * cellSize
+      const x = axisPadding + column * cellSize
+      const y = axisPadding + headerHeight + row * cellSize
       context.fillStyle = voxel?.color ?? '#ffffff'
       context.fillRect(x, y, cellSize, cellSize)
       context.strokeStyle = voxel ? 'rgba(40,48,48,.28)' : 'rgba(120,130,130,.18)'
       context.lineWidth = 1
       context.strokeRect(x + .5, y + .5, Math.max(0, cellSize - 1), Math.max(0, cellSize - 1))
+      if (voxel && cellSize >= 11) {
+        context.fillStyle = readableTextColor(voxel.color)
+        context.font = `${Math.max(6, Math.min(9, Math.floor(cellSize * .45)))}px sans-serif`
+        context.textAlign = 'center'
+        context.textBaseline = 'middle'
+        context.fillText(voxel.colorCode || nearestMardEntry(voxel.color).code, x + cellSize / 2, y + cellSize / 2)
+      }
     }
   }
   if (options.includeLabel !== false) {
     context.fillStyle = '#283033'
-    context.font = '12px sans-serif'
-    context.fillText(`${slicePlaneLabel(layer.plane)} · 层 ${layer.index + 1} · 坐标 ${layer.coordinate}`, 8, 16)
+    context.textAlign = 'left'
+    context.textBaseline = 'alphabetic'
+    context.font = '700 15px sans-serif'
+    context.fillText(`MARD · ${layer.width}×${layer.height} · ${stats.colorCount} 色 / 共 ${stats.total} 颗`, 12, 19)
+    context.font = '10px sans-serif'
+    context.fillStyle = '#66716d'
+    context.fillText(`${slicePlaneLabel(layer.plane)} · 第 ${layer.index + 1} 层 · 坐标 ${layer.coordinate}`, 12, 34)
+    context.font = '9px sans-serif'
+    context.fillStyle = '#4b5551'
+    context.textAlign = 'center'
+    context.textBaseline = 'middle'
+    const gridTop = axisPadding + headerHeight
+    const gridBottom = gridTop + layer.height * cellSize
+    const gridLeft = axisPadding
+    const gridRight = gridLeft + layer.width * cellSize
+    patternAxisLabels(layer.width).forEach(({ index, label }) => {
+      const x = gridLeft + (index + .5) * cellSize
+      context.fillText(String(label), x, gridTop - 12)
+      context.fillText(String(label), x, gridBottom + 12)
+    })
+    patternAxisLabels(layer.height).forEach(({ index, label }) => {
+      const y = gridTop + (index + .5) * cellSize
+      context.fillText(String(label), gridLeft - 16, y)
+      context.fillText(String(label), gridRight + 16, y)
+    })
+    if (includeLegend) {
+      const legendTop = gridBottom + axisPadding
+      const legendWidth = Math.max(1, (canvas.width - 24) / legendColumns)
+      stats.legend.forEach((entry, index) => {
+        const column = index % legendColumns
+        const row = Math.floor(index / legendColumns)
+        const x = 12 + column * legendWidth
+        const y = legendTop + row * 24
+        context.fillStyle = entry.color
+        context.fillRect(x, y, 20, 16)
+        context.strokeStyle = 'rgba(40,48,48,.25)'
+        context.strokeRect(x + .5, y + .5, 19, 15)
+        context.fillStyle = '#343c39'
+        context.textAlign = 'left'
+        context.fillText(`${entry.code} ×${entry.count}`, x + 26, y + 8)
+      })
+    }
   }
   return canvas
 }
 
-function SliceLayerCanvas({ layer }: { layer: SliceLayer }) {
+function SliceLayerCanvas({ layer, compact = false }: { layer: SliceLayer; compact?: boolean }) {
   const ref = useRef<HTMLCanvasElement>(null)
   useEffect(() => {
-    const source = drawSliceCanvas(layer, { maxPixels: 260 })
+    const source = drawSliceCanvas(layer, { maxPixels: compact ? 180 : 760, includeLegend: !compact })
     const target = ref.current
     if (!target) return
     target.width = source.width
@@ -7379,7 +7570,7 @@ function SliceLayerCanvas({ layer }: { layer: SliceLayer }) {
     if (!context) return
     context.imageSmoothingEnabled = false
     context.drawImage(source, 0, 0)
-  }, [layer])
+  }, [compact, layer])
   return <canvas ref={ref} className="slice-layer-canvas" aria-label={`第 ${layer.index + 1} 层二维图纸`} />
 }
 
@@ -7400,21 +7591,30 @@ function joinBinary(chunks: Uint8Array[]): Uint8Array {
   return output
 }
 
-function canvasToPdf(canvas: HTMLCanvasElement): ArrayBuffer {
-  const dataUrl = canvas.toDataURL('image/jpeg', 1)
-  const encoded = dataUrl.split(',')[1] ?? ''
-  const binary = atob(encoded)
-  const jpeg = new Uint8Array(binary.length)
-  for (let index = 0; index < binary.length; index += 1) jpeg[index] = binary.charCodeAt(index)
-  const width = canvas.width
-  const height = canvas.height
-  const content = `q\n${width} 0 0 ${height} 0 0 cm\n/Im0 Do\nQ\n`
+function canvasesToPdf(canvases: HTMLCanvasElement[]): ArrayBuffer {
+  const pageObjects = canvases.map((canvas, index) => {
+    const encoded = canvas.toDataURL('image/jpeg', 1).split(',')[1] ?? ''
+    const binary = atob(encoded)
+    const jpeg = new Uint8Array(binary.length)
+    for (let byteIndex = 0; byteIndex < binary.length; byteIndex += 1) jpeg[byteIndex] = binary.charCodeAt(byteIndex)
+    const pageObjectId = 3 + index * 3
+    const imageObjectId = pageObjectId + 1
+    const contentObjectId = pageObjectId + 2
+    const imageName = `Im${index}`
+    const content = `q\n${canvas.width} 0 0 ${canvas.height} 0 0 cm\n/${imageName} Do\nQ\n`
+    return {
+      pageObjectId,
+      objects: [
+        asciiBytes(`<< /Type /Page /Parent 2 0 R /Resources << /XObject << /${imageName} ${imageObjectId} 0 R >> >> /MediaBox [0 0 ${canvas.width} ${canvas.height}] /Contents ${contentObjectId} 0 R >>`),
+        joinBinary([asciiBytes(`<< /Type /XObject /Subtype /Image /Width ${canvas.width} /Height ${canvas.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`), jpeg, asciiBytes('\nendstream')]),
+        joinBinary([asciiBytes(`<< /Length ${asciiBytes(content).length} >>\nstream\n`), asciiBytes(content), asciiBytes('endstream')]),
+      ],
+    }
+  })
   const objects = [
     asciiBytes('<< /Type /Catalog /Pages 2 0 R >>'),
-    asciiBytes('<< /Type /Pages /Kids [3 0 R] /Count 1 >>'),
-    asciiBytes(`<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Im0 4 0 R >> >> /MediaBox [0 0 ${width} ${height}] /Contents 5 0 R >>`),
-    joinBinary([asciiBytes(`<< /Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`), jpeg, asciiBytes('\nendstream')]),
-    joinBinary([asciiBytes(`<< /Length ${asciiBytes(content).length} >>\nstream\n`), asciiBytes(content), asciiBytes('endstream')]),
+    asciiBytes(`<< /Type /Pages /Kids [${pageObjects.map((page) => `${page.pageObjectId} 0 R`).join(' ')}] /Count ${pageObjects.length} >>`),
+    ...pageObjects.flatMap((page) => page.objects),
   ]
   const chunks: Uint8Array[] = [asciiBytes('%PDF-1.4\n%\xff\xff\xff\xff\n')]
   const offsets: number[] = [0]
@@ -7484,22 +7684,39 @@ function SliceDialog({ parts, project, name, onClose, onNotice }: { parts: Scene
   const [imageMode, setImageMode] = useState<'separate' | 'merged'>('separate')
   const [modelFormat, setModelFormat] = useState<'stl' | 'glb' | 'vox'>('stl')
   const [activeLayerIndex, setActiveLayerIndex] = useState(0)
-  const layers = useMemo(() => sliceEntityParts(parts, plane, (voxel, part) => scenePartVoxelDisplayColor(project, part, voxel)), [parts, plane, project])
+  const layers = useMemo(() => sliceEntityParts(parts, plane, (voxel, part) => {
+    const color = scenePartVoxelDisplayColor(project, part, voxel)
+    const code = paletteEntryByMaterialId(voxel.paintMaterialId ?? voxel.materialId)?.code
+      ?? mapColorToScenePolicy(color, normalizeSceneColorPolicy(project.colorPolicy)).code
+    return { color, code }
+  }), [parts, plane, project])
   useEffect(() => { setActiveLayerIndex(Math.max(0, Math.min(activeLayerIndex, layers.length - 1))) }, [layers.length])
 
   const exportImages = async () => {
     if (!layers.length) return onNotice('当前选中实体没有可切片的体素')
     try {
-      if (imageMode === 'merged') {
+      const hasOversizedLayer = layers.some((layer) => layer.width > 52 || layer.height > 52)
+      const exportCanvasesForLayer = (layer: SliceLayer) => {
+        if (layer.width <= 52 && layer.height <= 52) return [{ suffix: '', canvas: drawSliceCanvas(layer) }]
+        const pages = slicePatternPages(layer, 52)
+        return [
+          { suffix: '-总览', canvas: drawSliceCanvas(layer) },
+          ...pages.map((page) => ({ suffix: `-分页${page.row + 1}-${page.column + 1}`, canvas: drawSliceCanvas(sliceLayerForPatternPage(layer, page), { cellSize: 16 }) })),
+        ]
+      }
+      if (imageFormat === 'pdf') {
+        const canvases = layers.flatMap((layer) => exportCanvasesForLayer(layer).map((entry) => entry.canvas))
+        downloadBlob(new Blob([canvasesToPdf(canvases)], { type: 'application/pdf' }), `${name}-${slicePlaneLabel(plane)}-切面图纸.pdf`)
+      } else if (imageMode === 'merged' && !hasOversizedLayer) {
         const canvas = renderSliceContactSheet(layers)
-        const data = imageFormat === 'pdf' ? canvasToPdf(canvas) : await canvasToBlob(canvas, imageFormat)
-        downloadBlob(data instanceof Blob ? data : new Blob([data], { type: 'application/pdf' }), `${name}-${slicePlaneLabel(plane)}-切面.${imageFormat}`)
+        downloadBlob(await canvasToBlob(canvas, imageFormat), `${name}-${slicePlaneLabel(plane)}-切面.${imageFormat}`)
       } else {
         const entries = []
         for (const layer of layers) {
-          const canvas = drawSliceCanvas(layer)
-          const data = imageFormat === 'pdf' ? canvasToPdf(canvas) : await canvasToBlob(canvas, imageFormat)
-          entries.push({ name: `${name}-${slicePlaneLabel(plane)}-层${layer.index + 1}.${imageFormat}`, data: data instanceof Blob ? await data.arrayBuffer() : data })
+          for (const item of exportCanvasesForLayer(layer)) {
+            const data = await canvasToBlob(item.canvas, imageFormat)
+            entries.push({ name: `${name}-${slicePlaneLabel(plane)}-层${layer.index + 1}${item.suffix}.${imageFormat}`, data: await data.arrayBuffer() })
+          }
         }
         downloadBlob(new Blob([createZip(entries)], { type: 'application/zip' }), `${name}-${slicePlaneLabel(plane)}-切面图纸.zip`)
       }
@@ -7532,7 +7749,7 @@ function SliceDialog({ parts, project, name, onClose, onNotice }: { parts: Scene
   return <div className="modal-backdrop slicer-backdrop"><section className="slicer-dialog" role="dialog" aria-modal="true" aria-label="模型实体模型切片">
     <header className="slicer-header"><div><h2>模型实体模型切片</h2><p>{name} · {layers.length} 个非空切片层</p></div><button className="icon-button" aria-label="关闭切片" onClick={onClose}><X size={17} /></button></header>
     <div className="slicer-toolbar"><label>切片平面<select value={plane} onChange={(event) => setPlane(event.target.value as SlicePlane)}><option value="xy">XZ</option><option value="xz">XY</option><option value="yz">YZ</option></select></label><label>图纸格式<select value={imageFormat} onChange={(event) => setImageFormat(event.target.value as 'png' | 'jpg' | 'pdf')}><option value="png">PNG</option><option value="jpg">JPG</option><option value="pdf">PDF</option></select></label><label>图纸方式<select value={imageMode} onChange={(event) => setImageMode(event.target.value as 'separate' | 'merged')}><option value="separate">分开导出 ZIP</option><option value="merged">合并为一张图片</option></select></label><button className="primary slicer-export-button" disabled={!layers.length} onClick={() => void exportImages()}>导出二维图纸</button></div>
-    <div className="slicer-content"><div className="slicer-layer-list">{layers.length ? layers.map((layer) => <button key={`${layer.coordinate}-${layer.index}`} className={`slicer-layer-card ${activeLayerIndex === layer.index ? 'active' : ''}`} onClick={() => setActiveLayerIndex(layer.index)}><SliceLayerCanvas layer={layer} /><span>第 {layer.index + 1} 层 · 坐标 {layer.coordinate} · {layer.voxels.length} 体素</span></button>) : <div className="empty-panel">当前实体没有可切片的体素</div>}</div><div className="slicer-main-preview">{layers[activeLayerIndex] ? <><SliceLayerCanvas layer={layers[activeLayerIndex]} /><div className="slicer-layer-meta">{slicePlaneLabel(plane)} · 第 {activeLayerIndex + 1} 层 · {layers[activeLayerIndex].width} × {layers[activeLayerIndex].height} 格</div></> : <div className="empty-panel">暂无切片预览</div>}</div></div>
+    <div className="slicer-content"><div className="slicer-layer-list">{layers.length ? layers.map((layer) => <button key={`${layer.coordinate}-${layer.index}`} className={`slicer-layer-card ${activeLayerIndex === layer.index ? 'active' : ''}`} onClick={() => setActiveLayerIndex(layer.index)}><SliceLayerCanvas layer={layer} compact /><span>第 {layer.index + 1} 层 · 坐标 {layer.coordinate} · {layer.voxels.length} 体素</span></button>) : <div className="empty-panel">当前实体没有可切片的体素</div>}</div><div className="slicer-main-preview">{layers[activeLayerIndex] ? <><SliceLayerCanvas layer={layers[activeLayerIndex]} /><div className="slicer-layer-meta">{slicePlaneLabel(plane)} · 第 {activeLayerIndex + 1} 层 · {layers[activeLayerIndex].width} × {layers[activeLayerIndex].height} 格</div></> : <div className="empty-panel">暂无切片预览</div>}</div></div>
     <footer className="slicer-footer"><label>模型格式<select value={modelFormat} onChange={(event) => setModelFormat(event.target.value as 'stl' | 'glb' | 'vox')}><option value="stl">多个 STL</option><option value="glb">多个 GLB</option><option value="vox">多个 VOX</option></select></label><button className="primary slicer-export-button" disabled={!layers.length} onClick={() => void exportModels()}>导出模型切片 ZIP</button></footer>
   </section></div>
 }
@@ -7878,8 +8095,7 @@ const VoxelMiniPreview = React.memo(function VoxelMiniPreview(props: { voxels: V
     : <SynchronousVoxelMiniPreview {...props} />
 })
 
-function ColorEditor({ color, disabled, onChange, onPreviewHsl, onCommitHsl }: { color: string; disabled: boolean; onChange: (color: string) => void; onPreviewHsl: (hueDelta: number, saturationTarget: number) => void; onCommitHsl: (hueDelta: number, saturationTarget: number) => void }) {
-  const colorInputRef = useRef<HTMLInputElement>(null)
+function ColorEditor({ color, paletteEntries, disabled, onChange, onPreviewHsl, onCommitHsl }: { color: string; paletteEntries: PaletteEntry[]; disabled: boolean; onChange: (color: string) => void; onPreviewHsl: (hueDelta: number, saturationTarget: number) => void; onCommitHsl: (hueDelta: number, saturationTarget: number) => void }) {
   const [hue, setHue] = useState(() => hexToHsl(color).h)
   const [saturation, setSaturation] = useState(() => hexToHsl(color).s)
   const hueRef = useRef(hue)
@@ -7911,9 +8127,12 @@ function ColorEditor({ color, disabled, onChange, onPreviewHsl, onCommitHsl }: {
     onCommitHsl(hueRef.current - base.hue, saturationRef.current)
     hslSessionRef.current = null
   }
+  const selectedEntry = nearestMardEntry(color, paletteEntries.map((entry) => entry.code))
   return <div className="color-editor">
-    <button className="inspector-color-button" aria-label="打开颜色选择器" title="选择实体颜色" disabled={disabled} style={{ background: color }} onClick={() => colorInputRef.current?.click()}><Palette size={14} /></button>
-    <input ref={colorInputRef} className="hidden-color-input" type="color" value={/^#[0-9a-f]{6}$/i.test(color) ? color : '#6c827d'} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
+    <span className="inspector-color-button" aria-label={`当前颜色 MARD ${selectedEntry.code}`} title={`MARD ${selectedEntry.code}`} style={{ background: selectedEntry.hex, color: readableTextColor(selectedEntry.hex) }}><Palette size={14} /></span>
+    <select className="mard-color-select" aria-label="选择 MARD 色号" value={selectedEntry.code} disabled={disabled} onChange={(event) => onChange(mardEntryByCode(event.target.value)?.hex ?? color)}>
+      {paletteEntries.map((entry) => <option key={entry.code} value={entry.code}>{entry.code} · {entry.hex.toUpperCase()}</option>)}
+    </select>
     <div className="color-sliders">
       <label><span>色调</span><input aria-label="色调" type="range" min="0" max="360" value={hue} disabled={disabled} onPointerDown={beginHslSession} onPointerUp={commitHsl} onPointerCancel={commitHsl} onBlur={commitHsl} onChange={(event) => { const next = Number(event.target.value); hueRef.current = next; setHue(next); previewHsl(next, saturationRef.current) }} /></label>
       <label><span>饱和度</span><input aria-label="饱和度" type="range" min="0" max="100" value={saturation} disabled={disabled} onPointerDown={beginHslSession} onPointerUp={commitHsl} onPointerCancel={commitHsl} onBlur={commitHsl} onChange={(event) => { const next = Number(event.target.value); saturationRef.current = next; setSaturation(next); previewHsl(hueRef.current, next) }} /></label>
@@ -7922,15 +8141,13 @@ function ColorEditor({ color, disabled, onChange, onPreviewHsl, onCommitHsl }: {
 }
 
 function ViewportPalette({ materials, activeMaterial, onSelectMaterial, onReplaceMaterial }: { materials: Material[]; activeMaterial: string; onSelectMaterial: (id: string) => void; onReplaceMaterial: (id: string, color: string) => void }) {
-  const colorInputRef = useRef<HTMLInputElement>(null)
   const active = materials.find((material) => material.id === activeMaterial) ?? materials[0]
   const stopViewportPointer = (event: React.PointerEvent) => event.stopPropagation()
   return <div className="viewport-palette" aria-label="最近使用颜色">
     <div className="viewport-palette-swatches">
       {materials.map((material) => <button key={material.id} className={`viewport-swatch ${active?.id === material.id ? 'active' : ''}`} title={`${material.name} · 点击选择，选中后可替换`} aria-label={`选择颜色 ${material.name}`} style={{ background: material.color }} onPointerDown={stopViewportPointer} onPointerUp={stopViewportPointer} onClick={() => onSelectMaterial(material.id)} />)}
     </div>
-    <input ref={colorInputRef} className="hidden-color-input" type="color" value={active?.color ?? '#ffffff'} onChange={(event) => active && onReplaceMaterial(active.id, event.target.value)} />
-    <button className="viewport-color-picker" aria-label="打开 RGB 调色盘" title="替换当前颜色" onPointerDown={stopViewportPointer} onPointerUp={stopViewportPointer} onClick={() => colorInputRef.current?.click()}><Palette size={16} /></button>
+    <button className="viewport-color-picker" aria-label="当前场景使用 MARD 限定色" title="颜色由场景 MARD 色卡统一管理" onPointerDown={stopViewportPointer} onPointerUp={stopViewportPointer} onClick={() => active && onReplaceMaterial(active.id, active.color)}><Palette size={16} /></button>
   </div>
 }
 

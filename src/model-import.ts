@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { MATERIALS, Material, Voxel, VoxelAsset } from './voxel'
+import { deltaE2000, normalizeHexColor } from './color-palettes'
 
 export type VoxelizeMode = 'surface' | 'solid'
 
@@ -163,20 +164,13 @@ function textureSamplerForMaterial(material: THREE.Material | undefined): Textur
   }
 }
 
-function colorDistance(left: string, right: string): number {
-  const toRgb = (value: string) => [0, 2, 4].map((offset) => parseInt(value.slice(offset + 1, offset + 3), 16))
-  const a = toRgb(left)
-  const b = toRgb(right)
-  return Math.sqrt(a.reduce((sum, channel, index) => sum + (channel - b[index]) ** 2, 0))
-}
-
 function nearestPaletteMaterial(color: string | undefined, palette: Material[], fallback: string): string {
   if (!color) return fallback
   let best = palette.find((material) => material.id === color || material.name.toLowerCase() === color.toLowerCase())
   if (best) return best.id
   best = palette
     .filter((material) => parseHexColor(material.color))
-    .sort((left, right) => colorDistance(color, left.color) - colorDistance(color, right.color))[0]
+    .sort((left, right) => deltaE2000(color, left.color) - deltaE2000(color, right.color))[0]
   return best?.id ?? fallback
 }
 
@@ -349,9 +343,10 @@ function multipliedColorHex(baseColor: string, vertexColor: THREE.Color): string
   return `#${new THREE.Color(baseColor).multiply(vertexColor).getHexString()}`
 }
 
-function markSurfaceVoxels(triangles: NormalizedTriangle[], dimensions: { width: number; height: number; depth: number }, onProgress?: (progress: number) => void): { keys: Set<string>; materialByKey: Map<string, string>; partByKey: Map<string, string> } {
+function markSurfaceVoxels(triangles: NormalizedTriangle[], dimensions: { width: number; height: number; depth: number }, palette: Material[], fallbackMaterial: string, onProgress?: (progress: number) => void): { keys: Set<string>; materialByKey: Map<string, string>; sourceColorByKey: Map<string, string>; partByKey: Map<string, string> } {
   const keys = new Set<string>()
   const materialByKey = new Map<string, string>()
+  const sourceColorByKey = new Map<string, string>()
   const partByKey = new Map<string, string>()
   triangles.forEach((triangle, triangleIndex) => {
     const minX = Math.max(0, Math.floor(Math.min(triangle.a.x, triangle.b.x, triangle.c.x) - 1))
@@ -376,13 +371,15 @@ function markSurfaceVoxels(triangles: NormalizedTriangle[], dimensions: { width:
         const resolvedColor = vertexColor
           ? multipliedColorHex(sampledColor ?? triangle.baseColor ?? '#ffffff', vertexColor)
           : sampledColor
-        materialByKey.set(key, resolvedColor ?? triangle.materialId)
+        const sourceColor = normalizeHexColor(resolvedColor ?? triangle.baseColor ?? palette.find((material) => material.id === triangle.materialId)?.color)
+        materialByKey.set(key, nearestPaletteMaterial(sourceColor, palette, fallbackMaterial))
+        sourceColorByKey.set(key, sourceColor)
         partByKey.set(key, triangle.partId)
       }
     }
     onProgress?.((triangleIndex + 1) / Math.max(1, triangles.length))
   })
-  return { keys, materialByKey, partByKey }
+  return { keys, materialByKey, sourceColorByKey, partByKey }
 }
 
 function rayIntersectionX(origin: THREE.Vector3, triangle: NormalizedTriangle): number | undefined {
@@ -437,10 +434,10 @@ function meshIsClosed(triangles: NormalizedTriangle[]): boolean {
   return edges.size > 0 && [...edges.values()].every((count) => count === 2)
 }
 
-function createAssetFromVoxelKeys(fileName: string, keys: Set<string>, materialByKey: Map<string, string>, dimensions: { width: number; height: number; depth: number }, palette: Material[], fallbackMaterial: string, color: string): VoxelAsset {
+function createAssetFromVoxelKeys(fileName: string, keys: Set<string>, materialByKey: Map<string, string>, sourceColorByKey: Map<string, string>, dimensions: { width: number; height: number; depth: number }, palette: Material[], fallbackMaterial: string, color: string): VoxelAsset {
   const voxels: Voxel[] = [...keys].map((key) => {
     const [x, y, z] = key.split(',').map(Number)
-    return { x, y, z, materialId: materialByKey.get(key) ?? fallbackMaterial }
+    return { x, y, z, materialId: materialByKey.get(key) ?? fallbackMaterial, sourceColor: sourceColorByKey.get(key) ?? color }
   })
   const primaryMaterial = palette.find((material) => material.id === fallbackMaterial)
   return {
@@ -473,10 +470,11 @@ export async function importModelBufferAsVoxelAssetWithDiagnostics(fileName: str
   // not leak into the imported entity. Those formats intentionally start
   // neutral gray and can be recolored by the user afterward.
   const preserveEmbeddedColors = extension === 'glb' || extension === 'gltf'
-  const importedFallbackMaterial = preserveEmbeddedColors ? fallbackMaterial : DEFAULT_IMPORTED_MODEL_COLOR
-  const importedColor = preserveEmbeddedColors
+  const fallbackSourceColor = preserveEmbeddedColors
     ? palette.find((material) => material.id === fallbackMaterial)?.color ?? DEFAULT_IMPORTED_MODEL_COLOR
     : DEFAULT_IMPORTED_MODEL_COLOR
+  const importedFallbackMaterial = nearestPaletteMaterial(fallbackSourceColor, palette, fallbackMaterial)
+  const importedColor = palette.find((material) => material.id === importedFallbackMaterial)?.color ?? fallbackSourceColor
   options.onProgress?.(0.02, '正在解析模型')
   let object: THREE.Object3D
   if (extension === 'glb' || extension === 'gltf') object = await parseGltf(buffer)
@@ -488,7 +486,7 @@ export async function importModelBufferAsVoxelAssetWithDiagnostics(fileName: str
   const normalized = normalizeTriangles(triangles, targetSizeVoxels)
   const dimensions = { width: normalized.width, height: normalized.height, depth: normalized.depth }
   const closedMesh = meshIsClosed(normalized.triangles)
-  const surface = markSurfaceVoxels(normalized.triangles, dimensions, (progress) => options.onProgress?.(0.12 + progress * 0.38, '正在生成表面体素'))
+  const surface = markSurfaceVoxels(normalized.triangles, dimensions, palette, importedFallbackMaterial, (progress) => options.onProgress?.(0.12 + progress * 0.38, '正在生成表面体素'))
   const keys = mode === 'solid'
     ? fillSolidVoxels(normalized.triangles, dimensions, (progress) => options.onProgress?.(0.5 + progress * 0.42, '正在填充实体体素'))
     : new Set(surface.keys)
@@ -498,7 +496,10 @@ export async function importModelBufferAsVoxelAssetWithDiagnostics(fileName: str
   if (mode === 'solid' && !closedMesh) warnings.push('模型不是封闭网格，实体填充结果可能需要手动修补')
   if (extension === 'stl') warnings.push('STL 不包含材质和部件信息，已使用默认颜色和材质')
   const materialByKey = preserveEmbeddedColors ? surface.materialByKey : new Map<string, string>()
-  const asset = createAssetFromVoxelKeys(fileName, keys, materialByKey, dimensions, palette, importedFallbackMaterial, importedColor)
+  const sourceColorByKey = preserveEmbeddedColors
+    ? surface.sourceColorByKey
+    : new Map([...keys].map((key) => [key, normalizeHexColor(fallbackSourceColor)]))
+  const asset = createAssetFromVoxelKeys(fileName, keys, materialByKey, sourceColorByKey, dimensions, palette, importedFallbackMaterial, importedColor)
   options.onProgress?.(1, '体素化完成')
   return {
     asset,

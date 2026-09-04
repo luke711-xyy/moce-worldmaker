@@ -1,4 +1,5 @@
 import { DEFAULT_VOXEL_SIZE_MM, MAX_SCENE_BOUND_VOXELS, MAX_VOXEL_SIZE_MM, MIN_SCENE_BOUND_VOXELS, MIN_VOXEL_SIZE_MM, ProjectState, SceneAssembly, SceneBounds, SceneInstance, Voxel, VoxelAsset, VoxelOverride, normalizeVoxelSizeMm, sceneBoundsForProject } from './voxel'
+import { mardEntryByCode } from './color-palettes'
 
 export const MOCE_SCENE_FORMAT = 'moce-scene' as const
 export const MOCE_SCENE_FORMAT_VERSION = 1 as const
@@ -52,6 +53,7 @@ function validateVoxel(value: unknown, label: string, allowMode = false): assert
   requireString(voxel.materialId, `${label}.materialId`)
   if (voxel.entityId !== undefined) requireString(voxel.entityId, `${label}.entityId`)
   if (voxel.paintMaterialId !== undefined) requireString(voxel.paintMaterialId, `${label}.paintMaterialId`)
+  if (voxel.sourceColor !== undefined) requireString(voxel.sourceColor, `${label}.sourceColor`)
   if (voxel.shape !== undefined && (typeof voxel.shape !== 'string' || !['cube', 'tri-prism', 'quarter-cylinder', 'stair'].includes(voxel.shape))) throw new SceneFileError(`${label}.shape无效`)
   if (voxel.facing !== undefined && (typeof voxel.facing !== 'string' || !['+x', '-x', '+y', '-y', '+z', '-z'].includes(voxel.facing))) throw new SceneFileError(`${label}.facing无效`)
   if (voxel.rotation !== undefined && (typeof voxel.rotation !== 'number' || ![0, 1, 2, 3].includes(voxel.rotation))) throw new SceneFileError(`${label}.rotation无效`)
@@ -97,6 +99,16 @@ function validateSceneState(value: unknown): asserts value is PortableSceneState
     requireString(item.name, `scene.materials[${index}].name`)
     requireString(item.color, `scene.materials[${index}].color`)
   })
+  if (scene.colorPolicy !== undefined) {
+    const policy = requirePlainObject(scene.colorPolicy, 'scene.colorPolicy')
+    if (policy.paletteId !== 'mard-221') throw new SceneFileError('scene.colorPolicy.paletteId不受支持')
+    const maxColors = requireNumber(policy.maxColors, 'scene.colorPolicy.maxColors')
+    if (!Number.isInteger(maxColors) || maxColors < 1 || maxColors > 221) throw new SceneFileError('scene.colorPolicy.maxColors必须是1到221之间的整数')
+    const allowedCodes = requireArray(policy.allowedCodes, 'scene.colorPolicy.allowedCodes').map((code, index) => requireString(code, `scene.colorPolicy.allowedCodes[${index}]`))
+    if (allowedCodes.length !== maxColors) throw new SceneFileError('scene.colorPolicy.allowedCodes数量必须等于maxColors')
+    if (new Set(allowedCodes).size !== allowedCodes.length) throw new SceneFileError('scene.colorPolicy.allowedCodes不能包含重复色号')
+    allowedCodes.forEach((code) => { if (!mardEntryByCode(code)) throw new SceneFileError(`scene.colorPolicy包含未知MARD色号：${code}`) })
+  }
   const instances = requireArray(scene.instances, 'scene.instances') as SceneInstance[]
   instances.forEach((instance, index) => {
     const item = requirePlainObject(instance, `scene.instances[${index}]`)

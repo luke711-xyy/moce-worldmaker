@@ -155,6 +155,7 @@ export function computeShell(input: GeometryVoxel[], thickness: number): VoxelGe
       z,
       materialId: source.materialId,
       ...(source.paintMaterialId ? { paintMaterialId: source.paintMaterialId } : {}),
+      ...(source.sourceColor ? { sourceColor: source.sourceColor } : {}),
       ...(source.entityId ? { entityId: source.entityId } : {}),
       ...(source.sourcePartId ? { sourcePartId: source.sourcePartId } : {}),
     })

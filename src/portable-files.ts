@@ -72,6 +72,7 @@ function validateVoxel(value: unknown, label: string) {
   integer(voxel.z, `${label}.z`)
   text(voxel.materialId, `${label}.materialId`)
   if (voxel.paintMaterialId !== undefined) text(voxel.paintMaterialId, `${label}.paintMaterialId`)
+  if (voxel.sourceColor !== undefined) text(voxel.sourceColor, `${label}.sourceColor`)
   if (voxel.shape !== undefined && (typeof voxel.shape !== 'string' || !['cube', 'tri-prism', 'quarter-cylinder', 'stair'].includes(voxel.shape))) throw new PortableFileError(`${label}.shape无效`)
   if (voxel.facing !== undefined && (typeof voxel.facing !== 'string' || !['+x', '-x', '+y', '-y', '+z', '-z'].includes(voxel.facing))) throw new PortableFileError(`${label}.facing无效`)
   if (voxel.rotation !== undefined && (typeof voxel.rotation !== 'number' || ![0, 1, 2, 3].includes(voxel.rotation))) throw new PortableFileError(`${label}.rotation无效`)

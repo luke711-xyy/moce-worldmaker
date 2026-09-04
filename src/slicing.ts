@@ -4,6 +4,7 @@ export type SlicePlane = 'xy' | 'xz' | 'yz'
 
 export type SliceVoxel = Voxel & {
   color: string
+  colorCode: string
 }
 
 export type SliceLayer = {
@@ -19,7 +20,7 @@ export type SliceLayer = {
   voxels: SliceVoxel[]
 }
 
-export type SliceColorResolver = (voxel: Voxel, part: SceneEntityPart) => string
+export type SliceColorResolver = (voxel: Voxel, part: SceneEntityPart) => string | { color: string; code: string }
 
 function planeCoordinates(plane: SlicePlane, voxel: Voxel): { u: number; v: number; layer: number } {
   if (plane === 'xy') return { u: voxel.x, v: voxel.y, layer: voxel.z }
@@ -44,7 +45,10 @@ export function sliceEntityParts(parts: SceneEntityPart[], plane: SlicePlane, re
       overallBounds.maxV = Math.max(overallBounds.maxV, coordinates.v)
       const layer = byCoordinate.get(coordinates.layer) ?? new Map<string, SliceVoxel>()
       const key = `${voxel.x},${voxel.y},${voxel.z}`
-      if (!layer.has(key)) layer.set(key, { ...voxel, color: resolveColor(voxel, part) })
+      const resolved = resolveColor(voxel, part)
+      const color = typeof resolved === 'string' ? resolved : resolved.color
+      const colorCode = typeof resolved === 'string' ? '' : resolved.code
+      if (!layer.has(key)) layer.set(key, { ...voxel, color, colorCode })
       byCoordinate.set(coordinates.layer, layer)
     })
   })

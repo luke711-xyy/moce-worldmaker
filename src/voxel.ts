@@ -1,6 +1,7 @@
 import { buildVoxelSurfaceMesh } from './voxel-surface'
 import { buildVariantGeometry } from './voxel-variant-geometry'
 import { voxelFacing, voxelRotation, voxelShape } from './voxel-variants'
+import { MARD_221_ENTRIES, SceneColorPolicy, createDefaultSceneColorPolicy } from './color-palettes'
 
 export type Material = {
   id: string
@@ -14,6 +15,8 @@ export type Voxel = {
   z: number
   materialId: string
   paintMaterialId?: string
+  /** Continuous/source colour retained before mapping to the active bead card. */
+  sourceColor?: string
   entityId?: string
   /**
    * Keep this voxel entity rendered as individual cells instead of allowing
@@ -148,6 +151,8 @@ export type ProjectState = {
   /** Scene envelope in project voxels: X/Y are the ground plane, Z is height. */
   sceneBounds?: SceneBounds
   materials: Material[]
+  /** Scene-wide bead card and the exact colours currently allowed for edits. */
+  colorPolicy?: SceneColorPolicy
   assets: VoxelAsset[]
   instances: SceneInstance[]
   customVoxels: Voxel[]
@@ -760,7 +765,7 @@ export function resolveInstanceVoxels(asset: VoxelAsset, overrides: VoxelOverrid
       resolved.delete(key)
     } else if (override.mode === 'paint') {
       const existing = resolved.get(key)
-      if (existing) resolved.set(key, { ...existing, paintMaterialId: override.materialId })
+      if (existing) resolved.set(key, { ...existing, paintMaterialId: override.materialId, ...(override.sourceColor ? { sourceColor: override.sourceColor } : {}) })
     } else {
       resolved.set(key, {
         x: override.x,
@@ -768,6 +773,7 @@ export function resolveInstanceVoxels(asset: VoxelAsset, overrides: VoxelOverrid
         z: override.z,
         materialId: override.materialId,
         ...(override.paintMaterialId ? { paintMaterialId: override.paintMaterialId } : {}),
+        ...(override.sourceColor ? { sourceColor: override.sourceColor } : {}),
         ...(override.preserveVoxelCells ? { preserveVoxelCells: override.preserveVoxelCells } : {}),
         ...(override.shape ? {
           shape: override.shape,
@@ -1897,7 +1903,9 @@ export function makeDefaultProject(): ProjectState {
     { id: 'inst-tree-a', assetId: sceneAssetId('tree-basic'), x: -9, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
     { id: 'inst-tree-b', assetId: sceneAssetId('tree-basic'), x: 8, y: 0, z: 0, rotation: 0, style: '基础件', visible: true, overrides: [] },
   ]
-  return { version: 1, sampleRevision: DEFAULT_SAMPLE_REVISION, name: '莫测里·第一街区', voxelSizeMm: DEFAULT_VOXEL_SIZE_MM, sceneSizeCm: 20, sceneBounds: { x: 200, y: 200, z: 200 }, materials: MATERIALS, assets: [...templateAssets, ...sceneAssets], instances, customVoxels: [], customVoxelRenderModes: {}, customColors: {}, customEntityOffsets: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
+  const colorPolicy = createDefaultSceneColorPolicy()
+  const materials = MARD_221_ENTRIES.map((entry) => ({ id: entry.materialId, name: entry.name, color: entry.hex }))
+  return { version: 1, sampleRevision: DEFAULT_SAMPLE_REVISION, name: '莫测里·第一街区', voxelSizeMm: DEFAULT_VOXEL_SIZE_MM, sceneSizeCm: 20, sceneBounds: { x: 200, y: 200, z: 200 }, materials, colorPolicy, assets: [...templateAssets, ...sceneAssets], instances, customVoxels: [], customVoxelRenderModes: {}, customColors: {}, customEntityOffsets: {}, entityNames: {}, assemblySequence: 1, assemblies: [], lockedMemberKeys: [] }
 }
 
 /**

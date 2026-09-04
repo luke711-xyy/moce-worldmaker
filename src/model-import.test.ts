@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import * as THREE from 'three'
+import { MARD_221_ENTRIES, nearestMardEntry } from './color-palettes'
 import { importModelAsVoxelAsset, importModelAsVoxelAssetWithDiagnostics, vertexColorAt } from './model-import'
 
 const cubeObj = `
@@ -53,10 +54,13 @@ describe('模型转体素', () => {
     expect(solid.asset.voxels.length).toBeGreaterThan(surface.asset.voxels.length)
   })
 
-  it('uses neutral gray for OBJ voxels instead of the active brush material', async () => {
-    const result = await importModelAsVoxelAssetWithDiagnostics(new File([cubeObj], 'gray-default.obj'), { targetSizeVoxels: 8, mode: 'solid', materialId: 'terracotta' })
-    expect(result.asset.color).toBe('#a5a6a2')
-    expect(new Set(result.asset.voxels.map((voxel) => voxel.materialId))).toEqual(new Set(['#a5a6a2']))
+  it('maps neutral OBJ voxels into the supplied MARD palette while retaining their source colour', async () => {
+    const palette = MARD_221_ENTRIES.map((entry) => ({ id: entry.materialId, name: entry.name, color: entry.hex }))
+    const result = await importModelAsVoxelAssetWithDiagnostics(new File([cubeObj], 'gray-default.obj'), { targetSizeVoxels: 8, mode: 'solid', materialId: 'terracotta', palette })
+    const expected = nearestMardEntry('#a5a6a2')
+    expect(result.asset.color).toBe(expected.hex)
+    expect(new Set(result.asset.voxels.map((voxel) => voxel.materialId))).toEqual(new Set([expected.materialId]))
+    expect(new Set(result.asset.voxels.map((voxel) => voxel.sourceColor))).toEqual(new Set(['#a5a6a2']))
   })
 
   it('warns when solid mode receives an open mesh', async () => {
